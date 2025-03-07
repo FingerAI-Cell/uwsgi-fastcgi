@@ -134,7 +134,7 @@ class DataMilVus(DataProcessor):   #  args: (DataProcessor)
             host=self.args.ip_addr, 
             port='19530'
         )
-
+    
     def insert_data(self, m_data, collection_name, partition_name=None):
         collection = Collection(collection_name)
         collection.insert(m_data, partition_name)
