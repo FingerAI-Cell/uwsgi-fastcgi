@@ -25,3 +25,4 @@ datasets
 spacy
 pymilvus
 semantic-router
+FlagEmbedding
