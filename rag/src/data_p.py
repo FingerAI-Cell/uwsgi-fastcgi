@@ -1,11 +1,9 @@
 import pandas as pd 
 import numpy as np 
+import hashlib
 import os 
 
-class DataProcessor():
-    def __init__(self, args):
-        self.args = args 
-    
+class DataProcessor:    
     def cleanse_text(self, text):
         '''
         다중 줄바꿈 제거 및 특수 문자 중복 제거
@@ -16,6 +14,27 @@ class DataProcessor():
         text = re.sub(r"\.{1,}", ".", text)
         return text
 
+    def chunk_text(self, text, max_length=500, overlap=250):
+        """
+        벡터 임베딩 전, 텍스트 길이가 500자를 넘어가면 겹치는 부분(overlap)을 포함하여 분할.
+        - 이전 청크의 마지막 250자 + 새로운 250자로 구성
+        - 첫 번째 청크는 그대로 유지
+        - (text_chunk, chunk_no) 리스트 반환
+        """
+        if len(text) <= max_length:
+            return [(text, 1)]
+        
+        chunks = []
+        chunk_no = 1
+        chunks.append((text[:max_length], chunk_no))
+        chunk_no += 1
+
+        for i in range(max_length - overlap, len(text), max_length - overlap):
+            chunk = text[i:i+max_length]
+            chunks.append((chunk, chunk_no))
+            chunk_no += 1
+        return chunks
+
     def check_l2_threshold(self, txt, threshold, value):
         threshold_txt = '' 
         print(f'Euclidean Distance: {value}, Threshold: {threshold}')
@@ -25,36 +44,12 @@ class DataProcessor():
             threshold_txt = txt 
         return threshold_txt
 
+    def hash_text(self, text, hash_type):
+        if hash_type == 'blake':
+            hashed_text = hashlib.blake2b(text.encode()).hexdigest() 
+        elif hash_type == 'sha256':
+            hashed_text = hashlib.sha256(text.encode()).hexdigest()
+        return hashed_text
+
     def cohere_rerank(self, data):
         pass
-
-class VectorProcessor:
-    def set_gpu(self, model):
-        self.device = torch.device('cuda') if torch.cuda.is_available() else "cpu"
-        model.to(self.device)
-    
-    def set_emb_model(self, model_type):
-        if model_type == 'bge':
-            from FlagEmbedding import BGEM3FlagModel
-            model = BGEM3FlagModel('BAAI/bge-m3',  use_fp16=True)
-            return model
-        
-    def set_embbeding_config(self, batch_size=12, max_length=1024):
-        self.emb_config = {
-            "batch_size": batch_size, 
-            "max_length": max_length 
-        }
-    
-    def embed_data(self, model, text):
-        if isinstance(text, str):
-            # encode result  => dense_vecs, lexical weights, colbert_vecs
-            embeddings = model.encode(text, batch_size=self.emb_config['batch_size'], max_length=self.emb_config['max_length'])['dense_vecs']
-        else:       
-            embeddings = model.encode(list(text), batch_size=self.emb_config['batch_size'], max_length=self.emb_config['max_length'])['dense_vecs']  
-        embeddings = list(map(np.float32, embeddings))
-        return embeddings    
-
-    def calc_emb_similarity(self, emb1, emb2, metric='L2'):
-        if metric == 'L2':   # Euclidean distance
-            l2_distance = np.linalg.norm(emb1 - emb2)
-            return l2_distance

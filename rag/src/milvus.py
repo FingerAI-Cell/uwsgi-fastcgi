@@ -1,35 +1,56 @@
 from pymilvus import MilvusClient, DataType
 from pymilvus import connections, db
 from pymilvus import Collection, CollectionSchema, FieldSchema, utility
-from pymilvus import connections
-from .data_p import DataProcessor
 import logging
 
-class MilVus():
-    def __init__(self, args):
-        self.ip_addr = args['ip_addr'] 
-        self.port = '19530'
+class MilVus:
+    _connected = False 
+
+    def __init__(self, db_config):
+        self.db_config = db_config 
+        self.ip_addr = db_config['ip_addr'] 
+        self.port = db_config['port']
+        self.set_env()
+
+        if not MilVus._connected:
+            self.set_env()
+            MilVus._connected = True  # 연결 상태 업데이트
 
     def set_env(self):
         self.client = MilvusClient(
-            uri="http://" + self.ip_addr + ":19530", port=19530
+            uri="http://" + self.ip_addr + ":19530", port=self.port
         )
+        try:
+            conn = connections.get_connection("default")
+            if conn is not None and conn.connected():
+                print("Milvus already connected. Skipping reconnection.")
+                return
+        except Exception:
+            pass  # 연결이 없으면 새로운 연결 생성
+
         self.conn = connections.connect(
             alias="default", 
             host='finger-milvus-standalone',   # self.ip_addr 
-            port='19530'
+            port=self.port
         )
 
     def _get_data_type(self, dtype):
-        if dtype == 'int':
-            return DataType.INT64 
-        elif dtype == 'str':
-            return DataType.VARCHAR
-        elif dtype == 'float':
+        if dtype == "FLOAT_VECTOR":
             return DataType.FLOAT_VECTOR
-        return None
+        elif dtype == "INT64":
+            return DataType.INT64
+        elif dtype == "VARCHAR":
+            return DataType.VARCHAR
+        elif dtype == "JSON":
+            return DataType.JSON  # JSON 타입 추가
+        else:
+            raise ValueError(f"Unsupported data type: {dtype}")
 
-    def get_partition_info(self, collection):
+    def get_list_collection(self):
+        return utility.list_collections()
+
+    def get_partition_info(self, collection_name):
+        collection = Collection(collection_name)
         self.partitions = collection.partitions 
         self.partition_names = [] 
         self.partition_entities_num = [] 
@@ -39,27 +60,19 @@ class MilVus():
             self.partition_entities_num.append(partition.num_entities)
 
     def get_collection_info(self, collection_name):
-        print(f'collection info')
         collection = Collection(collection_name)
-        print(f'schema info: {collection.schema}') 
-        print(f'collection name: {collection.name}')
-        print(f'is collection empty ?: {collection.is_empty}')
-        print(f'num of data: {collection.num_entities}')
-        print(f'primary key of collection: {collection.primary_field}')
-        print(f'partition of collection: {collection.partition}')
+        self.collection_schema = collection.schema 
+        self.collection_name = collection.name 
+        self.collection_is_empty = collection.is_empty 
+        self.collection_primary_key = collection.primary_field
+        self.collection_partitions = collection.partition
+        self.num_entities = collection.num_entities
 
 
 class MilvusEnvManager(MilVus):
     def __init__(self, args):
         super().__init__(args)
         self.logger = logging.getLogger(__name__)
-
-    def create_db(self, db_name):
-        if not db.has_database(db_name):
-            db.create_database(db_name)
-            self.logger.info(f'Created database: {db_name}')
-        else:
-            self.logger.warning(f'Database {db_name} already exists.')
 
     def create_collection(self, collection_name, schema, shards_num):
         collection = Collection(
@@ -71,14 +84,34 @@ class MilvusEnvManager(MilVus):
         return collection 
 
     def create_field_schema(self, schema_name, dtype=None, dim=1024, max_length=200, is_primary=False):
-        data_type = self._get_data_type(dtype)
-        field_schema = FieldSchema(
-            name=schema_name,
-            dtype=data_type,
-            is_primary=is_primary,
-            dim=dim, 
-            max_length=max_length
-        )
+        data_type = self._get_data_type(dtype)   
+        if data_type == DataType.JSON:
+            field_schema = FieldSchema(
+                name=schema_name,
+                dtype=data_type,
+                is_primary=is_primary
+            )
+        elif data_type == DataType.INT64:
+            field_schema = FieldSchema(
+                name=schema_name,
+                dtype=data_type,
+                is_primary=is_primary,
+                default=0
+            )
+        elif data_type == DataType.FLOAT_VECTOR:
+            field_schema = FieldSchema(
+                name=schema_name,
+                dtype=data_type,
+                is_primariy=is_primary,
+                dim=dim 
+            )
+        elif data_type == DataType.VARCHAR:
+            field_schema = FieldSchema(
+                name=schema_name,
+                dtype=data_type,
+                is_primary=is_primary,
+                max_length=max_length 
+            )
         return field_schema
 
     def create_schema(self, field_schema_list, desc, enable_dynamic_field=True):
@@ -92,9 +125,9 @@ class MilvusEnvManager(MilVus):
 
     def create_index(self, collection, field_name):
         index_params = {
-            "metric_type": "L2",
-            "index_type": "IVF_FLAT",
-            "params": {"nlist": 65536},
+            "metric_type": f"{self.db_config['search_metric']}",
+            "index_type": f"{self.db_config['index_type']}",
+            "params": {"nlist": f"{self.db_config['index_nlist']}"},
         }   
         collection.create_index(
             field_name=field_name,
@@ -117,24 +150,24 @@ class MilvusEnvManager(MilVus):
             pass
     
 
-class DataMilVus(DataProcessor):   #  args: (DataProcessor)
+class DataMilVus(MilVus):   #  args: (DataProcessor)
     '''
     구축된 Milvus DB에 대한 data search, insert 등 작업 수행
     '''
-    def __init__(self, args):
-        super().__init__(args)
-        self.args = args
-
-    def set_env(self):
-        self.client = MilvusClient(
-            uri="http://" + self.args.ip_addr + ":19530", port=19530
-        )
-        self.conn = connections.connect(
-            alias="default", 
-            host=self.args.ip_addr, 
-            port='19530'
-        )
+    def __init__(self, db_config):
+        super().__init__(db_config)
     
+    def delete_data(self, filter, collection_name, filter_type='varchar'):
+        '''
+        ids: int  - 3  
+        expr: str  - "doc_id == 'doc_test'"  
+        '''
+        collection = Collection(collection_name)
+        if filter_type == 'int':        
+            collection.delete(ids=[filter])
+        elif filter_type == 'varchar':
+            collection.delete(expr=filter)
+
     def insert_data(self, m_data, collection_name, partition_name=None):
         collection = Collection(collection_name)
         collection.insert(m_data, partition_name)
@@ -142,11 +175,11 @@ class DataMilVus(DataProcessor):   #  args: (DataProcessor)
     def get_len_data(self, collection):
         print(collection.num_entities)
 
-    def set_search_params(self, query_emb, anns_field='text_emb', metric_type="L2", expr=None, limit=5, output_fields=None, consistency_level="Strong"):
+    def set_search_params(self, query_emb, anns_field='text_emb', expr=None, limit=5, output_fields=None, consistency_level="Strong"):
         self.search_params = {
             "data": [query_emb],
             "anns_field": anns_field, 
-            "param": {"metric_type": metric_type, "params": {"nprobe": 0}, "offset": 0},
+            "param": {"metric_type": self.db_config['search_metric'], "params": {"nprobe": 0}, "offset": 0},
             "limit": limit,
             "expr": expr, 
             "output_fields": [output_fields],
@@ -168,7 +201,15 @@ class DataMilVus(DataProcessor):   #  args: (DataProcessor)
     def decode_search_result(self, search_result):
         # print(f'ids: {search_result[0][0].id}')
         # print(f"entity: {search_result[0][0].entity.get('text')}") 
-        return search_result[0][0].entity.get('text')
+        texts = [] 
+        ids = []
+        distances = [] 
+        for idx in range(len(search_result[0])):
+            text = search_result[0][idx].entity.get('text') 
+            doc_id = search_result[0][idx].entity.get('id')
+            distance = search_result[0][idx].entity.get('distance')
+            texts.append(text)
+        return texts
 
     def rerank_data(self, search_result):
         pass 
