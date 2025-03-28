@@ -31,7 +31,7 @@ def main(args):
 
     schema = milvus_db.create_schema(schema_field_list, 'schema for fai-rag, using fastcgi')
     collection = milvus_db.create_collection(args.collection_name, schema, shards_num=2)
-    milvus_db.get_collection_info(args.d)
+    milvus_db.get_collection_info(args.collection_name)
     milvus_db.create_index(collection, field_name='text_emb')   # doc_id 필드에 index 생성 
 
 if __name__ == '__main__':

@@ -1,0 +1,12 @@
+2025-03-27 06:35:54,700 - api_logger - ERROR - Search error: <SchemaNotReadyException: (code=1, message=Collection 'news' not exist, or you can pass in schema to create one.)>
+2025-03-27 06:36:52,855 - api_logger - ERROR - Search error: <ParamError: (code=1, message=`output_fields` value [['doc_id', 'passage_id', 'domain', 'title', 'text', 'info', 'tags']] is illegal)>
+2025-03-27 06:42:28,966 - api_logger - ERROR - Search error: <MilvusException: (code=101, message=failed to search: collection not loaded[collection=456931168168460574])>
+2025-03-27 06:42:29,738 - api_logger - ERROR - Search error: <MilvusException: (code=101, message=failed to search: collection not loaded[collection=456931168168460574])>
+2025-03-27 06:42:39,218 - api_logger - ERROR - Search error: <MilvusException: (code=101, message=failed to search: collection not loaded[collection=456931168168460574])>
+2025-03-27 09:02:43,147 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'
+2025-03-27 09:02:48,449 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'
+2025-03-27 09:03:22,440 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'
+2025-03-27 09:05:14,663 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'
+2025-03-27 09:05:20,700 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'
+2025-03-27 09:05:24,167 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'
+2025-03-27 09:05:25,813 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'

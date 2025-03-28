@@ -10,7 +10,10 @@ services:
       - ETCD_QUOTA_BACKEND_BYTES=4294967296
       - ETCD_SNAPSHOT_COUNT=50000
     volumes:
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/etcd:/etcd
+      - /mnt/shared/workspace:/app/workspace  # 소스 코드 저장
+      - /mnt/shared/logs:/app/logs  # 로그 저장
+      - /mnt/shared/data:/app/data  # 데이터 저장
+#      - /volumes/etcd:/etcd
     command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
     healthcheck:
       test: ["CMD", "etcdctl", "endpoint", "health"]
@@ -29,8 +32,8 @@ services:
     ports:
       - "9001:9001"
       - "9000:9000"
-    volumes:
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
+#    volumes:
+ #     - /volumes/minio:/minio_data
     command: minio server /minio_data --console-address ":9001" --address ":9000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -51,7 +54,7 @@ services:
       MINIO_ADDRESS: minio:9000
     volumes:
       - ./milvus/milvus.yaml:/milvus/configs/milvus.yaml
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
+  #    - /volumes/milvus:/var/lib/milvus
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 30s
@@ -90,6 +93,7 @@ services:
     container_name: milvus-nginx
     volumes:
       - shared_tmp:/tmp 
+      - ./default.conf:/etc/nginx/conf.d/default.conf
     ports:
       - "80:80"
     depends_on:

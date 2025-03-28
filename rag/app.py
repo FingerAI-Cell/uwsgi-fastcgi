@@ -33,6 +33,7 @@ interact_manager = InteractManager(data_p=env_manager.data_p, vectorenv=milvus_d
 
 @app.route('/data/show', methods=['GET'])
 def show_data():
+    print(f"Search results")
     '''
     "collection_name": "news"   # news, description, etc ... 
     '''
@@ -56,28 +57,115 @@ def show_data():
 
 @app.route('/search', methods=['GET'])
 def search_data():
+    # 기본 검색 파라미터
     query_text = request.args.get('query_text')
     top_k = request.args.get('top_k', 5)
-    domain = request.args.get('domain')
+    domain = request.args.get('domain')  # 선택적 도메인 필터
 
-    if not domain:
-        return jsonify({"error": "유효한 도메인 이름을 입력해주세요"}), 400  # 400 Bad Request
+    # 추가 필터링 파라미터
+    start_date = request.args.get('start_date')  # YYYYMMDD 형식
+    end_date = request.args.get('end_date')      # YYYYMMDD 형식
+    title_query = request.args.get('title')      # 제목 검색
+    info_filter = request.args.get('info_filter') # JSON 형식의 info 필터 조건
+    tags_filter = request.args.get('tags_filter') # JSON 형식의 tags 필터 조건
+
+    if not query_text:
+        return jsonify({
+            "result_code": "F000001",
+            "message": "검색어(query_text)는 필수 입력값입니다.",
+            "search_result": None
+        }), 400
+
     try:
         top_k = int(top_k)
     except ValueError:
-        return jsonify({"error": "top_k 값은 숫자여야 합니다."}), 400
+        return jsonify({
+            "result_code": "F000002",
+            "message": "top_k 값은 숫자여야 합니다.",
+            "search_result": None
+        }), 400
+
+    # 날짜 형식 검증
+    if start_date or end_date:
+        date_error = None
+        if start_date:
+            if not (len(start_date) == 8 and start_date.isdigit() and 
+                   1900 <= int(start_date[:4]) <= 2100 and 
+                   1 <= int(start_date[4:6]) <= 12 and 
+                   1 <= int(start_date[6:]) <= 31):
+                date_error = "시작 날짜가 올바른 형식(YYYYMMDD)이 아닙니다."
+        if end_date:
+            if not (len(end_date) == 8 and end_date.isdigit() and 
+                   1900 <= int(end_date[:4]) <= 2100 and 
+                   1 <= int(end_date[4:6]) <= 12 and 
+                   1 <= int(end_date[6:]) <= 31):
+                date_error = "종료 날짜가 올바른 형식(YYYYMMDD)이 아닙니다."
+        if start_date and end_date and start_date > end_date:
+            date_error = "시작 날짜가 종료 날짜보다 늦을 수 없습니다."
+        
+        if date_error:
+            return jsonify({
+                "result_code": "F000006",
+                "message": date_error,
+                "search_result": None
+            }), 400
     
-    text = interact_manager.retrieve_data(query_text, top_k, domain)
-    print(f"Search results: {text}")
-    response_data = {
-        "message": "data search complete !",
-        "query_text": query_text, 
-        "top_k": top_k, 
-        "domain": domain, 
-        "results": text
-    }
-    return Response(json.dumps(response_data, ensure_ascii=False), content_type="application/json; charset=utf-8")
+    # 필터 조건 파싱
+    filter_conditions = {}
+    if domain:
+        filter_conditions['domain'] = domain
+    if start_date or end_date:
+        filter_conditions['date_range'] = {'start': start_date, 'end': end_date}
+    if title_query:
+        filter_conditions['title'] = title_query
+    if info_filter:
+        try:
+            filter_conditions['info'] = json.loads(info_filter)
+        except json.JSONDecodeError:
+            return jsonify({
+                "result_code": "F000003",
+                "message": "info_filter는 유효한 JSON 형식이어야 합니다.",
+                "search_result": None
+            }), 400
+    if tags_filter:
+        try:
+            filter_conditions['tags'] = json.loads(tags_filter)
+        except json.JSONDecodeError:
+            return jsonify({
+                "result_code": "F000004",
+                "message": "tags_filter는 유효한 JSON 형식이어야 합니다.",
+                "search_result": None
+            }), 400
     
+    try:
+        search_results = interact_manager.retrieve_data(
+            query_text, 
+            top_k, 
+            filter_conditions=filter_conditions
+        )
+        
+        response_data = {
+            "result_code": "F000000",
+            "message": "검색이 성공적으로 완료되었습니다.",
+            "search_params": {
+                "query_text": query_text,
+                "top_k": top_k,
+                "filters": filter_conditions
+            },
+            "search_result": search_results
+        }
+        
+        return Response(json.dumps(response_data, ensure_ascii=False), 
+                      content_type="application/json; charset=utf-8")
+                      
+    except Exception as e:
+        logger.error(f"Search error: {str(e)}")
+        return jsonify({
+            "result_code": "F000005",
+            "message": f"검색 중 오류가 발생했습니다: {str(e)}",
+            "search_result": None
+        }), 500
+
 @app.route('/insert', methods=['POST'])
 def insert_data():
     '''
@@ -119,9 +207,51 @@ def delete_data():
     interact_manager.delete_data(doc_domain, doc_id)
     return jsonify({"status": "receviced"}), 200
 
+@app.route('/document', methods=['GET'])
+def get_document():
+    doc_id = request.args.get('doc_id')
+    passage_id = request.args.get('passage_id')
+
+    if not doc_id:
+        return jsonify({
+            "error": "doc_id is required",
+            "message": "문서 ID는 필수 입력값입니다."
+        }), 400
+
+    try:
+        if passage_id:
+            # 특정 패시지 조회
+            result = interact_manager.get_specific_passage(doc_id, passage_id)
+            if not result:
+                return jsonify({
+                    "error": "Passage not found",
+                    "doc_id": doc_id,
+                    "passage_id": passage_id,
+                    "message": "요청하신 패시지를 찾을 수 없습니다."
+                }), 404
+            return Response(json.dumps(result, ensure_ascii=False), content_type="application/json; charset=utf-8")
+        else:
+            # 문서의 모든 패시지 조회
+            result = interact_manager.get_document_passages(doc_id)
+            if not result:
+                return jsonify({
+                    "error": "Document not found",
+                    "doc_id": doc_id,
+                    "message": "요청하신 문서를 찾을 수 없습니다."
+                }), 404
+            return Response(json.dumps(result, ensure_ascii=False), content_type="application/json; charset=utf-8")
+    except Exception as e:
+        logger.error(f"Error retrieving document: {str(e)}")
+        return jsonify({
+            "error": "Internal server error",
+            "message": "문서 조회 중 오류가 발생했습니다."
+        }), 500
+
 @app.route("/", methods=["GET"])
 def index():
+    print(f"hello results")
     return jsonify({"message": "Hello, FastCGI is working!"})
 
 if __name__ == "__main__":
+    print(f"Start results")
     app.run(host="0.0.0.0", port=5000)
