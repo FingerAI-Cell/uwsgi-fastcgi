@@ -1,0 +1,6 @@
+{
+    "model_name": "ms-marco-TinyBERT-L-2-v2",
+    "cache_dir": "/reranker/models",
+    "max_length": 512,
+    "batch_size": 32
+} 

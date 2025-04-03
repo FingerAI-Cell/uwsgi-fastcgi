@@ -1,0 +1,46 @@
+version: '3'
+
+services:
+  reranker:
+    build: ./reranker
+    container_name: milvus-reranker
+    volumes:
+      - ./reranker:/reranker
+      - shared_tmp:/tmp
+      - ./flashrank:/usr/local/lib/python3.10/site-packages/flashrank
+    environment:
+      - RERANKER_CONFIG=/reranker/config.json
+      # - FLASHRANK_MODEL=ko-reranker-v1.1
+      - FLASHRANK_MODEL=gte-multilingual-reranker-base
+      - FLASHRANK_CACHE_DIR=/reranker/models
+      - FLASHRANK_MAX_LENGTH=512
+      - FLASHRANK_BATCH_SIZE=32
+    networks:
+      - reranker_network
+      - milvus-net
+    ports:
+      - "9020:9020"  # FastCGI용 포트
+      - "8000:8000"  # 필요하면 FastAPI 직접 접근용
+    command: uwsgi --ini /reranker/uwsgi.ini
+  
+  nginx:
+    image: nginx:latest
+    container_name: reranker-nginx
+    volumes:
+      - shared_tmp:/tmp 
+      - ./reranker/default.conf:/etc/nginx/conf.d/default.conf
+    ports:
+      - "8080:8080"
+    depends_on:
+      - reranker
+    networks:
+      - reranker_network
+
+networks:
+  reranker_network:
+    driver: bridge
+  milvus-net:
+    external: true
+
+volumes:
+  shared_tmp: 
