@@ -24,8 +24,9 @@ COPY . .
 # 모델 디렉토리 생성
 RUN mkdir -p /reranker/models
 
-# 모델 다운로드 (빌드 시 다운로드)
-RUN python -c "from flashrank import Ranker; Ranker(model_name='ms-marco-TinyBERT-L-2-v2', cache_dir='/reranker/models')"
+# 모델 다운로드는 런타임에 환경변수를 통해 지정된 모델을 사용하도록 주석 처리
+# 필요한 경우 여기에서 기본 모델을 다운로드할 수 있습니다
+# RUN python -c "from flashrank import Ranker; Ranker(model_name='ms-marco-TinyBERT-L-2-v2', cache_dir='/reranker/models')"
 
 # 포트 노출
 EXPOSE 9020

@@ -10,9 +10,9 @@ services:
       - ETCD_QUOTA_BACKEND_BYTES=4294967296
       - ETCD_SNAPSHOT_COUNT=50000
     volumes:
-      - /mnt/shared/workspace:/app/workspace  # 소스 코드 저장
-      - /mnt/shared/logs:/app/logs  # 로그 저장
-      - /mnt/shared/data:/app/data  # 데이터 저장
+      - ./workspace:/app/workspace  # 소스 코드 저장
+      - ./logs:/app/logs  # 로그 저장
+      - ./data:/app/data  # 데이터 저장
 #      - /volumes/etcd:/etcd
     command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
     healthcheck:
