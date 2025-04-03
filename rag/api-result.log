@@ -10,5 +10,3 @@
 2025-03-27 09:05:20,700 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'
 2025-03-27 09:05:24,167 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'
 2025-03-27 09:05:25,813 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'
-2025-03-28 06:31:05,062 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'
-2025-03-28 06:32:16,057 - api_logger - ERROR - Error retrieving document: 'DataMilVus' object has no attribute 'get_collection'

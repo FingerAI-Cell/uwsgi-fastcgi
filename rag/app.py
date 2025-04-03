@@ -63,7 +63,6 @@ def search_data():
     domain = request.args.get('domain')  # 선택적 도메인 필터
 
     # 추가 필터링 파라미터
-    author = request.args.get('author')  # 작성자 필터 추가
     start_date = request.args.get('start_date')  # YYYYMMDD 형식
     end_date = request.args.get('end_date')      # YYYYMMDD 형식
     title_query = request.args.get('title')      # 제목 검색
@@ -115,8 +114,6 @@ def search_data():
     filter_conditions = {}
     if domain:
         filter_conditions['domain'] = domain
-    if author:  # 작성자 필터 추가
-        filter_conditions['author'] = author
     if start_date or end_date:
         filter_conditions['date_range'] = {'start': start_date, 'end': end_date}
     if title_query:
@@ -172,11 +169,10 @@ def search_data():
 @app.route('/insert', methods=['POST'])
 def insert_data():
     '''
-    doc_id: yyyymmdd-title-author   e.g) 20240301-메타버스 뉴스-삼성전자
+    doc_id: yyyymmdd-title   e.g) 20240301-메타버스 뉴스
     data: {
         "domain": "news"   - collection_name 
         "title": "메타버스 뉴스"
-        "author": "삼성전자"  # 작성자 (기업 또는 특정인물)
         "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다 ... "
         "info": {
             "press_num": "비즈니스 워치"
@@ -189,10 +185,10 @@ def insert_data():
     }
     '''
     data = request.json
-    doc_id = f"{data['tags']['date'].replace('-','')}-{data['title']}-{data['author']}"
+    doc_id = data['tags']['date'].replace('-','') + '-' + data['title']
     if data['domain'] not in milvus_db.get_list_collection():
         interact_manager.create_domain(data['domain'])
-    interact_manager.insert_data(data['domain'], doc_id, data['title'], data['author'], data['text'], data['info'], data['tags'])
+    interact_manager.insert_data(data['domain'], doc_id, data['title'], data['text'], data['info'], data['tags'])
     return jsonify({"status": "received"}), 200
 
 @app.route('/delete', methods=['DELETE'])
@@ -201,40 +197,15 @@ def delete_data():
     data: {
         "date": "20220804"
         "title": "메타버스%20뉴스"
-        "author": "삼성전자"  # 작성자 추가
         "domain": "news"
     }
     '''
     doc_date = request.args.get('date')
     doc_title = request.args.get('title')
-    doc_author = request.args.get('author')
     doc_domain = request.args.get('domain')
-    
-    # 필수 파라미터 체크
-    if not doc_date:
-        return jsonify({
-            "error": "date is required",
-            "message": "날짜(date)는 필수 입력값입니다."
-        }), 400
-    if not doc_title:
-        return jsonify({
-            "error": "title is required",
-            "message": "제목(title)은 필수 입력값입니다."
-        }), 400
-    if not doc_author:
-        return jsonify({
-            "error": "author is required",
-            "message": "작성자(author)는 필수 입력값입니다."
-        }), 400
-    if not doc_domain:
-        return jsonify({
-            "error": "domain is required",
-            "message": "도메인(domain)은 필수 입력값입니다."
-        }), 400
-        
-    doc_id = f"{doc_date.replace('-','')}-{doc_title}-{doc_author}"
+    doc_id = doc_date.replace('-','') + '-' + doc_title
     interact_manager.delete_data(doc_domain, doc_id)
-    return jsonify({"status": "received"}), 200
+    return jsonify({"status": "receviced"}), 200
 
 @app.route('/document', methods=['GET'])
 def get_document():

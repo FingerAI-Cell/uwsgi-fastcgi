@@ -87,7 +87,7 @@ services:
       - "9010:9010"  # FastCGI용 포트
       - "5000:5000"  # 필요하면 Flask 직접 접근용
     command: uwsgi --ini /rag/uwsgi.ini
-
+  
   nginx:
     image: nginx:latest
     container_name: milvus-nginx

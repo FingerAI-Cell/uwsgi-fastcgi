@@ -160,19 +160,6 @@ class DataMilVus(MilVus):   #  args: (DataProcessor)
     def __init__(self, db_config):
         super().__init__(db_config)
     
-    def get_collection(self, collection_name="news"):
-        """
-        기본 컬렉션을 가져옵니다. 지정하지 않으면 'news' 컬렉션 사용
-        """
-        print(f"[DEBUG] Getting collection: {collection_name}")
-        try:
-            collection = Collection(collection_name)
-            print(f"[DEBUG] Collection obtained successfully: {collection_name}")
-            return collection
-        except Exception as e:
-            print(f"[DEBUG] Error getting collection {collection_name}: {str(e)}")
-            raise
-    
     def delete_data(self, filter, collection_name, filter_type='varchar'):
         '''
         ids: int  - 3  
@@ -260,11 +247,6 @@ class DataMilVus(MilVus):   #  args: (DataProcessor)
                                             if entity_dict:
                                                 result_dict.update(entity_dict)
                                                 print(f"[DEBUG] Parsed entity string to dict: {entity_dict}")
-                                    
-                                    # fields 속성 확인 (직접 활용)
-                                    if hasattr(hit, 'fields') and hit.fields:
-                                        result_dict.update(hit.fields)
-                                        print(f"[DEBUG] Added fields dict: {hit.fields}")
                                     
                                     # id 속성 확인
                                     if hasattr(hit, 'id') and hit.id:
