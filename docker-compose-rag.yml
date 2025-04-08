@@ -1,7 +1,6 @@
 version: '3.5'
 
 services:
-  # Milvus 백엔드 서비스
   etcd:
     container_name: milvus-etcd
     image: quay.io/coreos/etcd:v3.5.5
@@ -14,6 +13,7 @@ services:
       - ./workspace:/app/workspace  # 소스 코드 저장
       - ./logs:/app/logs  # 로그 저장
       - ./data:/app/data  # 데이터 저장
+#      - /volumes/etcd:/etcd
     command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
     healthcheck:
       test: ["CMD", "etcdctl", "endpoint", "health"]
@@ -32,6 +32,8 @@ services:
     ports:
       - "9001:9001"
       - "9000:9000"
+#    volumes:
+ #     - /volumes/minio:/minio_data
     command: minio server /minio_data --console-address ":9001" --address ":9000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -52,6 +54,7 @@ services:
       MINIO_ADDRESS: minio:9000
     volumes:
       - ./milvus/milvus.yaml:/milvus/configs/milvus.yaml
+  #    - /volumes/milvus:/var/lib/milvus
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 30s
@@ -67,7 +70,6 @@ services:
     networks:
       - rag_network
     
-  # RAG 서비스
   rag:
     build: ./rag
     container_name: milvus-rag
@@ -86,59 +88,16 @@ services:
       - "5000:5000"  # 필요하면 Flask 직접 접근용
     command: uwsgi --ini /rag/uwsgi.ini
 
-  # Reranker 서비스
-  reranker:
-    build: ./reranker
-    container_name: milvus-reranker
-    volumes:
-      - ./reranker:/reranker
-      - shared_tmp:/tmp
-      - ./flashrank:/usr/local/lib/python3.10/site-packages/flashrank
-    environment:
-      - RERANKER_CONFIG=/reranker/config.json
-      - FLASHRANK_MODEL=gte-multilingual-reranker-base
-      - FLASHRANK_CACHE_DIR=/reranker/models
-      - FLASHRANK_MAX_LENGTH=512
-      - FLASHRANK_BATCH_SIZE=32
-    networks:
-      - rag_network
-    ports:
-      - "9020:9020"  # FastCGI용 포트
-      - "8000:8000"  # 필요하면 FastAPI 직접 접근용
-    command: uwsgi --ini /reranker/uwsgi.ini
-  
-  # API Gateway 서비스 추가
-  api-gateway:
-    build: ./api-gateway
-    container_name: api-gateway
-    volumes:
-      - ./api-gateway:/api-gateway
-      - shared_tmp:/tmp
-    environment:
-      - RAG_ENDPOINT=unix:///tmp/uwsgi.sock
-      - RERANKER_ENDPOINT=http://milvus-reranker:8000
-    ports:
-      - "3000:3000"
-    depends_on:
-      - rag
-      - reranker
-    networks:
-      - rag_network
-    command: uwsgi --ini /api-gateway/uwsgi.ini
-  
-  # 통합 Nginx
   nginx:
     image: nginx:latest
-    container_name: unified-nginx
+    container_name: milvus-nginx
     volumes:
       - shared_tmp:/tmp 
-      - ./config/default.conf:/etc/nginx/conf.d/default.conf
+      - ./rag/default.conf:/etc/nginx/conf.d/default.conf
     ports:
       - "80:80"
     depends_on:
       - rag
-      - reranker
-      - api-gateway
     networks:
       - rag_network
 
@@ -147,4 +106,4 @@ networks:
     external: true
 
 volumes:
-  shared_tmp: 
+  shared_tmp:

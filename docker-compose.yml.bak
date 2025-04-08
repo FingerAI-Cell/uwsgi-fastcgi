@@ -115,15 +115,15 @@ services:
       - ./api-gateway:/api-gateway
       - shared_tmp:/tmp
     environment:
-      - RAG_ENDPOINT=unix:///tmp/uwsgi.sock
+      - RAG_ENDPOINT=http://milvus-rag:5000
       - RERANKER_ENDPOINT=http://milvus-reranker:8000
+    networks:
+      - rag_network
     ports:
-      - "3000:3000"
+      - "3000:3000"  # 직접 접근용 포트
     depends_on:
       - rag
       - reranker
-    networks:
-      - rag_network
     command: uwsgi --ini /api-gateway/uwsgi.ini
   
   # 통합 Nginx
@@ -132,7 +132,7 @@ services:
     container_name: unified-nginx
     volumes:
       - shared_tmp:/tmp 
-      - ./config/default.conf:/etc/nginx/conf.d/default.conf
+      - ./unified-default.conf:/etc/nginx/conf.d/default.conf
     ports:
       - "80:80"
     depends_on:
