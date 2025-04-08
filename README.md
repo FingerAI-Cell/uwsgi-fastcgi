@@ -1,6 +1,8 @@
 # uwsgi-fastcgi
 A FastCGI-based setup for running Flask with uWSGI and Nginx using Docker Compose.
 
+> 현재 staging 브랜치에서 개발 중입니다.
+
 ## 사전 준비사항
 #### 1. Docker 및 Docker Compose 설치
 - Windows: Docker Desktop 설치
