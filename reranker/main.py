@@ -1,12 +1,24 @@
 """
-Reranker FastCGI application
+Reranker FastCGI application with API Gateway functionality
 """
 
 import os
 import json
+import logging
+import requests
+import requests_unixsocket
 from typing import Dict, List, Any, Optional
-from flask import Flask, request, Response
+from flask import Flask, request, Response, jsonify
 from pydantic import BaseModel, Field
+from urllib.parse import quote_plus
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+file_handler = logging.FileHandler('reranker.log')
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
 
 # 상대 경로 import 대신 절대 경로 import로 변경
 from service import RerankerService
@@ -40,9 +52,28 @@ class RerankerResponseModel(BaseModel):
 
 # Flask 앱 생성
 app = Flask(__name__)
+app.config['JSON_AS_ASCII'] = False
+
+# FastCGI 응답 형식 설정
+app.config['PROPAGATE_EXCEPTIONS'] = True
+app.config['PREFERRED_URL_SCHEME'] = 'http'
 
 # 서비스 인스턴스 생성
 reranker_service = None
+
+# RAG 서비스 엔드포인트 설정
+RAG_ENDPOINT = os.getenv('RAG_ENDPOINT', 'http://nginx/rag')
+
+# Unix 소켓 세션 생성
+rag_session = requests.Session()
+
+# FastCGI 응답 헤더 설정
+@app.after_request
+def add_header(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    return response
 
 
 def get_reranker_service():
@@ -61,6 +92,135 @@ def health_check():
         json.dumps({"status": "ok", "service": "reranker"}, ensure_ascii=False),
         mimetype='application/json; charset=utf-8'
     )
+
+
+@app.route("/reranker/enhanced-search", methods=['GET'])
+def enhanced_search():
+    """
+    통합 검색 API: RAG 검색 결과를 Reranker로 순위를 다시 매기는 기능
+    """
+    try:
+        # 파라미터 추출
+        query_text = request.args.get('query_text')
+        top_k = int(request.args.get('top_k', 5))
+        raw_results = int(request.args.get('raw_results', 20))
+        
+        # 필수 파라미터 검증
+        if not query_text:
+            return jsonify({
+                "result_code": "F000001",
+                "message": "검색어(query_text)는 필수 입력값입니다.",
+                "search_result": None
+            }), 400
+            
+        # Step 1: RAG 서비스에 검색 요청
+        search_params = {
+            'query_text': query_text,
+            'top_k': raw_results
+        }
+        
+        # 선택적 파라미터 추가
+        for param in ['domain', 'author', 'start_date', 'end_date', 'title']:
+            if request.args.get(param):
+                search_params[param] = request.args.get(param)
+                
+        # RAG 서비스 호출
+        logger.info(f"검색 요청: {search_params}")
+        rag_response = requests.get(f"{RAG_ENDPOINT}/search", params=search_params)
+        
+        if rag_response.status_code != 200:
+            logger.error(f"RAG 서비스 오류: {rag_response.text}")
+            return jsonify({
+                "result_code": "F000002",
+                "message": f"검색 서비스 오류: {rag_response.status_code}",
+                "search_result": None
+            }), 500
+            
+        rag_data = rag_response.json()
+        
+        # 검색 결과가 없으면 빈 결과 반환
+        if not rag_data.get('search_result') or len(rag_data['search_result']) == 0:
+            return jsonify({
+                "result_code": "F000003",
+                "message": "검색 결과가 없습니다.",
+                "search_result": []
+            }), 200
+            
+        # Step 2: Reranker 처리를 위한 데이터 준비
+        rerank_data = {
+            "query": query_text,
+            "results": []
+        }
+        
+        # RAG 결과를 Reranker 포맷으로 변환
+        for idx, result in enumerate(rag_data['search_result']):
+            passage = {
+                "passage_id": idx,
+                "doc_id": result.get('doc_id'),
+                "text": result.get('text'),
+                "score": result.get('score'),
+                "metadata": {
+                    "title": result.get('title'),
+                    "author": result.get('author'),
+                    "info": result.get('info'),
+                    "tags": result.get('tags')
+                }
+            }
+            rerank_data["results"].append(passage)
+            
+        # Step 3: Reranker 처리
+        try:
+            search_result = SearchResultModel(**rerank_data)
+            reranked = get_reranker_service().process_search_results(
+                search_result.query,
+                search_result.dict(),
+                top_k
+            )
+            
+            # 최종 결과 변환
+            final_results = []
+            for result in reranked.get('results', [])[:top_k]:
+                metadata = result.get('metadata', {})
+                final_result = {
+                    "doc_id": result.get('doc_id'),
+                    "text": result.get('text'),
+                    "score": result.get('score'),
+                    "title": metadata.get('title'),
+                    "author": metadata.get('author'),
+                    "info": metadata.get('info'),
+                    "tags": metadata.get('tags')
+                }
+                final_results.append(final_result)
+                
+            response_data = {
+                "result_code": "F000000",
+                "message": "검색 및 재랭킹이 성공적으로 완료되었습니다.",
+                "search_params": {
+                    "query_text": query_text,
+                    "top_k": top_k,
+                    "filters": {param: search_params[param] for param in search_params if param not in ['query_text', 'top_k']}
+                },
+                "search_result": final_results
+            }
+            
+            return Response(json.dumps(response_data, ensure_ascii=False), 
+                          content_type="application/json; charset=utf-8")
+                          
+        except Exception as e:
+            logger.error(f"재랭킹 처리 오류: {str(e)}")
+            return jsonify({
+                "result_code": "F000004",
+                "message": f"재랭킹 처리 중 오류가 발생했습니다: {str(e)}",
+                "search_result": None
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"통합 검색 오류: {str(e)}")
+        return jsonify({
+            "result_code": "F000005",
+            "message": f"통합 검색 중 오류가 발생했습니다: {str(e)}",
+            "search_result": None
+        }), 500
 
 
 @app.route("/reranker/rerank", methods=["POST"])

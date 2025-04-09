@@ -29,5 +29,5 @@ RUN apt-get update && \
 RUN ls -la /rag/
 RUN python -c "import sys; print(sys.path)"
 
-# 원래 uWSGI 명령으로 돌아감
-CMD ["uwsgi", "--socket", "0.0.0.0:9010", "--protocol=fastcgi", "--wsgi-file", "/rag/app.py", "--callable", "app", "--py-tracebacker", "/tmp/uwsgi-traceback", "--logto", "/tmp/uwsgi.log", "--log-level", "debug"]
+# FastCGI 설정으로 실행
+CMD ["uwsgi", "--ini", "/rag/uwsgi.ini"]

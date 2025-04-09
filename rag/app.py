@@ -16,6 +16,10 @@ logger.addHandler(file_handler)
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
 
+# FastCGI 응답 형식 설정
+app.config['PROPAGATE_EXCEPTIONS'] = True
+app.config['PREFERRED_URL_SCHEME'] = 'http'
+
 load_dotenv()
 args = dict()
 args['config_path'] = "./config"
@@ -31,7 +35,15 @@ milvus_data, milvus_meta = env_manager.set_vectordb()
 milvus_db = env_manager.milvus_db
 interact_manager = InteractManager(data_p=env_manager.data_p, vectorenv=milvus_db, vectordb=milvus_data, emb_model=emb_model)
 
-@app.route('/data/show', methods=['GET'])
+# FastCGI 응답 헤더 설정
+@app.after_request
+def add_header(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    return response
+
+@app.route('/rag/data/show', methods=['GET'])
 def show_data():
     print(f"Search results")
     '''
@@ -55,7 +67,7 @@ def show_data():
         "partition_nums": milvus_db.partition_entities_num,
     }), 200
 
-@app.route('/search', methods=['GET'])
+@app.route('/rag/search', methods=['GET'])
 def search_data():
     # 기본 검색 파라미터
     query_text = request.args.get('query_text')
@@ -169,7 +181,7 @@ def search_data():
             "search_result": None
         }), 500
 
-@app.route('/insert', methods=['POST'])
+@app.route('/rag/insert', methods=['POST'])
 def insert_data():
     '''
     doc_id: yyyymmdd-title-author   e.g) 20240301-메타버스 뉴스-삼성전자
@@ -195,7 +207,7 @@ def insert_data():
     interact_manager.insert_data(data['domain'], doc_id, data['title'], data['author'], data['text'], data['info'], data['tags'])
     return jsonify({"status": "received"}), 200
 
-@app.route('/delete', methods=['DELETE'])
+@app.route('/rag/delete', methods=['DELETE'])
 def delete_data():
     '''
     data: {
@@ -236,7 +248,7 @@ def delete_data():
     interact_manager.delete_data(doc_domain, doc_id)
     return jsonify({"status": "received"}), 200
 
-@app.route('/document', methods=['GET'])
+@app.route('/rag/document', methods=['GET'])
 def get_document():
     doc_id = request.args.get('doc_id')
     passage_id = request.args.get('passage_id')
@@ -276,7 +288,7 @@ def get_document():
             "message": "문서 조회 중 오류가 발생했습니다."
         }), 500
 
-@app.route("/", methods=["GET"])
+@app.route("/rag/", methods=["GET"])
 def index():
     print(f"hello results")
     return jsonify({"message": "Hello, FastCGI is working!"})

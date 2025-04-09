@@ -1,18 +1,19 @@
 # Core dependencies
-flask>=2.0.0
-pydantic>=2.0.0
-transformers>=4.30.0
-numpy>=1.24.0
+flask==2.0.1
+pydantic==1.8.2
+transformers==4.30.2
+numpy==1.24.3
 huggingface_hub>=0.16.0
-flashrank>=0.1.0
+flashrank==0.2.10
 
 # PyTorch (CPU version)
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.0.0+cpu
+torch==2.0.1
 
 # Additional dependencies
 python-multipart>=0.0.6
-requests>=2.31.0
+requests==2.26.0
+requests-unixsocket==0.2.0
 onnxruntime>=1.15.0
 tokenizers>=0.13.0
 
@@ -20,4 +21,8 @@ tokenizers>=0.13.0
 cohere>=4.0.0
 
 # Development dependencies
-pytest>=7.3.1 
+pytest>=7.3.1
+scikit-learn==1.2.2
+sentence-transformers==2.2.2
+python-dotenv==0.19.0
+uwsgi==2.0.20 

@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# 스크립트 시작 메시지 출력
-echo "=== RAG 시스템 종료 시작 ==="
+echo "=== 서비스 안전 종료 시작 ==="
 
 # 현재 디렉토리 확인 및 루트 디렉토리로 이동
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,14 +18,38 @@ if ! $DOCKER_CMD ps > /dev/null 2>&1; then
     fi
 fi
 
-# 서비스 중지
-echo "통합 서비스 중지 중..."
-if [[ "$DOCKER_CMD" == "sudo docker" ]]; then
-    sudo docker compose -f ./docker-compose.yml down -v
-else
-    docker compose -f ./docker-compose.yml down -v
-fi
+# 환경 변수 로드
+set -a
+source .env
+set +a
+
+# 서비스 종료
+case "$1" in
+  "full")
+    echo "🛑 모든 서비스 종료 중..."
+    $DOCKER_CMD compose --profile full down
+    ;;
+  "rag")
+    echo "🛑 RAG 서비스 종료 중..."
+    $DOCKER_CMD compose --profile rag-only down
+    ;;
+  "reranker")
+    echo "🛑 Reranker 서비스 종료 중..."
+    $DOCKER_CMD compose --profile reranker-only down
+    ;;
+  *)
+    echo "Usage: $0 {full|rag|reranker}"
+    echo "  full     - 모든 서비스 종료"
+    echo "  rag      - RAG 서비스만 종료"
+    echo "  reranker - Reranker 서비스만 종료"
+    exit 1
+    ;;
+esac
+
+# 소켓 파일 정리
+echo "🧹 소켓 파일 정리 중..."
+rm -f /tmp/rag.sock /tmp/reranker.sock 2>/dev/null || true
 
 echo "=== 종료 완료 ==="
-echo "모든 서비스가 중지되었습니다."
-echo "더 완전한 정리를 원하시면 cleanup.sh 스크립트를 실행하세요." 
+echo "✨ 서비스가 안전하게 종료되었습니다."
+echo "💡 도커 이미지와 볼륨은 유지됩니다. 전체 정리를 원하시면 cleanup.sh를 실행하세요." 

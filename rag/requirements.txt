@@ -11,7 +11,7 @@ matplotlib
 openai
 pandas
 uwsgi
-numpy<=2.0
+numpy==1.24.4
 peft
 pydantic
 pypdf
