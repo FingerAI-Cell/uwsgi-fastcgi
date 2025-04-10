@@ -1,0 +1,5 @@
+[33mcommit d8aebf2b8eaa3f2c0721178783fd60aa636b43bb[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mstaging[m[33m, [m[1;31morigin/staging[m[33m)[m
+Author: jungsh404 <jung-sh@naver.com>
+Date:   Thu Apr 10 17:20:44 2025 +0900
+
+    볼륨 처리 이슈 해결 파일권한+milvus 설정 파일 변경+볼륨위치 /var아래로
