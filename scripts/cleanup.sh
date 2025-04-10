@@ -57,7 +57,13 @@ done
 
 # nginx 설정 파일 정리
 echo "🧹 nginx 설정 파일 정리..."
-rm -f nginx/conf.d/*.conf
+# server_base.conf는 보존하고 다른 conf 파일만 삭제
+for conf in nginx/conf.d/*.conf; do
+  if [ "$(basename "$conf")" != "server_base.conf" ]; then
+    rm -f "$conf"
+  fi
+done
+rm -f nginx/locations-enabled/*.conf
 
 echo "=== 정리 완료 ==="
 echo "✨ 모든 도커 리소스가 정리되었습니다." 

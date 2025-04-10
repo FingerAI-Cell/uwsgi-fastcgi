@@ -40,17 +40,20 @@ mkdir volumes\logs\reranker 2>nul
 set "mode=%~1"
 echo nginx 설정 파일 설정 중 (%mode%)...
 
-:: conf.d 디렉토리 초기화
-del /f /q nginx\conf.d\*.conf 2>nul
+:: locations-enabled 디렉토리 확인
+mkdir nginx\locations-enabled 2>nul
 
 :: 모드에 따른 설정 파일 복사
 if "%mode%"=="full" (
-    copy /y nginx\conf.d.backup\rag.conf nginx\conf.d\ >nul
-    copy /y nginx\conf.d.backup\reranker.conf nginx\conf.d\ >nul
+    :: 둘 다 복사
+    copy /y nginx\templates\rag.conf.template nginx\locations-enabled\rag.conf >nul
+    copy /y nginx\templates\reranker.conf.template nginx\locations-enabled\reranker.conf >nul
 ) else if "%mode%"=="rag" (
-    copy /y nginx\conf.d.backup\rag.conf nginx\conf.d\ >nul
+    :: rag만 복사, reranker는 건드리지 않음
+    copy /y nginx\templates\rag.conf.template nginx\locations-enabled\rag.conf >nul
 ) else if "%mode%"=="reranker" (
-    copy /y nginx\conf.d.backup\reranker.conf nginx\conf.d\ >nul
+    :: reranker만 복사, rag는 건드리지 않음
+    copy /y nginx\templates\reranker.conf.template nginx\locations-enabled\reranker.conf >nul
 )
 
 :: nginx 재시작
@@ -66,19 +69,37 @@ if "%1"=="full" (
     echo Starting all services...
     call :setup_nginx full
     docker compose --profile full up -d
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+    docker restart milvus-standalone milvus-rag
 ) else if "%1"=="rag" (
     echo Starting RAG service...
     call :setup_nginx rag
     docker compose --profile rag-only up -d
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+    docker restart milvus-standalone milvus-rag
 ) else if "%1"=="reranker" (
     echo Starting Reranker service...
     call :setup_nginx reranker
     docker compose --profile reranker-only up -d
+) else if "%1"=="db" (
+    echo Starting database services only...
+    docker compose --profile db-only up -d
+) else if "%1"=="app-only" (
+    echo Starting application services only...
+    call :setup_nginx full
+    docker compose --profile app-only up -d
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
 ) else (
-    echo Usage: %0 {full^|rag^|reranker}
+    echo Usage: %0 {full^|rag^|reranker^|db^|app-only}
     echo   full     - Start all services
-    echo   rag      - Start RAG service only
+    echo   rag      - Start RAG service only (includes DB)
     echo   reranker - Start Reranker service only
+    echo   db       - Start database services only (Milvus, Etcd, MinIO)
+    echo   app-only - Start application services only (RAG, Reranker, Nginx)
+    echo             Use this for code changes when DB is already running
     exit /b 1
 )
 
@@ -93,9 +114,22 @@ if "%1"=="full" (
     echo - Reranker 서비스: http://localhost/reranker/
     echo - 통합 API: http://localhost/api/enhanced-search?query_text=검색어
 ) else if "%1"=="rag" (
-    echo - RAG 서비스: http://localhost/
+    echo - RAG 서비스: http://localhost/rag/
 ) else if "%1"=="reranker" (
-    echo - Reranker 서비스: http://localhost/
+    echo - Reranker 서비스: http://localhost/reranker/
     echo - API: http://localhost/api/enhanced-search?query_text=검색어
+) else if "%1"=="db" (
+    echo - 데이터베이스 서비스만 시작되었습니다. 애플리케이션 서비스는 시작되지 않았습니다.
+) else if "%1"=="app-only" (
+    echo - RAG 서비스: http://localhost/rag/
+    echo - Reranker 서비스: http://localhost/reranker/
+    echo - 통합 API: http://localhost/api/enhanced-search?query_text=검색어
 )
-echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin) 
+
+if "%1"=="full" (
+    echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
+) else if "%1"=="rag" (
+    echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
+) else if "%1"=="db" (
+    echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
+) 

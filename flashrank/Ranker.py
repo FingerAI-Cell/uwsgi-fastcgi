@@ -70,7 +70,8 @@ class Ranker:
                 self.hf_model = AutoModelForSequenceClassification.from_pretrained(
                     hf_model_name,
                     trust_remote_code=True,
-                    torch_dtype=torch.float16
+                    torch_dtype=torch.float32
+#                    torch_dtype=torch.float16 gpu 사용시 변경
                 )
                 self.hf_model.eval()
             except ImportError:

@@ -40,20 +40,23 @@ setup_nginx() {
     local mode=$1
     echo "nginx 설정 파일 설정 중 ($mode)..."
     
-    # conf.d 디렉토리 초기화
-    rm -f nginx/conf.d/*.conf
+    # locations-enabled 디렉토리 확인
+    mkdir -p nginx/locations-enabled
     
     # 모드에 따른 설정 파일 복사
     case "$mode" in
         "full")
-            cp nginx/conf.d.backup/rag.conf nginx/conf.d/
-            cp nginx/conf.d.backup/reranker.conf nginx/conf.d/
+            # 둘 다 복사
+            cp nginx/templates/rag.conf.template nginx/locations-enabled/rag.conf
+            cp nginx/templates/reranker.conf.template nginx/locations-enabled/reranker.conf
             ;;
         "rag")
-            cp nginx/conf.d.backup/rag.conf nginx/conf.d/
+            # rag만 복사, reranker는 건드리지 않음
+            cp nginx/templates/rag.conf.template nginx/locations-enabled/rag.conf
             ;;
         "reranker")
-            cp nginx/conf.d.backup/reranker.conf nginx/conf.d/
+            # reranker만 복사, rag는 건드리지 않음
+            cp nginx/templates/reranker.conf.template nginx/locations-enabled/reranker.conf
             ;;
     esac
     
@@ -95,11 +98,25 @@ case "$1" in
     setup_nginx "reranker"
     docker compose --profile reranker-only up -d
     ;;
+  "db")
+    echo "Starting database services only..."
+    docker compose --profile db-only up -d
+    ;;
+  "app-only")
+    echo "Starting application services only..."
+    setup_nginx "full"
+    docker compose --profile app-only up -d
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+    ;;
   *)
-    echo "Usage: $0 {full|rag|reranker}"
+    echo "Usage: $0 {full|rag|reranker|db|app-only}"
     echo "  full     - Start all services"
-    echo "  rag      - Start RAG service only"
+    echo "  rag      - Start RAG service only (includes DB)"
     echo "  reranker - Start Reranker service only"
+    echo "  db       - Start database services only (Milvus, Etcd, MinIO)"
+    echo "  app-only - Start application services only (RAG, Reranker, Nginx)"
+    echo "            Use this for code changes when DB is already running"
     exit 1
     ;;
 esac
@@ -110,14 +127,19 @@ $DOCKER_CMD ps | grep -E 'milvus|api-gateway|unified-nginx'
 
 echo "=== 셋업 완료 ==="
 echo "시스템이 가동되었습니다. 다음 URL로 접근할 수 있습니다:"
-if [ "$1" = "full" ]; then
+if [ "$1" = "full" ] || [ "$1" = "app-only" ]; then
     echo "- RAG 서비스: http://localhost/rag/"
     echo "- Reranker 서비스: http://localhost/reranker/"
     echo "- 통합 API: http://localhost/api/enhanced-search?query_text=검색어"
 elif [ "$1" = "rag" ]; then
-    echo "- RAG 서비스: http://localhost/"
+    echo "- RAG 서비스: http://localhost/rag/"
 elif [ "$1" = "reranker" ]; then
-    echo "- Reranker 서비스: http://localhost/"
+    echo "- Reranker 서비스: http://localhost/reranker/"
     echo "- API: http://localhost/api/enhanced-search?query_text=검색어"
+elif [ "$1" = "db" ]; then
+    echo "- 데이터베이스 서비스만 시작되었습니다. 애플리케이션 서비스는 시작되지 않았습니다."
 fi
-echo "- Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)" 
+
+if [ "$1" = "full" ] || [ "$1" = "rag" ] || [ "$1" = "db" ]; then
+    echo "- Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)"
+fi 

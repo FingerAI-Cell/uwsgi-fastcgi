@@ -55,7 +55,13 @@ del /f /q /tmp\reranker.sock 2>nul
 
 REM nginx 설정 파일 정리
 echo 🧹 nginx 설정 파일 정리...
-del /f /q nginx\conf.d\*.conf 2>nul
+REM server_base.conf는 보존하고 다른 conf 파일만 삭제
+for %%f in (nginx\conf.d\*.conf) do (
+    if /i not "%%~nxf"=="server_base.conf" (
+        del /f /q "%%f" 2>nul
+    )
+)
+del /f /q nginx\locations-enabled\*.conf 2>nul
 
 echo === 정리 완료 ===
 echo ✨ 모든 도커 리소스가 정리되었습니다. 
