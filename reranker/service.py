@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from flashrank import Ranker, RerankRequest
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class PassageModel(BaseModel):
@@ -67,17 +67,43 @@ class RerankerService:
         Args:
             config_path: Path to config file, if None, use default settings
         """
-        self.config = self._load_config(config_path)
-        self.model_name = os.getenv("FLASHRANK_MODEL", self.config.get("model_name", "ms-marco-TinyBERT-L-2-v2"))
-        self.cache_dir = os.getenv("FLASHRANK_CACHE_DIR", self.config.get("cache_dir", "/reranker/models"))
-        self.max_length = int(os.getenv("FLASHRANK_MAX_LENGTH", self.config.get("max_length", 512)))
-        
-        logger.info(f"Initializing FlashRank reranker with model: {self.model_name}")
-        self.ranker = Ranker(
-            model_name=self.model_name,
-            cache_dir=self.cache_dir,
-            max_length=self.max_length
-        )
+        try:
+            logger.debug("Loading configuration...")
+            self.config = self._load_config(config_path)
+            self.model_name = os.getenv("FLASHRANK_MODEL", self.config.get("model_name", "ms-marco-TinyBERT-L-2-v2"))
+            self.cache_dir = os.getenv("FLASHRANK_CACHE_DIR", self.config.get("cache_dir", "/reranker/models"))
+            self.max_length = int(os.getenv("FLASHRANK_MAX_LENGTH", self.config.get("max_length", 512)))
+            
+            logger.info(f"Initializing FlashRank reranker with model: {self.model_name}")
+            logger.debug(f"Cache directory: {self.cache_dir}")
+            logger.debug(f"Max length: {self.max_length}")
+            
+            # 모델 초기화를 try-except로 감싸서 실패해도 서비스는 계속 실행되도록 함
+            try:
+                logger.info("Starting model initialization...")
+                logger.debug(f"Model path: {os.path.join(self.cache_dir, self.model_name)}")
+                
+                # 모델 디렉토리 존재 여부 확인
+                if not os.path.exists(self.cache_dir):
+                    logger.info(f"Creating cache directory: {self.cache_dir}")
+                    os.makedirs(self.cache_dir, exist_ok=True)
+                
+                self.ranker = Ranker(
+                    model_name=self.model_name,
+                    cache_dir=self.cache_dir,
+                    max_length=self.max_length
+                )
+                logger.info("FlashRank reranker initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize FlashRank reranker: {str(e)}")
+                logger.error(f"Error type: {type(e)}")
+                logger.error(f"Error details: {str(e)}")
+                logger.info("Using dummy reranker for testing")
+                self.ranker = None
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize RerankerService: {str(e)}")
+            raise
     
     def _load_config(self, config_path: str = None) -> Dict[str, Any]:
         """
@@ -108,19 +134,24 @@ class RerankerService:
             logger.info("Using default configuration")
             return default_config
     
-    def process_search_results(self, query: str, search_result: Dict[str, Any], top_k: Optional[int] = None) -> Dict[str, Any]:
+    def process_search_results(self, query: str, search_result: Dict[str, Any], top_k: int = 5) -> Dict[str, Any]:
         """
-        Process search results using reranker
+        Process search results with reranking
         
         Args:
             query: Search query
             search_result: Search results to rerank
-            top_k: Number of results to return
+            top_k: Number of top results to return
             
         Returns:
             Reranked search results
         """
         try:
+            # 모델이 초기화되지 않은 경우 원본 결과를 그대로 반환
+            if self.ranker is None:
+                logger.warning("Reranker not initialized, returning original results")
+                return search_result
+                
             # Convert passages to FlashRank format
             passages = []
             for result in search_result["results"]:

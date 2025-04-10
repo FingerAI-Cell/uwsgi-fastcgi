@@ -13,12 +13,18 @@ from pydantic import BaseModel, Field
 from urllib.parse import quote_plus
 
 # 로깅 설정
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
-file_handler = logging.FileHandler('reranker.log')
+
+# 스트림 핸들러만 사용
+stream_handler = logging.StreamHandler()
+stream_handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
 
 # 상대 경로 import 대신 절대 경로 import로 변경
 from service import RerankerService
@@ -80,9 +86,39 @@ def get_reranker_service():
     """Get reranker service instance"""
     global reranker_service
     if reranker_service is None:
-        config_path = os.environ.get("RERANKER_CONFIG", "/reranker/config.json")
-        reranker_service = RerankerService(config_path)
+        try:
+            config_path = os.environ.get("RERANKER_CONFIG", "/reranker/config.json")
+            logger.info(f"Initializing RerankerService with config: {config_path}")
+            logger.info(f"Current working directory: {os.getcwd()}")
+            logger.info(f"Config file exists: {os.path.exists(config_path)}")
+            reranker_service = RerankerService(config_path)
+            logger.info("RerankerService initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize RerankerService: {str(e)}", exc_info=True)
+            logger.error("Using dummy reranker for testing")
+            reranker_service = DummyReranker()
     return reranker_service
+
+
+class DummyReranker:
+    """테스트용 더미 리랭커"""
+    def process_search_results(self, query: str, search_result: Dict, top_k: int = 5) -> Dict:
+        """원본 검색 결과를 그대로 반환"""
+        logger.warning("Using dummy reranker - returning original search results")
+        return search_result
+
+
+# 애플리케이션 시작 시 서비스 초기화
+@app.before_first_request
+def initialize_service():
+    """Initialize service before first request"""
+    try:
+        get_reranker_service()
+        logger.info("Service initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize service: {str(e)}")
+        # 초기화 실패해도 서비스는 계속 실행
+        pass
 
 
 @app.route("/reranker/health")
@@ -223,30 +259,36 @@ def enhanced_search():
         }), 500
 
 
-@app.route("/reranker/rerank", methods=["POST"])
-def rerank_passages():
+@app.route("/reranker/rerank", methods=['POST'])
+def rerank():
     """
-    Rerank search results based on query relevance
-    
-    Returns:
-        Reranked search results
+    Rerank passages endpoint
     """
     try:
+        # Get top_k parameter from query string
+        top_k = request.args.get('top_k', type=int)
+        
+        # Get request body
         data = request.get_json()
-        top_k = request.args.get("top_k", type=int)
-        
-        # Convert to SearchResultModel
-        search_result = SearchResultModel(**data)
-        
-        # Process search results
+        if not data:
+            return jsonify({
+                "error": "No JSON data provided"
+            }), 400
+            
+        # Validate input
+        try:
+            search_result = SearchResultModel(**data)
+        except Exception as e:
+            return jsonify({
+                "error": f"Invalid input format: {str(e)}"
+            }), 400
+            
+        # Process reranking
         reranked = get_reranker_service().process_search_results(
-            search_result.query, 
-            search_result.dict(), 
+            search_result.query,
+            search_result.dict(),
             top_k
         )
-        
-        # Set total value
-        reranked["total"] = len(reranked["results"])
         
         return Response(
             json.dumps(reranked, ensure_ascii=False),
@@ -254,11 +296,10 @@ def rerank_passages():
         )
         
     except Exception as e:
-        return Response(
-            json.dumps({"error": f"Reranking failed: {str(e)}"}, ensure_ascii=False),
-            status=500,
-            mimetype='application/json; charset=utf-8'
-        )
+        logger.error(f"Reranking failed: {str(e)}")
+        return jsonify({
+            "error": f"Reranking failed: {str(e)}"
+        }), 500
 
 
 @app.route("/reranker/batch_rerank", methods=["POST"])

@@ -19,7 +19,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends locales build-essential curl && \
     locale-gen ko_KR.UTF-8 && \
     apt-get install -y --no-install-recommends python3-pip && \
-    pip install --no-cache-dir uwsgi && \
+    #pip install --no-cache-dir uwsgi && \
     pip install --no-cache-dir -r requirements.txt && \
     apt-get clean && \
     apt-get autoremove -y && \

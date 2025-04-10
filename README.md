@@ -3,6 +3,8 @@ A FastCGI-based setup for running Flask with uWSGI and Nginx using Docker Compos
 
 > 현재 staging 브랜치에서 개발 중입니다.
 
+컨테이너가 실행된 후에 수동으로 pip install numpy==1.24.4를 실행
+
 ## 사전 준비사항
 #### 1. Docker 및 Docker Compose 설치
 - Windows: Docker Desktop 설치

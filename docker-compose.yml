@@ -90,9 +90,6 @@ services:
   #    - ./volumes/logs/nginx:/var/log/nginx
     ports:
       - "80:80"
-    depends_on:
-      - rag
-      - reranker
     networks:
       - rag_network
     profiles:

@@ -78,11 +78,17 @@ case "$1" in
     echo "Starting all services..."
     setup_nginx "full"
     docker compose --profile full up -d
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+    docker restart milvus-standalone milvus-rag
     ;;
   "rag")
     echo "Starting RAG service..."
     setup_nginx "rag"
     docker compose --profile rag-only up -d
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+    docker restart milvus-standalone milvus-rag
     ;;
   "reranker")
     echo "Starting Reranker service..."
