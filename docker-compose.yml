@@ -10,15 +10,31 @@ services:
       - ETCD_AUTO_COMPACTION_RETENTION=1000
       - ETCD_QUOTA_BACKEND_BYTES=4294967296
       - ETCD_SNAPSHOT_COUNT=50000
-#    volumes:
-#      - ./volumes/etcd:/etcd
-#      - ./volumes/logs/etcd:/var/log/etcd
-    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - /var/lib/milvus-data/etcd:/etcd
+      - /var/lib/milvus-data/logs/etcd:/var/log/etcd
+    command: /bin/sh -c "chmod -R 700 /etcd && etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd"
     healthcheck:
       test: ["CMD", "etcdctl", "endpoint", "health"]
       interval: 30s
       timeout: 20s
       retries: 3
+    depends_on:
+      - etcd_init
+    networks:
+      - rag_network
+    profiles:
+      - full
+      - rag-only
+      - db-only
+
+  # etcd 서비스 시작 전 권한 설정을 위한 초기화 서비스 추가
+  etcd_init:
+    container_name: milvus-etcd-init
+    image: alpine:latest
+    volumes:
+      - /var/lib/milvus-data/etcd:/etcd
+    command: sh -c "mkdir -p /etcd/member && chmod -R 700 /etcd && echo 'etcd 디렉토리 권한 설정 완료'"
     networks:
       - rag_network
     profiles:
@@ -35,9 +51,9 @@ services:
     ports:
       - "9001:9001"
       - "9000:9000"
- #   volumes:
- #     - ./volumes/minio:/minio_data
- #     - ./volumes/logs/minio:/var/log/minio
+    volumes:
+      - /var/lib/milvus-data/minio:/minio_data
+      - /var/lib/milvus-data/logs/minio:/var/log/minio
     command: minio server /minio_data --console-address ":9001" --address ":9000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -62,8 +78,8 @@ services:
       MINIO_ADDRESS: minio:9000
     volumes:
       - ./milvus/milvus.yaml:/milvus/configs/milvus.yaml
- #     - ./volumes/milvus:/var/lib/milvus
- #     - ./volumes/logs/milvus:/var/log/milvus
+      - /var/lib/milvus-data/milvus:/var/lib/milvus
+      - /var/lib/milvus-data/logs/milvus:/var/log/milvus
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 30s
@@ -74,7 +90,6 @@ services:
       - "19530:19530"
       - "9091:9091"
     depends_on:
-      - "etcd"
       - "minio"
     networks:
       - rag_network
@@ -91,7 +106,7 @@ services:
       - ./nginx/conf.d:/etc/nginx/conf.d
       - ./nginx/locations-enabled:/etc/nginx/locations-enabled
       - shared_tmp:/tmp
-  #    - ./volumes/logs/nginx:/var/log/nginx
+      - ./volumes/logs/nginx:/var/log/nginx
     ports:
       - "80:80"
     networks:
@@ -135,7 +150,7 @@ services:
     volumes:
       - ./reranker:/reranker
       - shared_tmp:/tmp
-#      - ./volumes/logs/reranker:/var/log/reranker
+      - ./volumes/logs/reranker:/var/log/reranker
       - ./flashrank:/usr/local/lib/python3.10/site-packages/flashrank
     environment:
       - RERANKER_CONFIG=/reranker/config.json

@@ -7,6 +7,76 @@ FastCGI 기반의 uWSGI와 Nginx를 사용하여 Docker Compose로 구성된 RAG
 - macOS: Docker Desktop 설치
 - Linux: Docker Engine 및 Docker Compose 설치
 
+#### 2. 볼륨 디렉토리 설정
+시스템은 데이터 저장을 위해 두 가지 볼륨 위치를 사용합니다:
+
+1. **내부 볼륨 `/var/lib/milvus-data/`** ⚠️ **(중요: Milvus DB 데이터 저장 위치)**
+   - Milvus 관련 컨테이너(etcd, minio, standalone)의 데이터 저장
+   - 권한 문제를 방지하기 위해 공유 폴더가 아닌 호스트 내부에 저장
+   - etcd 서비스는 엄격한 권한 요구사항(700)이 있음
+
+2. **로컬 볼륨 `./volumes/`** (로그 및 설정 파일용)
+   - 설정 파일 및 로그 파일 저장
+   - 개발 편의성을 위해 공유 폴더에 유지
+
+**VirtualBox 공유 폴더 주의사항**:
+공유 폴더는 Linux 권한 시스템을 완전히 지원하지 않을 수 있습니다. 따라서 권한 설정이 중요한 데이터베이스 컨테이너는 호스트 내부 볼륨을 사용합니다.
+
+**Linux 환경 설정**:
+```bash
+# 내부 볼륨 디렉토리 생성 (스크립트가 자동 실행)
+sudo mkdir -p /var/lib/milvus-data/{etcd,minio,milvus,logs/{etcd,minio,milvus}}
+sudo chown -R $(whoami):$(whoami) /var/lib/milvus-data
+chmod -R 700 /var/lib/milvus-data/etcd
+```
+
+**Windows WSL 환경 설정**:
+Windows 환경에서는 WSL 터미널에서 다음 명령을 실행해야 합니다:
+```bash
+# WSL 터미널에서 실행
+wsl -d Ubuntu sudo mkdir -p /var/lib/milvus-data/{etcd,minio,milvus,logs/{etcd,minio,milvus}}
+wsl -d Ubuntu sudo chown -R $(whoami):$(whoami) /var/lib/milvus-data
+wsl -d Ubuntu chmod -R 700 /var/lib/milvus-data/etcd
+```
+
+**권한 설정 검증**:
+setup.sh 스크립트는 볼륨 디렉토리 생성 후 자동으로 권한을 검증합니다:
+```
+내부 볼륨 권한 설정 확인 중...
+etcd 디렉토리 권한:
+drwx------ 5 사용자 사용자그룹 4096 월 일 시간 /var/lib/milvus-data/etcd
+소유권 확인:
+drwxr-xr-x 7 사용자 사용자그룹 4096 월 일 시간 /var/lib/milvus-data
+```
+etcd 디렉토리의 권한이 700(drwx------)으로 설정되었는지 확인하세요. 이 설정이 없으면 etcd 서비스가 정상 작동하지 않을 수 있습니다.
+
+만약 권한 설정에 문제가 발생한다면, setup.sh 스크립트를 다시 실행하거나 필요한 경우에만 주의해서 purge_volumes.sh 스크립트를 사용하세요. 주의: purge_volumes.sh는 데이터를 삭제할 수 있으므로 중요한 데이터는 먼저 백업하세요.
+
+## 시스템 요구사항
+
+전체 시스템(full 프로필)을 실행하기 위한 최소 요구사항입니다:
+
+| 구분 | 최소 요구사항 | 권장 사양 | 비고 |
+|------|-------------|-----------|------|
+| **CPU** | 2코어 | 4코어 이상 | Reranker 모델 실행 시 더 많은 코어가 성능 향상에 도움됨 |
+| **메모리(RAM)** | 8GB | 16GB | 총합: 최소 8GB 필요 |
+| └ Milvus | 4GB | 8GB | 벡터 검색 엔진 |
+| └ Reranker | 2GB | 4GB | 모델 로딩 시 더 많은 메모리 필요 가능 |
+| └ 기타 서비스 | 2GB | 4GB | Etcd, MinIO, Nginx, RAG 서비스 등 |
+| **디스크 공간** | 30GB | 50GB 이상 | 총합: 최소 30GB 필요 (실측 기준) |
+| └ RAG 이미지 | 19GB | 20GB | PyTorch 및 관련 라이브러리 포함 |
+| └ Reranker 이미지 | 2GB | 3GB | 모델 추론 관련 라이브러리 포함 |
+| └ 기타 이미지 | 2GB | 3GB | Nginx, Milvus, Etcd, MinIO 등 |
+| └ 컨테이너 런타임 | 5GB | 8GB | 컨테이너 실행 시 추가 공간 |
+| └ 벡터 데이터 | 2GB | 10GB+ | 데이터 양에 따라 크게 증가할 수 있음 |
+| └ 빌드 캐시 | 1GB | 3GB | 빌드 및 실행 캐시 |
+| └ 로그 및 기타 | 3GB | 8GB | 로그, 임시 파일 등 |
+
+**참고사항**:
+- 데이터 양이 증가함에 따라 디스크 공간 요구사항도 증가합니다.
+- 개발 환경에서는 최소 요구사항보다 낮은 사양으로도 작동할 수 있으나, 프로덕션 환경에서는 권장 사양 이상을 권장합니다.
+- 가상 머신이나 컨테이너 환경에서 실행 시 적절한 리소스 할당이 필요합니다.
+
 ## 프로젝트 구조
 ```
 (루트 디렉토리)
@@ -21,12 +91,21 @@ FastCGI 기반의 uWSGI와 Nginx를 사용하여 Docker Compose로 구성된 RAG
 ├── scripts/                  - 스크립트 디렉토리
 │   ├── setup.sh              - 서비스 시작 스크립트
 │   ├── cleanup.sh            - 도커 리소스 정리 스크립트
+│   ├── purge_volumes.sh      - 로컬 볼륨 완전 제거 스크립트
 │   └── shutdown.sh           - 서비스 종료 스크립트
-├── volumes/                  - 영구 데이터 저장 디렉토리
-│   ├── etcd/                 - Etcd 데이터
+├── volumes/                  - 로컬 로그 저장 디렉토리
+│   └── logs/                 - 로그 디렉토리
+│       ├── nginx/            - Nginx 로그
+│       ├── rag/              - RAG 서비스 로그
+│       └── reranker/         - Reranker 서비스 로그
+├── /var/lib/milvus-data/    - 호스트 내부 데이터 볼륨
+│   ├── etcd/                 - Etcd 데이터 
 │   ├── minio/                - MinIO 데이터
 │   ├── milvus/               - Milvus 데이터
-│   └── logs/                 - 로그 디렉토리
+│   └── logs/                 - DB 관련 로그
+│       ├── etcd/             - Etcd 로그
+│       ├── minio/            - MinIO 로그
+│       └── milvus/           - Milvus 로그
 ├── rag/                      - RAG 서비스 디렉토리
 ├── reranker/                 - Reranker 서비스 디렉토리
 ├── milvus/                   - Milvus 설정 디렉토리
@@ -64,6 +143,9 @@ $ docker compose down
 
 # 도커 리소스 완전 정리 (모든 컨테이너, 관련 이미지, 볼륨, 네트워크 삭제)
 $ ./scripts/cleanup.sh
+
+# 로컬 볼륨 디렉토리 완전 제거 (모든 데이터 삭제)
+$ ./scripts/purge_volumes.sh
 ```
 
 ### 2. 서비스 상태 확인
@@ -82,6 +164,7 @@ $ docker logs milvus-nginx
 #### 서비스 엔드포인트
 - RAG 서비스: **http://localhost/rag/**
 - Reranker 서비스: **http://localhost/reranker/**
+- 통합 API: **http://localhost/reranker/enhanced-search**
 - Milvus UI: **http://localhost:9001** (사용자: minioadmin, 비밀번호: minioadmin)
 
 ### 4. Nginx 설정
@@ -114,7 +197,7 @@ $ docker restart milvus-nginx
 ### 5. 서비스 동작 확인
 ```bash
 # RAG 서비스 상태 확인
-$ curl http://localhost/rag/health
+$ curl http://localhost/rag/
 
 # Reranker 서비스 상태 확인
 $ curl http://localhost/reranker/health
@@ -191,9 +274,18 @@ curl -X POST http://localhost/reranker/batch_rerank?top_k=3 \
       ]
     }
   ]'
+```
 
-# 상태 확인 API
-curl -X GET http://localhost/reranker/health
+#### 통합 API (Enhanced Search)
+```bash
+# 통합 검색 API (RAG + Reranker)
+curl -X GET "http://localhost/reranker/enhanced-search?query_text=인공지능&top_k=5&domain=news"
+
+# 필터링을 포함한 통합 검색 API
+curl -X GET "http://localhost/reranker/enhanced-search?query_text=메타버스&top_k=5&domain=tech&author=삼성전자&start_date=20230101&end_date=20231231"
+
+# 상세 파라미터를 포함한 통합 검색 API
+curl -X GET "http://localhost/reranker/enhanced-search?query_text=인공지능&top_k=5&search_k=10&rerank_k=5&domain=news"
 ```
 
 ### 7. 시스템 아키텍처
@@ -240,6 +332,40 @@ $ ./scripts/setup.sh app-only
   - MinIO 데이터: `./volumes/minio/`
   - Milvus 데이터: `./volumes/milvus/`
   - 로그 데이터: `./volumes/logs/`
+
+#### 데이터 초기화
+
+시스템 데이터를 완전히 초기화하는 방법은 두 가지가 있습니다:
+
+1. **Docker 리소스만 정리 (볼륨 데이터 유지)**
+   ```bash
+   # Linux/macOS
+   $ ./scripts/cleanup.sh
+   
+   # Windows
+   $ .\scripts\windows\cleanup.bat
+   ```
+   이 명령은 Docker 컨테이너, 이미지, 볼륨을 삭제하지만, 로컬 파일 시스템의 볼륨 데이터는 그대로 유지됩니다.
+
+2. **로컬 볼륨 디렉토리 완전 제거 (모든 데이터 삭제)**
+   ```bash
+   # Linux/macOS
+   $ ./scripts/purge_volumes.sh
+   
+   # Windows
+   $ .\scripts\windows\purge_volumes.bat
+   ```
+   이 명령은 로컬 `volumes` 디렉토리를 완전히 삭제하고 빈 디렉토리 구조를 다시 생성합니다. 모든 데이터가 영구적으로 삭제되므로 주의하세요.
+
+> **참고**: Linux/macOS에서 실행 권한 오류가 발생하면 다음 명령으로 실행 권한을 부여하세요:
+> ```bash
+> $ chmod +x scripts/cleanup.sh scripts/purge_volumes.sh scripts/setup.sh
+> ```
+
+**완전한 초기화를 위한 권장 순서**:
+1. 먼저 `cleanup.sh`/`cleanup.bat`으로 Docker 리소스 정리
+2. 그 다음 `purge_volumes.sh`/`purge_volumes.bat`으로 로컬 볼륨 초기화
+3. 마지막으로 `setup.sh full`로 시스템 재시작
 
 ### 10. 문제 해결
 

@@ -65,5 +65,15 @@ for conf in nginx/conf.d/*.conf; do
 done
 rm -f nginx/locations-enabled/*.conf
 
+# etcd 디렉토리 권한 설정
+echo "🔒 etcd 디렉토리 권한 설정..."
+mkdir -p volumes/etcd
+chmod 700 volumes/etcd
+if [ -n "$SUDO_USER" ]; then
+    chown -R $SUDO_USER:$SUDO_USER volumes/etcd
+else
+    chown -R $(whoami):$(whoami) volumes/etcd
+fi
+
 echo "=== 정리 완료 ==="
 echo "✨ 모든 도커 리소스가 정리되었습니다." 

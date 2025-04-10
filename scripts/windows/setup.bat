@@ -24,13 +24,14 @@ if errorlevel 1 (
     echo rag_network가 이미 존재합니다.
 )
 
-:: 볼륨 디렉토리 생성
-mkdir volumes\etcd 2>nul
-mkdir volumes\minio 2>nul
-mkdir volumes\milvus 2>nul
-mkdir volumes\logs\etcd 2>nul
-mkdir volumes\logs\minio 2>nul
-mkdir volumes\logs\milvus 2>nul
+:: WSL 또는 VM 내부 볼륨 디렉토리 생성 (Windows 환경)
+echo VM 또는 WSL에 데이터 디렉토리 생성을 확인하세요...
+echo WSL 환경을 사용하는 경우 다음 명령을 WSL 터미널에서 실행하세요:
+echo wsl -d Ubuntu sudo mkdir -p /var/lib/milvus-data/{etcd,minio,milvus,logs/{etcd,minio,milvus}}
+echo wsl -d Ubuntu sudo chown -R $(whoami):$(whoami) /var/lib/milvus-data
+echo wsl -d Ubuntu chmod -R 700 /var/lib/milvus-data/etcd
+
+:: 로컬 볼륨 디렉토리 생성 (설정 파일과 로그용)
 mkdir volumes\logs\nginx 2>nul
 mkdir volumes\logs\rag 2>nul
 mkdir volumes\logs\reranker 2>nul

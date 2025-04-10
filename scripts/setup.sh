@@ -31,9 +31,29 @@ fi
 echo "Docker 네트워크 생성 중..."
 $DOCKER_CMD network create rag_network 2>/dev/null || echo "rag_network가 이미 존재합니다."
 
-# 볼륨 디렉토리 생성
-mkdir -p volumes/etcd volumes/minio volumes/milvus
-mkdir -p volumes/logs/{etcd,minio,milvus,nginx,rag,reranker}
+# 호스트 내부 볼륨 디렉토리 생성 (공유 폴더 권한 문제 해결)
+echo "호스트 내부 볼륨 디렉토리 생성 중..."
+sudo mkdir -p /var/lib/milvus-data/{etcd,minio,milvus,logs/{etcd,minio,milvus}}
+sudo chown -R $(whoami):$(whoami) /var/lib/milvus-data
+chmod -R 700 /var/lib/milvus-data/etcd
+
+# 권한 설정 검증
+echo "내부 볼륨 권한 설정 확인 중..."
+echo "etcd 디렉토리 권한:"
+ls -ld /var/lib/milvus-data/etcd
+
+ETCD_PERM=$(stat -c %a /var/lib/milvus-data/etcd 2>/dev/null || echo "0")
+if [ "$ETCD_PERM" != "700" ]; then
+    echo "경고: etcd 디렉토리 권한이 700이 아닙니다. 다시 설정합니다."
+    chmod -R 700 /var/lib/milvus-data/etcd
+    ls -ld /var/lib/milvus-data/etcd
+fi
+
+echo "소유권 확인:"
+ls -ld /var/lib/milvus-data
+
+# 로컬 볼륨 디렉토리 생성 (설정 파일과 로그용)
+mkdir -p ./volumes/logs/{nginx,rag,reranker}
 
 # nginx 설정 파일 관리
 setup_nginx() {
