@@ -1,4 +1,5 @@
-version: '3.5'
+# Docker Compose 설정
+# version: '3.5' 제거 (더 이상 사용되지 않음)
 
 services:
   # Milvus 백엔드 서비스

@@ -7,23 +7,36 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT_DIR" || exit 1
 
-# 설정 파일 경로
-CONFIG_FILE="config/storage.json"
+# 설정 파일 경로 (절대 경로 사용)
+CONFIG_DIR="$ROOT_DIR/config"
+CONFIG_FILE="$CONFIG_DIR/storage.json"
+
+# config 디렉토리 생성
+mkdir -p "$CONFIG_DIR"
 
 # Milvus 데이터 경로 확인
 DEFAULT_MILVUS_PATH="/var/lib/milvus-data"
 if [ -f "$CONFIG_FILE" ]; then
-    STORED_PATH=$(jq -r '.milvus_data_path' "$CONFIG_FILE" 2>/dev/null)
-    if [ ! -z "$STORED_PATH" ] && [ "$STORED_PATH" != "null" ]; then
+    echo "설정 파일 ($CONFIG_FILE) 을 읽었습니다."
+    echo "설정 파일 내용:"
+    cat "$CONFIG_FILE"
+    echo
+    
+    # jq 대신 grep과 sed를 사용하여 milvus_data_path 값을 추출
+    STORED_PATH=$(grep -o '"milvus_data_path"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"milvus_data_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    if [ ! -z "$STORED_PATH" ]; then
+        echo "설정된 경로를 찾았습니다: $STORED_PATH"
         MILVUS_PATH=$STORED_PATH
     else
+        echo "설정된 경로를 찾을 수 없어 기본값을 사용합니다."
         MILVUS_PATH=$DEFAULT_MILVUS_PATH
     fi
 else
+    echo "설정 파일이 없어 기본값을 사용합니다: $DEFAULT_MILVUS_PATH"
     MILVUS_PATH=$DEFAULT_MILVUS_PATH
+    echo
 fi
 
-# 경고 메시지
 echo "⚠️ 경고: 이 스크립트는 모든 로컬 볼륨 디렉토리와 데이터를 영구적으로 삭제합니다!"
 echo "이 작업은 취소할 수 없으며, 모든 저장된 데이터가 손실됩니다."
 echo "중요한 데이터는 먼저 백업하세요."

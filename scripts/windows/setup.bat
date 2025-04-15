@@ -49,12 +49,11 @@ if exist "%CONFIG_FILE%" (
 
 :: 사용자 입력 안내
 echo ============= Milvus 데이터 경로 설정 =============
-echo 현재 스크립트 실행 위치: %CD%
+echo 현재 프로젝트 루트 디렉토리: %CD%
 echo 다음과 같은 형식의 경로를 입력할 수 있습니다:
 echo 1. 절대 경로 (예: /var/lib/milvus-data)
-echo 2. 현재 디렉토리 기준 상대 경로 (예: ./data/milvus)
-echo 3. 상위 디렉토리 기준 상대 경로 (예: ../data/milvus)
-echo ※ 주의: 상대 경로는 현재 디렉토리(%CD%)를 기준으로 처리됩니다.
+echo 2. 프로젝트 루트 기준 상대 경로 (예: ./data/milvus)
+echo ※ 주의: './data/milvus'와 같이 입력하면 '%CD%\data\milvus'로 처리됩니다.
 echo ※ 권장: 데이터 관리를 위해 절대 경로 사용을 권장합니다.
 echo ==================================================
 set /p "INPUT_PATH=Milvus 데이터 저장 경로를 입력하세요 (기본값: %MILVUS_PATH%): "
@@ -66,16 +65,41 @@ if "!INPUT_PATH!"=="" (
 
 :: 상대 경로를 절대 경로로 변환
 if "!INPUT_PATH:~0,2!"=="./" (
-    for %%i in ("!INPUT_PATH!") do set "INPUT_PATH=!CD!\%%~nxi"
-    echo 상대 경로가 다음 절대 경로로 변환되었습니다: !INPUT_PATH!
-) else if "!INPUT_PATH:~0,3!"=="../" (
-    pushd "!INPUT_PATH!" 2>nul
+    :: 디렉토리 부분과 파일명 부분 분리
+    for %%i in ("!INPUT_PATH!") do (
+        set "DIR_PART=%%~dpi"
+        set "BASE_PART=%%~nxi"
+    )
+    
+    :: 상위 디렉토리가 없어도 mkdir로 생성
+    mkdir "!DIR_PART!" 2>nul
+    
+    :: 절대 경로로 변환
+    pushd "!DIR_PART!" 2>nul
     if not errorlevel 1 (
-        set "INPUT_PATH=!CD!"
+        set "INPUT_PATH=!CD!\!BASE_PART!"
         popd
         echo 상대 경로가 다음 절대 경로로 변환되었습니다: !INPUT_PATH!
     ) else (
-        echo 오류: 올바르지 않은 경로입니다.
+        echo 오류: 디렉토리 생성 또는 접근에 실패했습니다.
+        exit /b 1
+    )
+) else if "!INPUT_PATH:~0,3!"=="../" (
+    :: 상위 디렉토리 처리도 동일하게
+    for %%i in ("!INPUT_PATH!") do (
+        set "DIR_PART=%%~dpi"
+        set "BASE_PART=%%~nxi"
+    )
+    
+    mkdir "!DIR_PART!" 2>nul
+    
+    pushd "!DIR_PART!" 2>nul
+    if not errorlevel 1 (
+        set "INPUT_PATH=!CD!\!BASE_PART!"
+        popd
+        echo 상대 경로가 다음 절대 경로로 변환되었습니다: !INPUT_PATH!
+    ) else (
+        echo 오류: 디렉토리 생성 또는 접근에 실패했습니다.
         exit /b 1
     )
 )
@@ -89,18 +113,26 @@ echo } >> "%CONFIG_FILE%"
 
 echo 설정이 저장되었습니다: %CONFIG_FILE%
 
-:: WSL 또는 VM 내부 볼륨 디렉토리 생성 (Windows 환경)
+:: WSL 또는 VM 내부 볼륨 디렉토리 생성 안내
 echo VM 또는 WSL에 데이터 디렉토리 생성을 확인하세요...
 echo WSL 환경을 사용하는 경우 다음 명령을 WSL 터미널에서 실행하세요:
-echo wsl -d Ubuntu sudo mkdir -p /var/lib/milvus-data/{etcd,minio,milvus,logs/{etcd,minio,milvus}}
-echo wsl -d Ubuntu sudo chown -R $(whoami):$(whoami) /var/lib/milvus-data
-echo wsl -d Ubuntu chmod -R 700 /var/lib/milvus-data/etcd
+echo wsl -d Ubuntu sudo mkdir -p "%INPUT_PATH%/{etcd,minio,milvus,logs/{etcd,minio,milvus}}"
+echo wsl -d Ubuntu sudo chown -R $(whoami):$(whoami) "%INPUT_PATH%"
+echo wsl -d Ubuntu chmod -R 700 "%INPUT_PATH%/etcd"
 
 :: 로컬 볼륨 디렉토리 생성 (설정 파일과 로그용)
 mkdir volumes\logs\nginx 2>nul
 mkdir volumes\logs\rag 2>nul
 mkdir volumes\logs\reranker 2>nul
 mkdir volumes\logs\prompt 2>nul
+
+:: 권한 설정 검증
+echo 내부 볼륨 권한 설정 확인 중...
+echo etcd 디렉토리 권한:
+dir "%INPUT_PATH%\etcd" 2>nul
+
+echo 소유권 확인:
+dir "%INPUT_PATH%" 2>nul
 
 :: nginx 설정 파일 관리
 :setup_nginx

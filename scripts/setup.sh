@@ -31,8 +31,8 @@ fi
 echo "Docker 네트워크 생성 중..."
 $DOCKER_CMD network create rag_network 2>/dev/null || echo "rag_network가 이미 존재합니다."
 
-# 설정 파일 경로
-CONFIG_DIR="$(dirname "$0")/../config"
+# 설정 파일 경로 (절대 경로 사용)
+CONFIG_DIR="$ROOT_DIR/config"
 CONFIG_FILE="$CONFIG_DIR/storage.json"
 
 # 설정 파일 디렉토리 생성
@@ -40,23 +40,27 @@ mkdir -p "$CONFIG_DIR"
 
 # 기본 경로
 DEFAULT_MILVUS_PATH="/var/lib/milvus-data"
+CURRENT_MILVUS_PATH=""
 
 # 설정 파일이 있으면 읽기
 if [ -f "$CONFIG_FILE" ]; then
-    STORED_PATH=$(jq -r '.milvus_data_path' "$CONFIG_FILE" 2>/dev/null)
-    if [ ! -z "$STORED_PATH" ] && [ "$STORED_PATH" != "null" ]; then
-        DEFAULT_MILVUS_PATH=$STORED_PATH
+    # jq 대신 grep과 sed를 사용하여 milvus_data_path 값을 추출
+    STORED_PATH=$(grep -o '"milvus_data_path"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"milvus_data_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    if [ ! -z "$STORED_PATH" ]; then
+        CURRENT_MILVUS_PATH=$STORED_PATH
     fi
 fi
 
 # 사용자 입력 안내
 echo "============= Milvus 데이터 경로 설정 ============="
-echo "현재 스크립트 실행 위치: $(pwd)"
+echo "현재 프로젝트 루트 디렉토리: $(pwd)"
+if [ ! -z "$CURRENT_MILVUS_PATH" ]; then
+    echo "현재 설정된 경로: $CURRENT_MILVUS_PATH"
+fi
 echo "다음과 같은 형식의 경로를 입력할 수 있습니다:"
-echo "1. 절대 경로 (예: /var/lib/milvus-data)"
-echo "2. 현재 디렉토리 기준 상대 경로 (예: ./data/milvus)"
-echo "3. 상위 디렉토리 기준 상대 경로 (예: ../data/milvus)"
-echo "※ 주의: 상대 경로는 현재 디렉토리($(pwd))를 기준으로 처리됩니다."
+echo "1. 절대 경로 (예: $DEFAULT_MILVUS_PATH)"
+echo "2. 프로젝트 루트 기준 상대 경로 (예: ./data/milvus)"
+echo "※ 주의: './data/milvus'와 같이 입력하면 '$(pwd)/data/milvus'로 처리됩니다."
 echo "※ 권장: 데이터 관리를 위해 절대 경로 사용을 권장합니다."
 echo "=================================================="
 echo -n "Milvus 데이터 저장 경로를 입력하세요 (기본값: $DEFAULT_MILVUS_PATH): "
@@ -64,13 +68,28 @@ read MILVUS_PATH
 
 # 입력이 없으면 기본값 사용
 if [ -z "$MILVUS_PATH" ]; then
+    echo "기본값을 사용합니다: $DEFAULT_MILVUS_PATH"
     MILVUS_PATH=$DEFAULT_MILVUS_PATH
 fi
 
 # 상대 경로를 절대 경로로 변환
 if [[ "$MILVUS_PATH" =~ ^\./ ]] || [[ "$MILVUS_PATH" =~ ^\.\./ ]]; then
-    MILVUS_PATH="$(cd "$(dirname "$MILVUS_PATH")" && pwd)/$(basename "$MILVUS_PATH")"
-    echo "상대 경로가 다음 절대 경로로 변환되었습니다: $MILVUS_PATH"
+    # 디렉토리 부분과 파일명 부분 분리
+    DIR_PART=$(dirname "$MILVUS_PATH")
+    BASE_PART=$(basename "$MILVUS_PATH")
+    
+    # 상위 디렉토리가 없어도 mkdir로 생성
+    mkdir -p "$DIR_PART"
+    
+    # 절대 경로로 변환 (디렉토리 생성 후)
+    ABSOLUTE_DIR=$(cd "$DIR_PART" && pwd)
+    if [ $? -eq 0 ]; then
+        MILVUS_PATH="$ABSOLUTE_DIR/$BASE_PART"
+        echo "상대 경로가 다음 절대 경로로 변환되었습니다: $MILVUS_PATH"
+    else
+        echo "오류: 디렉토리 생성 또는 접근에 실패했습니다."
+        exit 1
+    fi
 fi
 
 # 경로 유효성 검사
@@ -79,11 +98,14 @@ if [[ ! "$MILVUS_PATH" =~ ^/ ]]; then
     exit 1
 fi
 
-# 경로 생성 시도
+# 경로 생성
+echo "데이터 디렉토리 생성 중..."
 if ! mkdir -p "$MILVUS_PATH" 2>/dev/null; then
     echo "오류: 경로를 생성할 수 없습니다. 권한을 확인해주세요."
     exit 1
 fi
+
+echo "Milvus 데이터 경로: $MILVUS_PATH"
 
 # 설정 저장
 cat > "$CONFIG_FILE" << EOF
@@ -94,7 +116,7 @@ cat > "$CONFIG_FILE" << EOF
 }
 EOF
 
-echo "설정이 저장되었습니다: $CONFIG_FILE"
+echo "설정 파일 위치: $CONFIG_FILE"
 
 # Milvus 관련 디렉토리 생성
 echo "Milvus 데이터 디렉토리 생성 중..."
@@ -107,17 +129,17 @@ export MILVUS_DATA_PATH="$MILVUS_PATH"
 # 권한 설정 검증
 echo "내부 볼륨 권한 설정 확인 중..."
 echo "etcd 디렉토리 권한:"
-ls -ld /var/lib/milvus-data/etcd
+ls -ld "$MILVUS_PATH/etcd"
 
-ETCD_PERM=$(stat -c %a /var/lib/milvus-data/etcd 2>/dev/null || echo "0")
+ETCD_PERM=$(stat -c %a "$MILVUS_PATH/etcd" 2>/dev/null || echo "0")
 if [ "$ETCD_PERM" != "700" ]; then
     echo "경고: etcd 디렉토리 권한이 700이 아닙니다. 다시 설정합니다."
-    chmod -R 700 /var/lib/milvus-data/etcd
-    ls -ld /var/lib/milvus-data/etcd
+    chmod -R 700 "$MILVUS_PATH/etcd"
+    ls -ld "$MILVUS_PATH/etcd"
 fi
 
 echo "소유권 확인:"
-ls -ld /var/lib/milvus-data
+ls -ld "$MILVUS_PATH"
 
 # 로컬 볼륨 디렉토리 생성 (설정 파일과 로그용)
 mkdir -p ./volumes/logs/{nginx,rag,reranker,prompt}
@@ -158,9 +180,15 @@ setup_nginx() {
             ;;
     esac
     
-    # 소켓 파일 권한 설정
-    touch /tmp/rag.sock /tmp/reranker.sock /tmp/prompt.sock
-    chmod 666 /tmp/rag.sock /tmp/reranker.sock /tmp/prompt.sock
+    # 소켓 파일 권한 설정 (공유 폴더 고려)
+    for sock in /tmp/rag.sock /tmp/reranker.sock /tmp/prompt.sock; do
+        if [ -S "$sock" ]; then
+            chmod 666 "$sock" 2>/dev/null || true
+        else
+            touch "$sock" 2>/dev/null || true
+            chmod 666 "$sock" 2>/dev/null || true
+        fi
+    done
     
     # nginx 재시작
     if $DOCKER_CMD ps | grep -q milvus-nginx; then
