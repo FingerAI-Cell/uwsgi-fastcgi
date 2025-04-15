@@ -28,7 +28,7 @@ sudo rm -rf /var/lib/milvus-data
 
 # 재생성 - 로컬 디렉토리 (설정 파일과 로그용)
 echo "📁 기본 볼륨 디렉토리 구조 재생성 중..."
-mkdir -p volumes/logs/{nginx,rag,reranker}
+mkdir -p volumes/logs/{nginx,rag,reranker,prompt}
 
 # 재생성 - 호스트 내부 디렉토리
 echo "📁 내부 볼륨 디렉토리 구조 재생성 중..."

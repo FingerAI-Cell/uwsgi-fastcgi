@@ -34,6 +34,7 @@ echo 📁 기본 볼륨 디렉토리 구조 재생성 중...
 mkdir volumes\logs\nginx 2>nul
 mkdir volumes\logs\rag 2>nul
 mkdir volumes\logs\reranker 2>nul
+mkdir volumes\logs\prompt 2>nul
 
 echo === 작업 완료 ===
 echo ✅ 로컬 볼륨 디렉토리가 초기화되었습니다.

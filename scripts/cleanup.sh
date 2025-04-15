@@ -48,7 +48,7 @@ $DOCKER_CMD builder prune -a --force
 
 # 소켓 파일 정리
 echo "🧹 소켓 파일 정리..."
-for sock in /tmp/rag.sock /tmp/reranker.sock; do
+for sock in /tmp/rag.sock /tmp/reranker.sock /tmp/prompt.sock; do
     if [ -S "$sock" ]; then
         echo "소켓 파일 삭제 중: $sock"
         rm -f "$sock"

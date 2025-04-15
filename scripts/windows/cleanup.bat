@@ -52,6 +52,7 @@ REM 소켓 파일 정리
 echo 🧹 소켓 파일 정리...
 del /f /q /tmp\rag.sock 2>nul
 del /f /q /tmp\reranker.sock 2>nul
+del /f /q /tmp\prompt.sock 2>nul
 
 REM nginx 설정 파일 정리
 echo 🧹 nginx 설정 파일 정리...

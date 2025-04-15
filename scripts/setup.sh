@@ -53,7 +53,7 @@ echo "소유권 확인:"
 ls -ld /var/lib/milvus-data
 
 # 로컬 볼륨 디렉토리 생성 (설정 파일과 로그용)
-mkdir -p ./volumes/logs/{nginx,rag,reranker}
+mkdir -p ./volumes/logs/{nginx,rag,reranker,prompt}
 
 # nginx 설정 파일 관리
 setup_nginx() {
@@ -62,27 +62,38 @@ setup_nginx() {
     
     # locations-enabled 디렉토리 확인
     mkdir -p nginx/locations-enabled
+    rm -f nginx/locations-enabled/*.conf
     
     # 모드에 따른 설정 파일 복사
     case "$mode" in
-        "full")
-            # 둘 다 복사
+        "all")
+            # 모두 복사
             cp nginx/templates/rag.conf.template nginx/locations-enabled/rag.conf
             cp nginx/templates/reranker.conf.template nginx/locations-enabled/reranker.conf
+            cp nginx/templates/prompt.conf.template nginx/locations-enabled/prompt.conf
             ;;
         "rag")
-            # rag만 복사, reranker는 건드리지 않음
+            # rag만 복사
             cp nginx/templates/rag.conf.template nginx/locations-enabled/rag.conf
             ;;
         "reranker")
-            # reranker만 복사, rag는 건드리지 않음
+            # reranker만 복사
+            cp nginx/templates/reranker.conf.template nginx/locations-enabled/reranker.conf
+            ;;
+        "prompt")
+            # prompt만 복사
+            cp nginx/templates/prompt.conf.template nginx/locations-enabled/prompt.conf
+            ;;
+        "rag-reranker")
+            # rag와 reranker만 복사
+            cp nginx/templates/rag.conf.template nginx/locations-enabled/rag.conf
             cp nginx/templates/reranker.conf.template nginx/locations-enabled/reranker.conf
             ;;
     esac
     
     # 소켓 파일 권한 설정
-    touch /tmp/rag.sock /tmp/reranker.sock
-    chmod 666 /tmp/rag.sock /tmp/reranker.sock
+    touch /tmp/rag.sock /tmp/reranker.sock /tmp/prompt.sock
+    chmod 666 /tmp/rag.sock /tmp/reranker.sock /tmp/prompt.sock
     
     # nginx 재시작
     if $DOCKER_CMD ps | grep -q milvus-nginx; then
@@ -95,18 +106,81 @@ setup_nginx() {
 export UWSGI_PROTOCOL=fastcgi
 export UWSGI_CHMOD_SOCKET=666
 
+# 사용 가능한 서비스 목록
+prompt_services=(
+    "rag_reranker" # RAG + Reranker 서비스 조합
+    "prompt" # Prompt 서비스
+    "rag" # RAG 서비스
+    "reranker" # Reranker 서비스
+    "milvus" # Milvus 서비스만
+    "ollama" # Ollama 서비스 (CPU)
+    "ollama-gpu" # Ollama 서비스 (GPU)
+    "prompt_ollama" # Prompt + Ollama 서비스 조합 (CPU)
+    "prompt_ollama-gpu" # Prompt + Ollama 서비스 조합 (GPU)
+    "all" # 모든 서비스 (CPU 모드)
+    "all-gpu" # 모든 서비스 (GPU 모드)
+    "app-only" # 앱 서비스만 (CPU 모드)
+    "app-only-gpu" # 앱 서비스만 (GPU 모드)
+)
+
+# 각 서비스 별 프로필 목록
+declare -A profiles=(
+    ["rag_reranker"]="app-only"
+    ["prompt"]="prompt-only"
+    ["rag"]="rag-only"
+    ["reranker"]="reranker-only"
+    ["milvus"]="db-only"
+    ["ollama"]="ollama-only,cpu-only"
+    ["ollama-gpu"]="gpu-only"
+    ["prompt_ollama"]="prompt-only,ollama-only,cpu-only"
+    ["prompt_ollama-gpu"]="prompt-only,gpu-only"
+    ["all"]="all,cpu-only"
+    ["all-gpu"]="all,gpu-only"
+    ["app-only"]="app-only,cpu-only"
+    ["app-only-gpu"]="app-only,gpu-only"
+)
+
 # 서비스 시작
 case "$1" in
-  "full")
-    echo "Starting all services..."
-    setup_nginx "full"
-    docker compose --profile full up -d
+  "all")
+    echo "모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(CPU) + DB)"
+    setup_nginx "all"
+    docker compose --profile all --profile cpu-only up -d
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
     docker restart milvus-standalone milvus-rag
+    
+    # 모델 다운로드 스크립트 실행
+    echo "Ollama 모델 다운로드 중..."
+    # 컨테이너가 완전히 시작될 때까지 잠시 대기
+    sleep 3
+    # 컨테이너가 실행 중인지 확인
+    if docker ps | grep -q milvus-ollama-cpu; then
+      # 모델 다운로드 시도
+      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
+    fi
+    ;;
+  "all-gpu")
+    echo "모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(GPU) + DB)"
+    setup_nginx "all"
+    docker compose --profile all --profile gpu-only up -d
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+    docker restart milvus-standalone milvus-rag
+    
+    # 모델 다운로드 스크립트 실행
+    echo "Ollama 모델 다운로드 중..."
+    sleep 3
+    if docker ps | grep -q milvus-ollama-gpu; then
+      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
+    fi
     ;;
   "rag")
-    echo "Starting RAG service..."
+    echo "RAG 서비스 시작 중... (RAG + DB)"
     setup_nginx "rag"
     docker compose --profile rag-only up -d
     docker exec -it milvus-rag pip uninstall numpy -y
@@ -114,52 +188,136 @@ case "$1" in
     docker restart milvus-standalone milvus-rag
     ;;
   "reranker")
-    echo "Starting Reranker service..."
+    echo "Reranker 서비스만 시작 중..."
     setup_nginx "reranker"
     docker compose --profile reranker-only up -d
     ;;
-  "db")
-    echo "Starting database services only..."
-    docker compose --profile db-only up -d
+  "prompt")
+    echo "Prompt 서비스만 시작 중..."
+    setup_nginx "prompt"
+    docker compose --profile prompt-only up -d
     ;;
-  "app-only")
-    echo "Starting application services only..."
-    setup_nginx "full"
-    docker compose --profile app-only up -d
+  "rag-reranker")
+    echo "RAG + Reranker 서비스 시작 중... (DB 포함)"
+    setup_nginx "rag-reranker"
+    # 커스텀 프로필 대신 실행할 서비스 명시
+    docker compose up -d nginx rag reranker standalone etcd etcd_init minio
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
+    docker restart milvus-standalone milvus-rag
+    ;;
+  "db")
+    echo "데이터베이스 서비스만 시작 중..."
+    docker compose --profile db-only up -d
+    ;;
+  "ollama")
+    echo "Ollama 서비스 시작 중... (CPU 모드)"
+    docker compose --profile ollama-only --profile cpu-only up -d
+    # 모델 다운로드 스크립트 실행
+    echo "Ollama 모델 다운로드 중..."
+    # 컨테이너가 완전히 시작될 때까지 잠시 대기
+    sleep 3
+    # 컨테이너가 실행 중인지 확인
+    if docker ps | grep -q milvus-ollama-cpu; then
+      # 모델 다운로드 시도
+      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
+    fi
+    ;;
+  "ollama-gpu")
+    echo "Ollama 서비스 시작 중... (GPU 모드)"
+    docker compose --profile gpu-only up -d
+    # 모델 다운로드 스크립트 실행
+    echo "Ollama 모델 다운로드 중..."
+    # 컨테이너가 완전히 시작될 때까지 잠시 대기
+    sleep 3
+    # 컨테이너가 실행 중인지 확인
+    if docker ps | grep -q milvus-ollama-gpu; then
+      # 모델 다운로드 시도
+      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
+    fi
+    ;;
+  "prompt_ollama")
+    echo "Prompt와 Ollama 서비스 조합 시작 중... (CPU 모드)"
+    setup_nginx "prompt"
+    docker compose --profile prompt-only --profile ollama-only --profile cpu-only up -d
+    # 모델 다운로드 스크립트 실행
+    echo "Ollama 모델 다운로드 중..."
+    # 컨테이너가 완전히 시작될 때까지 잠시 대기
+    sleep 3
+    # 컨테이너가 실행 중인지 확인
+    if docker ps | grep -q milvus-ollama-cpu; then
+      # 모델 다운로드 시도
+      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
+    fi
+    ;;
+  "prompt_ollama-gpu")
+    echo "Prompt와 Ollama 서비스 조합 시작 중... (GPU 모드)"
+    setup_nginx "prompt"
+    docker compose --profile prompt-only --profile gpu-only up -d
+    # 모델 다운로드 스크립트 실행
+    echo "Ollama 모델 다운로드 중..."
+    # 컨테이너가 완전히 시작될 때까지 잠시 대기
+    sleep 3
+    # 컨테이너가 실행 중인지 확인
+    if docker ps | grep -q milvus-ollama-gpu; then
+      # 모델 다운로드 시도
+      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
+    fi
+    ;;
+  "app-only")
+    echo "앱 서비스만 시작 중... (RAG + Reranker + Prompt + Ollama(CPU), DB 제외)"
+    setup_nginx "all"
+    docker compose up -d nginx rag reranker prompt ollama
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+    
+    # 모델 다운로드 스크립트 실행
+    echo "Ollama 모델 다운로드 중..."
+    sleep 3
+    if docker ps | grep -q milvus-ollama-cpu; then
+      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
+    fi
+    ;;
+  "app-only-gpu")
+    echo "앱 서비스만 시작 중... (RAG + Reranker + Prompt + Ollama(GPU), DB 제외)"
+    setup_nginx "all"
+    docker compose up -d nginx rag reranker prompt ollama-gpu
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+    
+    # 모델 다운로드 스크립트 실행
+    echo "Ollama 모델 다운로드 중..."
+    sleep 3
+    if docker ps | grep -q milvus-ollama-gpu; then
+      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
+    fi
     ;;
   *)
-    echo "Usage: $0 {full|rag|reranker|db|app-only}"
-    echo "  full     - Start all services"
-    echo "  rag      - Start RAG service only (includes DB)"
-    echo "  reranker - Start Reranker service only"
-    echo "  db       - Start database services only (Milvus, Etcd, MinIO)"
-    echo "  app-only - Start application services only (RAG, Reranker, Nginx)"
-    echo "            Use this for code changes when DB is already running"
-    exit 1
+    echo "Usage: $0 {all|all-gpu|rag|reranker|prompt|rag-reranker|db|app-only|app-only-gpu|ollama|prompt_ollama|ollama-gpu|prompt_ollama-gpu}"
+    echo "  all         - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(CPU) + DB)"
+    echo "  all-gpu      - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(GPU) + DB)"
+    echo "  rag          - RAG 서비스만 시작 (DB 포함)"
+    echo "  reranker     - Reranker 서비스만 시작"
+    echo "  prompt       - Prompt 서비스만 시작"
+    echo "  rag-reranker - RAG와 Reranker 서비스 시작 (DB 포함)"
+    echo "  db           - 데이터베이스 서비스만 시작 (Milvus, Etcd, MinIO)"
+    echo "  app-only     - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(CPU), DB 제외)"
+    echo "  app-only-gpu - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(GPU), DB 제외)"
+    echo "  ollama       - Ollama 서비스만 시작 (CPU 모드)"
+    echo "  ollama-gpu   - Ollama 서비스만 시작 (GPU 모드)"
+    echo "  prompt_ollama - Prompt와 Ollama 서비스 조합 (CPU 모드)"
+    echo "  prompt_ollama-gpu - Prompt와 Ollama 서비스 조합 (GPU 모드)"
     ;;
 esac
-
-# 서비스 상태 확인
-echo "서비스 상태 확인 중..."
-$DOCKER_CMD ps | grep -E 'milvus|api-gateway|unified-nginx'
-
-echo "=== 셋업 완료 ==="
-echo "시스템이 가동되었습니다. 다음 URL로 접근할 수 있습니다:"
-if [ "$1" = "full" ] || [ "$1" = "app-only" ]; then
-    echo "- RAG 서비스: http://localhost/rag/"
-    echo "- Reranker 서비스: http://localhost/reranker/"
-    echo "- 통합 API: http://localhost/api/enhanced-search?query_text=검색어"
-elif [ "$1" = "rag" ]; then
-    echo "- RAG 서비스: http://localhost/rag/"
-elif [ "$1" = "reranker" ]; then
-    echo "- Reranker 서비스: http://localhost/reranker/"
-    echo "- API: http://localhost/api/enhanced-search?query_text=검색어"
-elif [ "$1" = "db" ]; then
-    echo "- 데이터베이스 서비스만 시작되었습니다. 애플리케이션 서비스는 시작되지 않았습니다."
-fi
-
-if [ "$1" = "full" ] || [ "$1" = "rag" ] || [ "$1" = "db" ]; then
-    echo "- Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)"
-fi 

@@ -35,6 +35,7 @@ echo wsl -d Ubuntu chmod -R 700 /var/lib/milvus-data/etcd
 mkdir volumes\logs\nginx 2>nul
 mkdir volumes\logs\rag 2>nul
 mkdir volumes\logs\reranker 2>nul
+mkdir volumes\logs\prompt 2>nul
 
 :: nginx 설정 파일 관리
 :setup_nginx
@@ -43,17 +44,26 @@ echo nginx 설정 파일 설정 중 (%mode%)...
 
 :: locations-enabled 디렉토리 확인
 mkdir nginx\locations-enabled 2>nul
+del /q nginx\locations-enabled\*.conf 2>nul
 
 :: 모드에 따른 설정 파일 복사
-if "%mode%"=="full" (
-    :: 둘 다 복사
+if "%mode%"=="all" (
+    :: 모두 복사
     copy /y nginx\templates\rag.conf.template nginx\locations-enabled\rag.conf >nul
     copy /y nginx\templates\reranker.conf.template nginx\locations-enabled\reranker.conf >nul
+    copy /y nginx\templates\prompt.conf.template nginx\locations-enabled\prompt.conf >nul
 ) else if "%mode%"=="rag" (
-    :: rag만 복사, reranker는 건드리지 않음
+    :: rag만 복사
     copy /y nginx\templates\rag.conf.template nginx\locations-enabled\rag.conf >nul
 ) else if "%mode%"=="reranker" (
-    :: reranker만 복사, rag는 건드리지 않음
+    :: reranker만 복사
+    copy /y nginx\templates\reranker.conf.template nginx\locations-enabled\reranker.conf >nul
+) else if "%mode%"=="prompt" (
+    :: prompt만 복사
+    copy /y nginx\templates\prompt.conf.template nginx\locations-enabled\prompt.conf >nul
+) else if "%mode%"=="rag-reranker" (
+    :: rag와 reranker만 복사
+    copy /y nginx\templates\rag.conf.template nginx\locations-enabled\rag.conf >nul
     copy /y nginx\templates\reranker.conf.template nginx\locations-enabled\reranker.conf >nul
 )
 
@@ -66,41 +76,127 @@ if not errorlevel 1 (
 goto :eof
 
 :: 서비스 시작
-if "%1"=="full" (
-    echo Starting all services...
-    call :setup_nginx full
-    docker compose --profile full up -d
+if "%1"=="all" (
+    echo 모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(CPU) + DB)
+    call :setup_nginx all
+    docker compose --profile all --profile cpu-only up -d
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+    docker restart milvus-standalone milvus-rag
+) else if "%1"=="all-gpu" (
+    echo 모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(GPU) + DB)
+    call :setup_nginx all
+    docker compose --profile all --profile gpu-only up -d
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
     docker restart milvus-standalone milvus-rag
 ) else if "%1"=="rag" (
-    echo Starting RAG service...
+    echo RAG 서비스 시작 중... (RAG + DB)
     call :setup_nginx rag
     docker compose --profile rag-only up -d
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
     docker restart milvus-standalone milvus-rag
 ) else if "%1"=="reranker" (
-    echo Starting Reranker service...
+    echo Reranker 서비스만 시작 중...
     call :setup_nginx reranker
     docker compose --profile reranker-only up -d
-) else if "%1"=="db" (
-    echo Starting database services only...
-    docker compose --profile db-only up -d
-) else if "%1"=="app-only" (
-    echo Starting application services only...
-    call :setup_nginx full
-    docker compose --profile app-only up -d
+) else if "%1"=="prompt" (
+    echo Prompt 서비스만 시작 중...
+    call :setup_nginx prompt
+    docker compose --profile prompt-only up -d
+) else if "%1"=="rag-reranker" (
+    echo RAG + Reranker 서비스 시작 중... (DB 포함)
+    call :setup_nginx rag-reranker
+    docker compose up -d nginx rag reranker standalone etcd etcd_init minio
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
+    docker restart milvus-standalone milvus-rag
+) else if "%1"=="db" (
+    echo 데이터베이스 서비스만 시작 중...
+    docker compose --profile db-only up -d
+) else if "%1"=="app-only" (
+    echo 앱 서비스만 시작 중... (RAG + Reranker + Prompt + Ollama(CPU), DB 제외)
+    call :setup_nginx all
+    docker compose up -d nginx rag reranker prompt ollama
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+) else if "%1"=="app-only-gpu" (
+    echo 앱 서비스만 시작 중... (RAG + Reranker + Prompt + Ollama(GPU), DB 제외)
+    call :setup_nginx all
+    docker compose up -d nginx rag reranker prompt ollama-gpu
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+) else if "%1"=="ollama" (
+    echo Ollama 서비스 시작 중... (CPU 모드)
+    docker compose --profile ollama-only --profile cpu-only up -d
+    REM 모델 다운로드 스크립트 실행
+    echo Ollama 모델 다운로드 중...
+    REM 컨테이너가 완전히 시작될 때까지 잠시 대기
+    timeout /t 3 /nobreak >nul
+    REM 컨테이너가 실행 중인지 확인하고 모델 다운로드 수행
+    docker exec milvus-ollama-cpu /app/init.sh
+    if errorlevel 1 (
+        echo 모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요.
+        echo 컨테이너 로그 확인: docker logs milvus-ollama-cpu
+    )
+) else if "%1"=="ollama-gpu" (
+    echo Ollama 서비스 시작 중... (GPU 모드)
+    docker compose --profile gpu-only up -d
+    REM 모델 다운로드 스크립트 실행
+    echo Ollama 모델 다운로드 중...
+    REM 컨테이너가 완전히 시작될 때까지 잠시 대기
+    timeout /t 3 /nobreak >nul
+    REM 컨테이너가 실행 중인지 확인하고 모델 다운로드 수행
+    docker exec milvus-ollama-gpu /app/init.sh
+    if errorlevel 1 (
+        echo 모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요.
+        echo 컨테이너 로그 확인: docker logs milvus-ollama-gpu
+    )
+) else if "%1"=="prompt_ollama" (
+    echo Prompt와 Ollama 서비스 조합 시작 중... (CPU 모드)
+    call :setup_nginx prompt
+    docker compose --profile prompt-only --profile ollama-only --profile cpu-only up -d
+    REM 모델 다운로드 스크립트 실행
+    echo Ollama 모델 다운로드 중...
+    REM 컨테이너가 완전히 시작될 때까지 잠시 대기
+    timeout /t 3 /nobreak >nul
+    REM 컨테이너가 실행 중인지 확인하고 모델 다운로드 수행
+    docker exec milvus-ollama-cpu /app/init.sh
+    if errorlevel 1 (
+        echo 모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요.
+        echo 컨테이너 로그 확인: docker logs milvus-ollama-cpu
+    )
+) else if "%1"=="prompt_ollama-gpu" (
+    echo Prompt와 Ollama 서비스 조합 시작 중... (GPU 모드)
+    call :setup_nginx prompt
+    docker compose --profile prompt-only --profile gpu-only up -d
+    REM 모델 다운로드 스크립트 실행
+    echo Ollama 모델 다운로드 중...
+    REM 컨테이너가 완전히 시작될 때까지 잠시 대기
+    timeout /t 3 /nobreak >nul
+    REM 컨테이너가 실행 중인지 확인하고 모델 다운로드 수행
+    docker exec milvus-ollama-gpu /app/init.sh
+    if errorlevel 1 (
+        echo 모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요.
+        echo 컨테이너 로그 확인: docker logs milvus-ollama-gpu
+    )
 ) else (
-    echo Usage: %0 {full^|rag^|reranker^|db^|app-only}
-    echo   full     - Start all services
-    echo   rag      - Start RAG service only (includes DB)
-    echo   reranker - Start Reranker service only
-    echo   db       - Start database services only (Milvus, Etcd, MinIO)
-    echo   app-only - Start application services only (RAG, Reranker, Nginx)
-    echo             Use this for code changes when DB is already running
+    echo Usage: %0 {all^|all-gpu^|rag^|reranker^|prompt^|rag-reranker^|db^|app-only^|app-only-gpu^|ollama^|ollama-gpu^|prompt_ollama^|prompt_ollama-gpu}
+    echo   all          - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(CPU) + DB)
+    echo   all-gpu      - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(GPU) + DB)
+    echo   rag          - RAG 서비스만 시작 (DB 포함)
+    echo   reranker     - Reranker 서비스만 시작
+    echo   prompt       - Prompt 서비스만 시작
+    echo   rag-reranker - RAG와 Reranker 서비스 시작 (DB 포함) 
+    echo   db           - 데이터베이스 서비스만 시작 (Milvus, Etcd, MinIO)
+    echo   app-only     - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(CPU), DB 제외)
+    echo   app-only-gpu - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(GPU), DB 제외)
+    echo   ollama       - Ollama 서비스만 시작 (CPU 모드)
+    echo   ollama-gpu   - Ollama 서비스만 시작 (GPU 모드)
+    echo   prompt_ollama - Prompt와 Ollama 서비스 조합 (CPU 모드)
+    echo   prompt_ollama-gpu - Prompt와 Ollama 서비스 조합 (GPU 모드)
+    echo                 DB가 이미 실행 중일 때 코드 변경 후 사용
     exit /b 1
 )
 
@@ -110,27 +206,68 @@ docker ps | findstr "milvus api-gateway unified-nginx"
 
 echo === 셋업 완료 ===
 echo 시스템이 가동되었습니다. 다음 URL로 접근할 수 있습니다:
-if "%1"=="full" (
+
+if "%1"=="all" (
     echo - RAG 서비스: http://localhost/rag/
     echo - Reranker 서비스: http://localhost/reranker/
-    echo - 통합 API: http://localhost/api/enhanced-search?query_text=검색어
+    echo - 프롬프트 서비스: http://localhost/prompt/
+    echo - 요약 API: http://localhost/prompt/summarize
+    echo - Ollama API (CPU 모드): http://localhost:11434
+    echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
+) else if "%1"=="all-gpu" (
+    echo - RAG 서비스: http://localhost/rag/
+    echo - Reranker 서비스: http://localhost/reranker/
+    echo - 프롬프트 서비스: http://localhost/prompt/
+    echo - 요약 API: http://localhost/prompt/summarize
+    echo - Ollama API (GPU 모드): http://localhost:11434
+    echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
+    echo - mistral, llama3 등 더 큰 모델을 사용할 수 있습니다.
 ) else if "%1"=="rag" (
     echo - RAG 서비스: http://localhost/rag/
+    echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
 ) else if "%1"=="reranker" (
     echo - Reranker 서비스: http://localhost/reranker/
-    echo - API: http://localhost/api/enhanced-search?query_text=검색어
+) else if "%1"=="prompt" (
+    echo - 프롬프트 서비스: http://localhost/prompt/
+    echo - 요약 API: http://localhost/prompt/summarize
+) else if "%1"=="rag-reranker" (
+    echo - RAG 서비스: http://localhost/rag/
+    echo - Reranker 서비스: http://localhost/reranker/
+    echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
 ) else if "%1"=="db" (
     echo - 데이터베이스 서비스만 시작되었습니다. 애플리케이션 서비스는 시작되지 않았습니다.
+    echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
 ) else if "%1"=="app-only" (
     echo - RAG 서비스: http://localhost/rag/
     echo - Reranker 서비스: http://localhost/reranker/
-    echo - 통합 API: http://localhost/api/enhanced-search?query_text=검색어
-)
-
-if "%1"=="full" (
-    echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
-) else if "%1"=="rag" (
-    echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
-) else if "%1"=="db" (
-    echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
+    echo - 프롬프트 서비스: http://localhost/prompt/
+    echo - 요약 API: http://localhost/prompt/summarize
+    echo - Ollama API (CPU 모드): http://localhost:11434
+) else if "%1"=="app-only-gpu" (
+    echo - RAG 서비스: http://localhost/rag/
+    echo - Reranker 서비스: http://localhost/reranker/
+    echo - 프롬프트 서비스: http://localhost/prompt/
+    echo - 요약 API: http://localhost/prompt/summarize
+    echo - Ollama API (GPU 모드): http://localhost:11434
+    echo - mistral, llama3 등 더 큰 모델을 사용할 수 있습니다.
+) else if "%1"=="ollama" (
+    echo - Ollama API (CPU 모드): http://localhost:11434
+    echo - Ollama 사용 예시: curl http://localhost:11434/api/tags
+    echo - 참고: CPU 모드에서는 gemma:2b와 같은 작은 모델만 사용하세요.
+) else if "%1"=="ollama-gpu" (
+    echo - Ollama API (GPU 모드): http://localhost:11434
+    echo - Ollama 사용 예시: curl http://localhost:11434/api/tags
+    echo - mistral, llama3 등 더 큰 모델을 사용할 수 있습니다.
+) else if "%1"=="prompt_ollama" (
+    echo - 프롬프트 서비스: http://localhost/prompt/
+    echo - 요약 API: http://localhost/prompt/summarize
+    echo - 챗봇 API: http://localhost/prompt/chat
+    echo - Ollama API (CPU 모드): http://localhost:11434
+    echo - 참고: CPU 모드에서는 gemma:2b와 같은 작은 모델만 사용하세요.
+) else if "%1"=="prompt_ollama-gpu" (
+    echo - 프롬프트 서비스: http://localhost/prompt/
+    echo - 요약 API: http://localhost/prompt/summarize
+    echo - 챗봇 API: http://localhost/prompt/chat
+    echo - Ollama API (GPU 모드): http://localhost:11434
+    echo - mistral, llama3 등 더 큰 모델을 사용할 수 있습니다.
 ) 

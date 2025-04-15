@@ -1,0 +1,5 @@
+{
+    "search_top": 3,
+    "rerank_top": 2,
+    "default_model": "gemma:2b"
+} 

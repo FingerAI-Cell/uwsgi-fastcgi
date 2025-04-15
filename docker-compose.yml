@@ -24,7 +24,7 @@ services:
     networks:
       - rag_network
     profiles:
-      - full
+      - all
       - rag-only
       - db-only
 
@@ -38,7 +38,7 @@ services:
     networks:
       - rag_network
     profiles:
-      - full
+      - all
       - rag-only
       - db-only
 
@@ -63,7 +63,7 @@ services:
     networks:
       - rag_network
     profiles:
-      - full
+      - all
       - rag-only
       - db-only
 
@@ -94,7 +94,7 @@ services:
     networks:
       - rag_network
     profiles:
-      - full
+      - all
       - rag-only
       - db-only
 
@@ -112,9 +112,10 @@ services:
     networks:
       - rag_network
     profiles:
-      - full
+      - all
       - rag-only
       - reranker-only
+      - prompt-only
       - app-only
     environment:
       - NGINX_HOST=localhost
@@ -139,7 +140,7 @@ services:
       - rag_network
     command: uwsgi --ini /rag/uwsgi.ini
     profiles:
-      - full
+      - all
       - rag-only
       - app-only
 
@@ -164,9 +165,77 @@ services:
       - rag_network
     command: uwsgi --ini /reranker/uwsgi.ini
     profiles:
-      - full
+      - all
       - reranker-only
       - app-only
+
+  # 프롬프트 백엔드 서비스
+  prompt:
+    build: ./prompt
+    container_name: milvus-prompt
+    volumes:
+      - ./prompt:/prompt
+      - shared_tmp:/tmp
+      - ./volumes/logs/prompt:/var/log/prompt
+    environment:
+      - PROMPT_CONFIG=/prompt/config.json
+      - RAG_ENDPOINT=http://nginx/rag
+      - RERANKER_ENDPOINT=http://nginx/reranker
+      - OLLAMA_ENDPOINT=http://ollama:11434
+      - DEFAULT_MODEL=mistral
+      - UWSGI_PROTOCOL=fastcgi
+      - UWSGI_SOCKET=/tmp/prompt.sock
+      - UWSGI_CHMOD_SOCKET=666
+      - RAG_SEARCH_TOP_K=100
+      - RERANKER_TOP_K=20
+    networks:
+      - rag_network
+    command: uwsgi --ini /prompt/uwsgi.ini
+    profiles:
+      - all
+      - prompt-only
+      - app-only
+
+  # Ollama 서비스 (CPU 버전)
+  ollama:
+    build: ./ollama
+    container_name: milvus-ollama-cpu
+    volumes:
+      - ./ollama:/app
+      - ./volumes/ollama:/root/.ollama
+      - ./volumes/logs/ollama:/var/log/ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - rag_network
+    profiles:
+      - all
+      - prompt-only
+      - ollama-only
+      - app-only
+      - cpu-only
+
+  # Ollama 서비스 (GPU 버전)
+  ollama-gpu:
+    build: ./ollama
+    container_name: milvus-ollama-gpu
+    volumes:
+      - ./ollama:/app
+      - ./volumes/ollama:/root/.ollama
+      - ./volumes/logs/ollama:/var/log/ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - rag_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles:
+      - gpu-only
 
 networks:
   rag_network:

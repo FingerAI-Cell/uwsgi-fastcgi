@@ -25,9 +25,13 @@ set +a
 
 # 서비스 종료
 case "$1" in
-  "full")
-    echo "🛑 모든 서비스 종료 중..."
-    $DOCKER_CMD compose --profile full down
+  "all")
+    echo "🛑 모든 서비스 종료 중... (CPU 모드)"
+    $DOCKER_CMD compose --profile all --profile cpu-only down
+    ;;
+  "all-gpu")
+    echo "🛑 모든 서비스 종료 중... (GPU 모드)"
+    $DOCKER_CMD compose --profile all --profile gpu-only down
     ;;
   "rag")
     echo "🛑 RAG 서비스 종료 중..."
@@ -37,18 +41,64 @@ case "$1" in
     echo "🛑 Reranker 서비스 종료 중..."
     $DOCKER_CMD compose --profile reranker-only down
     ;;
+  "prompt")
+    echo "🛑 Prompt 서비스 종료 중..."
+    $DOCKER_CMD compose --profile prompt-only down
+    ;;
+  "rag-reranker")
+    echo "🛑 RAG + Reranker 서비스 종료 중..."
+    $DOCKER_CMD compose down nginx rag reranker standalone etcd etcd_init minio
+    ;;
+  "db")
+    echo "🛑 데이터베이스 서비스 종료 중..."
+    $DOCKER_CMD compose --profile db-only down
+    ;;
+  "app-only")
+    echo "🛑 앱 서비스만 종료 중... (CPU 모드)"
+    $DOCKER_CMD compose down nginx rag reranker prompt ollama
+    ;;
+  "app-only-gpu")
+    echo "🛑 앱 서비스만 종료 중... (GPU 모드)"
+    $DOCKER_CMD compose down nginx rag reranker prompt ollama-gpu
+    ;;
+  "ollama")
+    echo "🛑 Ollama 서비스 종료 중... (CPU 모드)"
+    $DOCKER_CMD compose --profile ollama-only --profile cpu-only down
+    ;;
+  "ollama-gpu")
+    echo "🛑 Ollama 서비스 종료 중... (GPU 모드)"
+    $DOCKER_CMD compose --profile gpu-only down
+    ;;
+  "prompt_ollama")
+    echo "🛑 Prompt + Ollama 서비스 종료 중... (CPU 모드)"
+    $DOCKER_CMD compose --profile prompt-only --profile ollama-only --profile cpu-only down
+    ;;
+  "prompt_ollama-gpu")
+    echo "🛑 Prompt + Ollama 서비스 종료 중... (GPU 모드)"
+    $DOCKER_CMD compose --profile prompt-only --profile gpu-only down
+    ;;
   *)
-    echo "Usage: $0 {full|rag|reranker}"
-    echo "  full     - 모든 서비스 종료"
-    echo "  rag      - RAG 서비스만 종료"
-    echo "  reranker - Reranker 서비스만 종료"
+    echo "Usage: $0 {all|all-gpu|rag|reranker|prompt|rag-reranker|db|app-only|app-only-gpu|ollama|ollama-gpu|prompt_ollama|prompt_ollama-gpu}"
+    echo "  all        - 모든 서비스 종료 (CPU 모드)"
+    echo "  all-gpu    - 모든 서비스 종료 (GPU 모드)"
+    echo "  rag          - RAG 서비스만 종료 (DB 포함)"
+    echo "  reranker     - Reranker 서비스만 종료"
+    echo "  prompt       - Prompt 서비스만 종료"
+    echo "  rag-reranker - RAG와 Reranker 서비스 종료 (DB 포함)"
+    echo "  db           - 데이터베이스 서비스만 종료"
+    echo "  app-only     - 앱 서비스만 종료 (RAG, Reranker, Prompt, Ollama(CPU))"
+    echo "  app-only-gpu - 앱 서비스만 종료 (RAG, Reranker, Prompt, Ollama(GPU))"
+    echo "  ollama       - Ollama 서비스만 종료 (CPU 모드)"
+    echo "  ollama-gpu   - Ollama 서비스만 종료 (GPU 모드)"
+    echo "  prompt_ollama - Prompt와 Ollama 서비스 종료 (CPU 모드)"
+    echo "  prompt_ollama-gpu - Prompt와 Ollama 서비스 종료 (GPU 모드)"
     exit 1
     ;;
 esac
 
 # 소켓 파일 정리
 echo "🧹 소켓 파일 정리 중..."
-rm -f /tmp/rag.sock /tmp/reranker.sock 2>/dev/null || true
+rm -f /tmp/rag.sock /tmp/reranker.sock /tmp/prompt.sock 2>/dev/null || true
 
 echo "=== 종료 완료 ==="
 echo "✨ 서비스가 안전하게 종료되었습니다."
