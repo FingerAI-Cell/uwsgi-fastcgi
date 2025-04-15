@@ -7,7 +7,26 @@ FastCGI 기반의 uWSGI와 Nginx를 사용하여 Docker Compose로 구성된 RAG
 - macOS: Docker Desktop 설치
 - Linux: Docker Engine 및 Docker Compose 설치
 
-#### 2. 볼륨 디렉토리 설정
+#### 2. Milvus 데이터 경로 설정
+서비스를 시작하기 전에 Milvus 데이터 저장 경로를 설정할 수 있습니다. `setup.sh` 실행 시 다음과 같은 옵션이 있습니다:
+
+1. 기본 경로 사용 (`/var/lib/milvus-data`)
+   - 그냥 엔터를 누르면 기본 경로가 사용됩니다.
+
+2. 사용자 지정 경로 설정
+   - 절대 경로 (예: `/data/milvus`)
+   - 현재 위치 기준 상대 경로 (예: `./data/milvus`)
+   - 프로젝트 루트 기준 상대 경로 (예: `../data/milvus`)
+
+설정된 경로는 `config/storage.json`에 저장되며, 이후 `purge_volumes.sh` 실행 시에도 동일한 경로가 사용됩니다.
+
+**주의사항**:
+- 상대 경로 입력 시 현재 스크립트 실행 위치를 기준으로 합니다.
+- 데이터 관리를 위해 절대 경로 사용을 권장합니다.
+- 설정 파일(`config/storage.json`)은 git에 포함되지 않습니다.
+- 처음 실행 시 기본 설정 파일이 자동으로 생성됩니다.
+
+#### 3. 볼륨 디렉토리 설정
 시스템은 데이터 저장을 위해 두 가지 볼륨 위치를 사용합니다:
 
 1. **내부 볼륨 `/var/lib/milvus-data/`** ⚠️ **(중요: Milvus DB 데이터 저장 위치)**

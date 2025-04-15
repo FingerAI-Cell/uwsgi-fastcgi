@@ -31,11 +31,78 @@ fi
 echo "Docker 네트워크 생성 중..."
 $DOCKER_CMD network create rag_network 2>/dev/null || echo "rag_network가 이미 존재합니다."
 
-# 호스트 내부 볼륨 디렉토리 생성 (공유 폴더 권한 문제 해결)
-echo "호스트 내부 볼륨 디렉토리 생성 중..."
-sudo mkdir -p /var/lib/milvus-data/{etcd,minio,milvus,logs/{etcd,minio,milvus}}
-sudo chown -R $(whoami):$(whoami) /var/lib/milvus-data
-chmod -R 700 /var/lib/milvus-data/etcd
+# 설정 파일 경로
+CONFIG_DIR="$(dirname "$0")/../config"
+CONFIG_FILE="$CONFIG_DIR/storage.json"
+
+# 설정 파일 디렉토리 생성
+mkdir -p "$CONFIG_DIR"
+
+# 기본 경로
+DEFAULT_MILVUS_PATH="/var/lib/milvus-data"
+
+# 설정 파일이 있으면 읽기
+if [ -f "$CONFIG_FILE" ]; then
+    STORED_PATH=$(jq -r '.milvus_data_path' "$CONFIG_FILE" 2>/dev/null)
+    if [ ! -z "$STORED_PATH" ] && [ "$STORED_PATH" != "null" ]; then
+        DEFAULT_MILVUS_PATH=$STORED_PATH
+    fi
+fi
+
+# 사용자 입력 안내
+echo "============= Milvus 데이터 경로 설정 ============="
+echo "현재 스크립트 실행 위치: $(pwd)"
+echo "다음과 같은 형식의 경로를 입력할 수 있습니다:"
+echo "1. 절대 경로 (예: /var/lib/milvus-data)"
+echo "2. 현재 위치 기준 상대 경로 (예: ./data/milvus)"
+echo "3. 프로젝트 루트 기준 상대 경로 (예: ../data/milvus)"
+echo "※ 주의: 상대 경로 입력 시 현재 스크립트 실행 위치를 기준으로 합니다."
+echo "※ 권장: 데이터 관리를 위해 절대 경로 사용을 권장합니다."
+echo "=================================================="
+echo -n "Milvus 데이터 저장 경로를 입력하세요 (기본값: $DEFAULT_MILVUS_PATH): "
+read MILVUS_PATH
+
+# 입력이 없으면 기본값 사용
+if [ -z "$MILVUS_PATH" ]; then
+    MILVUS_PATH=$DEFAULT_MILVUS_PATH
+fi
+
+# 상대 경로를 절대 경로로 변환
+if [[ "$MILVUS_PATH" =~ ^\./ ]] || [[ "$MILVUS_PATH" =~ ^\.\./ ]]; then
+    MILVUS_PATH="$(cd "$(dirname "$MILVUS_PATH")" && pwd)/$(basename "$MILVUS_PATH")"
+    echo "상대 경로가 다음 절대 경로로 변환되었습니다: $MILVUS_PATH"
+fi
+
+# 경로 유효성 검사
+if [[ ! "$MILVUS_PATH" =~ ^/ ]]; then
+    echo "오류: 올바르지 않은 경로입니다. 절대 경로(/)나 상대 경로(./ 또는 ../)로 시작해야 합니다."
+    exit 1
+fi
+
+# 경로 생성 시도
+if ! mkdir -p "$MILVUS_PATH" 2>/dev/null; then
+    echo "오류: 경로를 생성할 수 없습니다. 권한을 확인해주세요."
+    exit 1
+fi
+
+# 설정 저장
+cat > "$CONFIG_FILE" << EOF
+{
+    "milvus_data_path": "$MILVUS_PATH",
+    "created_at": "$(date -Iseconds)",
+    "last_modified": "$(date -Iseconds)"
+}
+EOF
+
+echo "설정이 저장되었습니다: $CONFIG_FILE"
+
+# Milvus 관련 디렉토리 생성
+echo "Milvus 데이터 디렉토리 생성 중..."
+sudo mkdir -p "$MILVUS_PATH"/{etcd,minio,milvus,logs/{etcd,minio,milvus}}
+sudo chmod -R 700 "$MILVUS_PATH/etcd"
+
+# 환경 변수로 export
+export MILVUS_DATA_PATH="$MILVUS_PATH"
 
 # 권한 설정 검증
 echo "내부 볼륨 권한 설정 확인 중..."

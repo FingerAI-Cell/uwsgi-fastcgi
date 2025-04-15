@@ -11,8 +11,8 @@ services:
       - ETCD_QUOTA_BACKEND_BYTES=4294967296
       - ETCD_SNAPSHOT_COUNT=50000
     volumes:
-      - /var/lib/milvus-data/etcd:/etcd
-      - /var/lib/milvus-data/logs/etcd:/var/log/etcd
+      - ${MILVUS_DATA_PATH:-/var/lib/milvus-data}/etcd:/etcd
+      - ${MILVUS_DATA_PATH:-/var/lib/milvus-data}/logs/etcd:/var/log/etcd
     command: /bin/sh -c "chmod -R 700 /etcd && etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd"
     healthcheck:
       test: ["CMD", "etcdctl", "endpoint", "health"]
@@ -33,7 +33,7 @@ services:
     container_name: milvus-etcd-init
     image: alpine:latest
     volumes:
-      - /var/lib/milvus-data/etcd:/etcd
+      - ${MILVUS_DATA_PATH:-/var/lib/milvus-data}/etcd:/etcd
     command: sh -c "mkdir -p /etcd/member && chmod -R 700 /etcd && echo 'etcd 디렉토리 권한 설정 완료'"
     networks:
       - rag_network
@@ -52,8 +52,8 @@ services:
       - "9001:9001"
       - "9000:9000"
     volumes:
-      - /var/lib/milvus-data/minio:/minio_data
-      - /var/lib/milvus-data/logs/minio:/var/log/minio
+      - ${MILVUS_DATA_PATH:-/var/lib/milvus-data}/minio:/minio_data
+      - ${MILVUS_DATA_PATH:-/var/lib/milvus-data}/logs/minio:/var/log/minio
     command: minio server /minio_data --console-address ":9001" --address ":9000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -78,8 +78,8 @@ services:
       MINIO_ADDRESS: minio:9000
     volumes:
       - ./milvus/milvus.yaml:/milvus/configs/milvus.yaml
-      - /var/lib/milvus-data/milvus:/var/lib/milvus
-      - /var/lib/milvus-data/logs/milvus:/var/log/milvus
+      - ${MILVUS_DATA_PATH:-/var/lib/milvus-data}/milvus:/var/lib/milvus
+      - ${MILVUS_DATA_PATH:-/var/lib/milvus-data}/logs/milvus:/var/log/milvus
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 30s

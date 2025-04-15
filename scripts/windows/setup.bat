@@ -24,6 +24,71 @@ if errorlevel 1 (
     echo rag_network가 이미 존재합니다.
 )
 
+:: 설정 파일 디렉토리 및 경로 설정
+set "CONFIG_DIR=%ROOT_DIR%\config"
+set "CONFIG_FILE=%CONFIG_DIR%\storage.json"
+set "DEFAULT_MILVUS_PATH=/var/lib/milvus-data"
+
+:: config 디렉토리 생성
+if not exist "%CONFIG_DIR%" (
+    mkdir "%CONFIG_DIR%"
+)
+
+:: 설정 파일이 있으면 읽기
+set "MILVUS_PATH=%DEFAULT_MILVUS_PATH%"
+if exist "%CONFIG_FILE%" (
+    for /f "usebackq tokens=* delims=" %%a in (`type "%CONFIG_FILE%" ^| findstr "milvus_data_path"`) do (
+        for /f "tokens=2 delims=:, " %%b in ("%%a") do (
+            set "STORED_PATH=%%~b"
+            if not "!STORED_PATH!"=="" if not "!STORED_PATH!"=="null" (
+                set "MILVUS_PATH=!STORED_PATH!"
+            )
+        )
+    )
+)
+
+:: 사용자 입력 안내
+echo ============= Milvus 데이터 경로 설정 =============
+echo 현재 스크립트 실행 위치: %CD%
+echo 다음과 같은 형식의 경로를 입력할 수 있습니다:
+echo 1. 절대 경로 (예: /var/lib/milvus-data)
+echo 2. 현재 위치 기준 상대 경로 (예: ./data/milvus)
+echo 3. 프로젝트 루트 기준 상대 경로 (예: ../data/milvus)
+echo ※ 주의: 상대 경로 입력 시 현재 스크립트 실행 위치를 기준으로 합니다.
+echo ※ 권장: 데이터 관리를 위해 절대 경로 사용을 권장합니다.
+echo ==================================================
+set /p "INPUT_PATH=Milvus 데이터 저장 경로를 입력하세요 (기본값: %MILVUS_PATH%): "
+
+:: 입력이 없으면 기본값 사용
+if "!INPUT_PATH!"=="" (
+    set "INPUT_PATH=%MILVUS_PATH%"
+)
+
+:: 상대 경로를 절대 경로로 변환
+if "!INPUT_PATH:~0,2!"=="./" (
+    for %%i in ("!INPUT_PATH!") do set "INPUT_PATH=!CD!\%%~nxi"
+    echo 상대 경로가 다음 절대 경로로 변환되었습니다: !INPUT_PATH!
+) else if "!INPUT_PATH:~0,3!"=="../" (
+    pushd "!INPUT_PATH!" 2>nul
+    if not errorlevel 1 (
+        set "INPUT_PATH=!CD!"
+        popd
+        echo 상대 경로가 다음 절대 경로로 변환되었습니다: !INPUT_PATH!
+    ) else (
+        echo 오류: 올바르지 않은 경로입니다.
+        exit /b 1
+    )
+)
+
+:: 설정 저장
+echo { > "%CONFIG_FILE%"
+echo     "milvus_data_path": "%INPUT_PATH%", >> "%CONFIG_FILE%"
+echo     "created_at": "%date% %time%", >> "%CONFIG_FILE%"
+echo     "last_modified": "%date% %time%" >> "%CONFIG_FILE%"
+echo } >> "%CONFIG_FILE%"
+
+echo 설정이 저장되었습니다: %CONFIG_FILE%
+
 :: WSL 또는 VM 내부 볼륨 디렉토리 생성 (Windows 환경)
 echo VM 또는 WSL에 데이터 디렉토리 생성을 확인하세요...
 echo WSL 환경을 사용하는 경우 다음 명령을 WSL 터미널에서 실행하세요:

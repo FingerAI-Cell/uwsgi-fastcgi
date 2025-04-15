@@ -31,3 +31,7 @@ env/
 # System
 .DS_Store
 Thumbs.db
+
+# Config
+/config/
+config/
