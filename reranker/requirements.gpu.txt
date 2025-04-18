@@ -13,7 +13,8 @@ huggingface_hub==0.22.2
 flashrank==0.2.10
 
 # PyTorch (GPU version)
-torch==2.2.2+cu118
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.2.2
 
 # Additional dependencies
 python-multipart==0.0.6
