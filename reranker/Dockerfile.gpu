@@ -9,6 +9,9 @@ RUN apt-get update && \
     git && \
     rm -rf /var/lib/apt/lists/*
 
+# conda를 통해 Python 개발 라이브러리 설치
+RUN conda install -y python=3.10 python-dev
+
 # uwsgi 먼저 설치 시도하고 로그 저장
 RUN mkdir -p /var/log/reranker && \
     pip install --no-cache-dir uwsgi > /var/log/reranker/uwsgi_install.log 2>&1 || \
