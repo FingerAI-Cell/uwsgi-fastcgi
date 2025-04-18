@@ -6,12 +6,16 @@ WORKDIR /reranker
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
+    python3-dev \
+    python3-pip \
+    python3-setuptools \
+    python3-wheel \
     curl \
     git \
     && rm -rf /var/lib/apt/lists/*
 
 # 필요한 Python 패키지 설치
-COPY requirements.txt .
+COPY requirements.gpu.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir flashrank
 
