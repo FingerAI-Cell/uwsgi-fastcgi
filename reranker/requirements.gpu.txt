@@ -8,7 +8,7 @@ MarkupSafe>=2.0.0
 pydantic==1.8.2
 transformers==4.39.3
 tokenizers==0.15.2
-numpy==1.26.4
+numpy>=1.25.2
 huggingface_hub==0.22.2
 flashrank==0.2.10
 
