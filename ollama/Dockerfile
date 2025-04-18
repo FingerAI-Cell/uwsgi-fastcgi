@@ -21,4 +21,5 @@ RUN chmod 755 init.sh && \
 EXPOSE 11434
 
 # 실행 명령
-CMD bash -c "/app/init.sh & ollama serve" 
+ENTRYPOINT ["ollama"]
+CMD ["serve"] 
