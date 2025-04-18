@@ -2,35 +2,23 @@ FROM pytorch/pytorch:2.1.2-cuda11.8-cudnn8-devel
 
 WORKDIR /reranker
 
-# 기본 패키지 설치
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
-    python3-dev \
-    python3-pip \
-    python3-setuptools \
-    python3-wheel \
     curl \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+    git && \
+    rm -rf /var/lib/apt/lists/*
 
-# 필요한 Python 패키지 설치
+# Python 버전은 기본 제공되므로 conda로 다시 설치하지 않음
 COPY requirements.gpu.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir flashrank
+RUN pip install --no-cache-dir -r requirements.txt
 
-# uwsgi 설치
-RUN pip install --no-cache-dir uwsgi
-
-# 프로젝트 파일 복사
 COPY . .
 
-# 모델 디렉토리 생성 및 모델 다운로드
+# 모델 캐시 사전 다운로드
 RUN mkdir -p /reranker/models && \
     python -c "from flashrank import Ranker; Ranker(model_name='ms-marco-TinyBERT-L-2-v2', cache_dir='/reranker/models')"
 
-# 포트 노출
 EXPOSE 9020
 
-# 실행 명령
-CMD ["uwsgi", "--ini", "/reranker/uwsgi.ini"] 
+CMD ["uwsgi", "--ini", "/reranker/uwsgi.ini"]
