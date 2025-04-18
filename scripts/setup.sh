@@ -221,9 +221,11 @@ prompt_services=(
 # 각 서비스 별 프로필 목록
 declare -A profiles=(
     ["rag_reranker"]="app-only"
+    ["rag_reranker-gpu"]="app-only,gpu-only"
     ["prompt"]="prompt-only"
     ["rag"]="rag-only"
     ["reranker"]="reranker-only"
+    ["reranker-gpu"]="reranker-only,gpu-only"
     ["milvus"]="db-only"
     ["ollama"]="ollama-only,cpu-only"
     ["ollama-gpu"]="gpu-only"
@@ -235,11 +237,52 @@ declare -A profiles=(
     ["app-only-gpu"]="app-only,gpu-only"
 )
 
+# Reranker 설정 함수 수정
+setup_reranker() {
+    local mode=$1
+    echo "Reranker 설정 구성 중... (모드: $mode)"
+    
+    # Config.py 파일 존재 확인
+    if [ ! -f "flashrank/Config.py" ]; then
+        echo "경고: flashrank/Config.py 파일이 없습니다."
+        return 1
+    fi
+    
+    if [ "$mode" = "gpu" ]; then
+        # NVIDIA 드라이버 확인
+        if ! command -v nvidia-smi &> /dev/null; then
+            echo "경고: NVIDIA 드라이버가 설치되어 있지 않습니다."
+            echo "GPU 모드를 사용하려면 NVIDIA 드라이버가 필요합니다."
+            return 1
+        fi
+        
+        cp reranker/requirements.gpu.txt reranker/requirements.txt
+        cp reranker/Dockerfile.gpu reranker/Dockerfile
+        
+        # Config.py 수정 시도
+        if ! sed -i 's/torch_dtype=torch.float32/torch_dtype=torch.float16\n            device_map="auto"/' flashrank/Config.py; then
+            echo "경고: Config.py 수정에 실패했습니다."
+            return 1
+        fi
+    else
+        cp reranker/requirements.cpu.txt reranker/requirements.txt
+        cp reranker/Dockerfile.cpu reranker/Dockerfile
+        
+        if ! sed -i 's/torch_dtype=torch.float16\n            device_map="auto"/torch_dtype=torch.float32/' flashrank/Config.py; then
+            echo "경고: Config.py 수정에 실패했습니다."
+            return 1
+        fi
+    fi
+    
+    echo "Reranker 설정이 성공적으로 변경되었습니다."
+}
+
 # 서비스 시작
 case "$1" in
   "all")
     echo "모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(CPU) + DB)"
     setup_nginx "all"
+    setup_reranker "cpu"
     docker compose --profile all --profile cpu-only up -d
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
@@ -247,11 +290,8 @@ case "$1" in
     
     # 모델 다운로드 스크립트 실행
     echo "Ollama 모델 다운로드 중..."
-    # 컨테이너가 완전히 시작될 때까지 잠시 대기
     sleep 3
-    # 컨테이너가 실행 중인지 확인
     if docker ps | grep -q milvus-ollama-cpu; then
-      # 모델 다운로드 시도
       docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
     else
       echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
@@ -260,6 +300,7 @@ case "$1" in
   "all-gpu")
     echo "모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(GPU) + DB)"
     setup_nginx "all"
+    setup_reranker "gpu"
     docker compose --profile all --profile gpu-only up -d
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
@@ -283,8 +324,13 @@ case "$1" in
     docker restart milvus-standalone milvus-rag
     ;;
   "reranker")
-    echo "Reranker 서비스만 시작 중..."
-    setup_nginx "reranker"
+    echo "Reranker 서비스만 시작"
+    setup_reranker "cpu"
+    docker compose --profile reranker-only up -d
+    ;;
+  "reranker-gpu")
+    echo "Reranker 서비스만 시작 (GPU 모드)"
+    setup_reranker "gpu"
     docker compose --profile reranker-only up -d
     ;;
   "prompt")
@@ -295,7 +341,16 @@ case "$1" in
   "rag-reranker")
     echo "RAG + Reranker 서비스 시작 중... (DB 포함)"
     setup_nginx "rag-reranker"
-    # 커스텀 프로필 대신 실행할 서비스 명시
+    setup_reranker "cpu"
+    docker compose up -d nginx rag reranker standalone etcd etcd_init minio
+    docker exec -it milvus-rag pip uninstall numpy -y
+    docker exec -it milvus-rag pip install numpy==1.24.4
+    docker restart milvus-standalone milvus-rag
+    ;;
+  "rag-reranker-gpu")
+    echo "RAG + Reranker 서비스 시작 중... (GPU 모드, DB 포함)"
+    setup_nginx "rag-reranker"
+    setup_reranker "gpu"
     docker compose up -d nginx rag reranker standalone etcd etcd_init minio
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
@@ -386,33 +441,27 @@ case "$1" in
   "app-only-gpu")
     echo "앱 서비스만 시작 중... (RAG + Reranker + Prompt + Ollama(GPU), DB 제외)"
     setup_nginx "all"
+    setup_reranker "gpu"
     docker compose up -d nginx rag reranker prompt ollama-gpu
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
-    
-    # 모델 다운로드 스크립트 실행
-    echo "Ollama 모델 다운로드 중..."
-    sleep 3
-    if docker ps | grep -q milvus-ollama-gpu; then
-      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
-    else
-      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
-    fi
     ;;
   *)
-    echo "Usage: $0 {all|all-gpu|rag|reranker|prompt|rag-reranker|db|app-only|app-only-gpu|ollama|prompt_ollama|ollama-gpu|prompt_ollama-gpu}"
-    echo "  all         - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(CPU) + DB)"
-    echo "  all-gpu      - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(GPU) + DB)"
-    echo "  rag          - RAG 서비스만 시작 (DB 포함)"
-    echo "  reranker     - Reranker 서비스만 시작"
-    echo "  prompt       - Prompt 서비스만 시작"
-    echo "  rag-reranker - RAG와 Reranker 서비스 시작 (DB 포함)"
-    echo "  db           - 데이터베이스 서비스만 시작 (Milvus, Etcd, MinIO)"
-    echo "  app-only     - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(CPU), DB 제외)"
-    echo "  app-only-gpu - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(GPU), DB 제외)"
-    echo "  ollama       - Ollama 서비스만 시작 (CPU 모드)"
-    echo "  ollama-gpu   - Ollama 서비스만 시작 (GPU 모드)"
-    echo "  prompt_ollama - Prompt와 Ollama 서비스 조합 (CPU 모드)"
+    echo "Usage: $0 {all|all-gpu|rag|reranker|reranker-gpu|prompt|rag-reranker|rag-reranker-gpu|db|app-only|app-only-gpu|ollama|prompt_ollama|ollama-gpu|prompt_ollama-gpu}"
+    echo "  all              - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(CPU) + DB)"
+    echo "  all-gpu          - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(GPU) + DB)"
+    echo "  rag              - RAG 서비스만 시작 (DB 포함)"
+    echo "  reranker         - Reranker 서비스만 시작 (CPU 모드)"
+    echo "  reranker-gpu     - Reranker 서비스만 시작 (GPU 모드)"
+    echo "  prompt           - Prompt 서비스만 시작"
+    echo "  rag-reranker     - RAG와 Reranker 서비스 시작 (CPU 모드, DB 포함)"
+    echo "  rag-reranker-gpu - RAG와 Reranker 서비스 시작 (GPU 모드, DB 포함)"
+    echo "  db               - 데이터베이스 서비스만 시작 (Milvus, Etcd, MinIO)"
+    echo "  app-only         - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(CPU), DB 제외)"
+    echo "  app-only-gpu     - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(GPU), DB 제외)"
+    echo "  ollama           - Ollama 서비스만 시작 (CPU 모드)"
+    echo "  ollama-gpu       - Ollama 서비스만 시작 (GPU 모드)"
+    echo "  prompt_ollama    - Prompt와 Ollama 서비스 조합 (CPU 모드)"
     echo "  prompt_ollama-gpu - Prompt와 Ollama 서비스 조합 (GPU 모드)"
     ;;
 esac
