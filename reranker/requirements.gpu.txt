@@ -14,7 +14,7 @@ flashrank==0.2.10
 
 # PyTorch (GPU version)
 --extra-index-url https://download.pytorch.org/whl/cu118
-torch==2.2.2
+torch==2.1.2
 
 # Additional dependencies
 python-multipart==0.0.6
@@ -24,7 +24,7 @@ certifi>=2021.5.30
 charset-normalizer>=2.0.0
 idna>=3.2
 requests-unixsocket==0.2.0
-onnxruntime-gpu==1.17.3
+onnxruntime-gpu==1.17.1
 
 # Optional dependencies
 cohere>=4.0.0
