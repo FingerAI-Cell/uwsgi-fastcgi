@@ -16,9 +16,6 @@ RUN pip install --no-cache-dir -r requirements.txt 2>&1 | tee /var/log/reranker/
     (cat /var/log/reranker/pip_install.log && exit 1)
 RUN pip install --no-cache-dir flashrank
 
-# uwsgi 위치 확인
-RUN which uwsgi > /var/log/reranker/uwsgi_path.log || find / -name uwsgi > /var/log/reranker/uwsgi_path.log
-
 COPY . .
 
 # 모델 캐시 사전 다운로드
@@ -28,11 +25,7 @@ RUN mkdir -p /reranker/models && \
 EXPOSE 9020
 
 # uwsgi 실행 스크립트 생성
-COPY <<EOF /opt/nvidia/entrypoint.d/uwsgi.sh
-#!/bin/bash
-UWSGI_PATH=$(cat /var/log/reranker/uwsgi_path.log)
-exec $UWSGI_PATH --ini /reranker/uwsgi.ini
-EOF
-RUN chmod +x /opt/nvidia/entrypoint.d/uwsgi.sh
+RUN echo '#!/bin/bash\nexec $(which uwsgi) --ini /reranker/uwsgi.ini' > /opt/nvidia/entrypoint.d/uwsgi.sh && \
+    chmod +x /opt/nvidia/entrypoint.d/uwsgi.sh
 
 CMD []

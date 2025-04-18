@@ -12,12 +12,13 @@ RUN if command -v apt-get >/dev/null; then \
 # 작업 디렉토리 설정
 WORKDIR /app
 
-# 초기화 스크립트와 모델 목록 복사 (권한 미리 설정)
-COPY --chmod=755 init.sh /app/
-COPY models.txt /app/
+# 초기화 스크립트와 모델 목록 복사
+COPY init.sh models.txt ./
+RUN chmod 755 init.sh && \
+    chmod 644 models.txt
 
 # Ollama 실행을 위한 기본 포트 노출
 EXPOSE 11434
 
 # 실행 명령
-ENTRYPOINT ["/bin/bash", "-c", "/app/init.sh & exec ollama serve"] 
+CMD bash -c "/app/init.sh & ollama serve" 
