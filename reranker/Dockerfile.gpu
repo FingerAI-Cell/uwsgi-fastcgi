@@ -24,4 +24,5 @@ RUN mkdir -p /reranker/models && \
 
 EXPOSE 9020
 
-CMD ["uwsgi", "--ini", "/reranker/uwsgi.ini"]
+# conda 환경의 PATH를 포함하여 실행
+ENTRYPOINT ["/opt/conda/bin/uwsgi", "--ini", "/reranker/uwsgi.ini"]

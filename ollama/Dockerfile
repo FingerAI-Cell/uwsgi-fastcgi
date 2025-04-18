@@ -12,10 +12,9 @@ RUN if command -v apt-get >/dev/null; then \
 # 작업 디렉토리 설정
 WORKDIR /app
 
-# 초기화 스크립트 복사
-COPY init.sh /app/
+# 초기화 스크립트와 모델 목록 복사 (권한 미리 설정)
+COPY --chmod=755 init.sh /app/
 COPY models.txt /app/
-RUN chmod +x /app/init.sh
 
 # Ollama 실행을 위한 기본 포트 노출
 EXPOSE 11434
