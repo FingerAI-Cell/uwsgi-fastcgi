@@ -24,5 +24,11 @@ RUN mkdir -p /reranker/models && \
 
 EXPOSE 9020
 
-# conda 환경의 PATH를 포함하여 실행
-ENTRYPOINT ["/opt/conda/bin/uwsgi", "--ini", "/reranker/uwsgi.ini"]
+# uwsgi 실행 스크립트 생성
+COPY <<EOF /opt/nvidia/entrypoint.d/uwsgi.sh
+#!/bin/bash
+exec /opt/conda/bin/uwsgi --ini /reranker/uwsgi.ini
+EOF
+RUN chmod +x /opt/nvidia/entrypoint.d/uwsgi.sh
+
+CMD []
