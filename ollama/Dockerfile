@@ -14,6 +14,7 @@ WORKDIR /app
 
 # 초기화 스크립트 복사
 COPY init.sh /app/
+COPY models.txt /app/
 RUN chmod +x /app/init.sh
 
 # Ollama 실행을 위한 기본 포트 노출
