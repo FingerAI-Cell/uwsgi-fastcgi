@@ -301,7 +301,7 @@ case "$1" in
     echo "모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(GPU) + DB)"
     setup_nginx "all"
     setup_reranker "gpu"
-    docker compose --profile all --profile gpu-only up -d
+    docker compose --profile gpu-only up -d nginx rag reranker prompt ollama-gpu standalone etcd etcd_init minio
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
     docker restart milvus-standalone milvus-rag
