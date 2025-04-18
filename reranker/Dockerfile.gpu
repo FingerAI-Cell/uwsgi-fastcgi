@@ -14,6 +14,7 @@ RUN mkdir -p /var/log/reranker
 COPY requirements.gpu.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt 2>&1 | tee /var/log/reranker/pip_install.log || \
     (cat /var/log/reranker/pip_install.log && exit 1)
+RUN pip install --no-cache-dir flashrank
 
 COPY . .
 
