@@ -114,7 +114,7 @@ class InteractManager:
         print(f"[DEBUG] cleansed_text={cleansed_text}")
         
         # 기본 출력 필드 설정
-        output_fields = ["doc_id", "passage_id", "domain", "title", "text", "info", "tags"]
+        output_fields = ["doc_id", "passage_id", "domain", "title", "author", "text", "info", "tags"]
         
         # 검색 표현식 구성
         expr_parts = []
@@ -217,6 +217,7 @@ class InteractManager:
                 "passage_id": None,
                 "domain": None,
                 "title": None,
+                "author": None,
                 "text": None,
                 "info": None,
                 "tags": None
