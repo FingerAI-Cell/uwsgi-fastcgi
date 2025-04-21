@@ -12,8 +12,8 @@ RUN apt-get update && \
 # Python 버전은 기본 제공되므로 conda로 다시 설치하지 않음
 RUN mkdir -p /var/log/reranker
 COPY requirements.gpu.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt 2>&1 | tee /var/log/reranker/pip_install.log || \
-    (cat /var/log/reranker/pip_install.log && exit 1)
+RUN pip install --no-cache-dir -r requirements.txt 2>&1 | tee /tmp/pip.log && cat /tmp/pip.log || \
+    (echo "❌ pip 설치 실패!" && exit 1)
 RUN pip install --no-cache-dir flashrank
 
 COPY . .
