@@ -24,8 +24,15 @@ RUN mkdir -p /reranker/models && \
 
 EXPOSE 9020
 
-# uwsgi 실행 스크립트 생성
-RUN printf '#!/bin/bash\nUWSGI_BIN=$(which uwsgi)\nexec "${UWSGI_BIN}" --ini /reranker/uwsgi.ini\n' > /opt/nvidia/entrypoint.d/uwsgi.sh && \
+# ✅ uwsgi 실행 스크립트 (경로 고정)
+RUN echo -e '#!/bin/bash\nexec /usr/local/bin/uwsgi --ini /reranker/uwsgi.ini' > /opt/nvidia/entrypoint.d/uwsgi.sh && \
     chmod +x /opt/nvidia/entrypoint.d/uwsgi.sh
 
-CMD []
+    RUN if command -v uwsgi; then \
+    echo "✅ uwsgi found:" $(which uwsgi) && uwsgi --version; \
+  else \
+    echo "❌ uwsgi not found. Please check if it's installed!" && exit 1; \
+  fi
+
+# ✅ CMD 명확히 지정
+CMD ["/opt/nvidia/entrypoint.d/uwsgi.sh"]
