@@ -330,6 +330,8 @@ def chat():
 # Ollama 모델 목록 API
 @app.route("/prompt/models", methods=["GET"])
 def list_models():
+    logger.info(f"💬 OLLAMA_ENDPOINT = {OLLAMA_ENDPOINT}")
+    logger.info(f"💬 최종 요청 URL = {OLLAMA_ENDPOINT}/api/tags")
     try:
         # Ollama API 호출하여 모델 목록 가져오기
         logger.info("Ollama 모델 목록 요청")
@@ -358,6 +360,7 @@ def list_models():
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Ollama 서비스 연결 오류: {str(e)}")
+            logger.exception(e)  # 전체 traceback도 로그에 남기기
             return jsonify({
                 "error": "Ollama 서비스에 연결할 수 없습니다",
                 "details": str(e)
