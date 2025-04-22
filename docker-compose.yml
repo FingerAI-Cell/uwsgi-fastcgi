@@ -184,6 +184,8 @@ services:
       - RAG_ENDPOINT=http://nginx/rag
       - RERANKER_ENDPOINT=http://nginx/reranker
       - DEFAULT_MODEL=mistral
+      - USE_GPU=${USE_GPU}
+      - OLLAMA_ENDPOINT=${OLLAMA_ENDPOINT}
       - UWSGI_PROTOCOL=fastcgi
       - UWSGI_SOCKET=/tmp/prompt.sock
       - UWSGI_CHMOD_SOCKET=666
