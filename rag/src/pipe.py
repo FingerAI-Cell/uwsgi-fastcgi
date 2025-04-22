@@ -232,7 +232,7 @@ class InteractManager:
                 formatted_result.update(result['fields'])
             else:
                 # 일반 딕셔너리에서 직접 키 추출
-                for key in ['doc_id', 'passage_id', 'domain', 'title', 'text', 'info', 'tags']:
+                for key in ['doc_id', 'passage_id', 'domain', 'title', "author", 'text', 'info', 'tags']:
                     if key in result:
                         formatted_result[key] = result[key]
             
@@ -309,7 +309,7 @@ class InteractManager:
             try:
                 results = collection.query(
                     expr=expr,
-                    output_fields=["doc_id", "passage_id", "domain", "title", "text", "info", "tags"]
+                    output_fields=["doc_id", "passage_id", "domain", "title", "author" "text", "info", "tags"]
                 )
                 print(f"[DEBUG] Query results count: {len(results) if results else 0}")
             except Exception as e:
@@ -325,6 +325,7 @@ class InteractManager:
                 "doc_id": doc_id,
                 "domain": results[0]["domain"],
                 "title": results[0]["title"],
+                "author": results[0]["author"],
                 "info": results[0]["info"],
                 "tags": results[0]["tags"],
                 "passages": []
@@ -401,7 +402,7 @@ class InteractManager:
             try:
                 results = collection.query(
                     expr=expr,
-                    output_fields=["doc_id", "passage_id", "domain", "title", "text", "info", "tags"]
+                    output_fields=["doc_id", "passage_id", "domain", "title", "author" "text", "info", "tags"]
                 )
                 print(f"[DEBUG] Query results count: {len(results) if results else 0}")
             except Exception as e:
