@@ -15,7 +15,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # flashrank 로컬 패키지 설치
-COPY flashrank /reranker/flashrank
+COPY ../flashrank /reranker/flashrank
 WORKDIR /reranker/flashrank
 RUN pip install -e .
 WORKDIR /reranker
