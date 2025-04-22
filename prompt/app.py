@@ -27,10 +27,7 @@ config_path = os.environ.get("PROMPT_CONFIG", "/prompt/config.json")
 RAG_ENDPOINT = os.environ.get("RAG_ENDPOINT", "http://nginx/rag")
 RERANKER_ENDPOINT = os.environ.get("RERANKER_ENDPOINT", "http://nginx/reranker")
 
-OLLAMA_CPU_ENDPOINT = os.environ.get("OLLAMA_CPU_ENDPOINT", "http://ollama:11434")
-OLLAMA_GPU_ENDPOINT = os.environ.get("OLLAMA_GPU_ENDPOINT", "http://ollama-gpu:11434")
-# 자동 선택 로직 (예시)
-OLLAMA_ENDPOINT = OLLAMA_GPU_ENDPOINT if os.environ.get("USE_GPU") == "1" else OLLAMA_CPU_ENDPOINT
+OLLAMA_ENDPOINT = os.environ.get("OLLAMA_ENDPOINT", "http://localhost:11434")
 
 class AgentService:
     def __init__(self, config_path:str=None):

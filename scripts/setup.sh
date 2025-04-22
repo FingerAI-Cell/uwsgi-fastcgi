@@ -277,6 +277,15 @@ setup_reranker() {
     echo "Reranker 설정이 성공적으로 변경되었습니다."
 }
 
+# GPU/CPU 모드에 따라 .env 파일 설정
+if [[ "$1" == *"-gpu" ]]; then
+  echo "[env] GPU 모드로 설정합니다"
+  cp .env.gpu .env
+else
+  echo "[env] CPU 모드로 설정합니다"
+  cp .env.cpu .env
+fi
+
 # 서비스 시작
 case "$1" in
   "all")

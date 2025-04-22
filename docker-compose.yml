@@ -183,9 +183,6 @@ services:
       - PROMPT_CONFIG=/prompt/config.json
       - RAG_ENDPOINT=http://nginx/rag
       - RERANKER_ENDPOINT=http://nginx/reranker
-      - OLLAMA_CPU_ENDPOINT=http://ollama:11434
-      - OLLAMA_GPU_ENDPOINT=http://ollama-gpu:11434
-      - USE_GPU=1
       - DEFAULT_MODEL=mistral
       - UWSGI_PROTOCOL=fastcgi
       - UWSGI_SOCKET=/tmp/prompt.sock
