@@ -10,7 +10,7 @@ transformers==4.39.3        # 업데이트
 tokenizers==0.15.2          # 업데이트
 numpy==1.26.4               # 업데이트
 huggingface_hub==0.22.2     # 업데이트
-flashrank==0.2.10           # 기존 유지
+#flashrank==0.2.10           # 기존 유지
 
 # PyTorch (CPU version)
 --extra-index-url https://download.pytorch.org/whl/cpu
