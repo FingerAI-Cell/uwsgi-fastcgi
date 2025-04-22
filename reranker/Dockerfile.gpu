@@ -14,13 +14,17 @@ RUN mkdir -p /var/log/reranker
 COPY requirements.gpu.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt 2>&1 | tee /tmp/pip.log && cat /tmp/pip.log || \
     (echo "❌ pip 설치 실패!" && exit 1)
-RUN pip install --no-cache-dir flashrank
+
+# flashrank 로컬 패키지 설치
+COPY flashrank /reranker/flashrank
+WORKDIR /reranker/flashrank
+RUN pip install -e .
+WORKDIR /reranker
 
 COPY . .
 
-# 모델 캐시 사전 다운로드
-RUN mkdir -p /reranker/models && \
-    python -c "from flashrank import Ranker; Ranker(model_name='ms-marco-TinyBERT-L-2-v2', cache_dir='/reranker/models')"
+# 모델 디렉토리 생성
+RUN mkdir -p /reranker/models
 
 EXPOSE 9020
 
@@ -28,7 +32,7 @@ EXPOSE 9020
 RUN echo -e '#!/bin/bash\nexec $(which uwsgi) --ini /reranker/uwsgi.ini' > /opt/nvidia/entrypoint.d/uwsgi.sh && \
     chmod +x /opt/nvidia/entrypoint.d/uwsgi.sh
 
-    RUN if command -v uwsgi; then \
+RUN if command -v uwsgi; then \
     echo "✅ uwsgi found:" $(which uwsgi) && uwsgi --version; \
   else \
     echo "❌ uwsgi not found. Please check if it's installed!" && exit 1; \
