@@ -14,14 +14,20 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# flashrank 패키지 설치 (볼륨 마운트 전 기본 설치)
-RUN pip install -e /usr/local/lib/python3.10/site-packages/flashrank
+# flashrank 기본 패키지 설치
+RUN pip install flashrank
 
 # uwsgi 설치
 RUN pip install --no-cache-dir uwsgi
 
 # 프로젝트 파일 복사
 COPY . .
+
+# 시작 스크립트 생성
+RUN echo '#!/bin/bash\n\
+pip install -e /usr/local/lib/python3.10/site-packages/flashrank\n\
+exec uwsgi --ini /reranker/uwsgi.ini' > /start.sh && \
+    chmod +x /start.sh
 
 # 모델 디렉토리 생성
 RUN mkdir -p /reranker/models
@@ -30,4 +36,4 @@ RUN mkdir -p /reranker/models
 EXPOSE 9020
 
 # 실행 명령
-CMD ["uwsgi", "--ini", "/reranker/uwsgi.ini"] 
+CMD ["/start.sh"] 
