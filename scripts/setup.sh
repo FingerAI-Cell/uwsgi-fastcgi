@@ -469,7 +469,6 @@ case "$1" in
       echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
     fi
     ;;
-    ;;
   *)
     echo "Usage: $0 {all|all-gpu|rag|reranker|reranker-gpu|prompt|rag-reranker|rag-reranker-gpu|db|app-only|app-only-gpu|ollama|prompt_ollama|ollama-gpu|prompt_ollama-gpu}"
     echo "  all              - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(CPU) + DB)"
