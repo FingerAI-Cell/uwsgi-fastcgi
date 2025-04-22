@@ -1,9 +1,10 @@
 # 경량 모델 (4-8GB RAM)
-gemma:2b
+#gemma:2b
 
 # 중형 모델 (13GB+ RAM)
-mistral
-llama2
+#mistral
+#llama2
 
 # 대형 모델 (24GB+ RAM 또는 GPU 필수)
-mixtral
+#mixtral
+gemma3:12b

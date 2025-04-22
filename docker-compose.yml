@@ -109,7 +109,8 @@ services:
       - shared_tmp:/tmp
       - ./volumes/logs/nginx:/var/log/nginx
     ports:
-      - "80:80"
+    # 임시 변경 외부에서 가능하게 3000으로 기존 80
+      - "3000:80"
     networks:
       - rag_network
     profiles:
