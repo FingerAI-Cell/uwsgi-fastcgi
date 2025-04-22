@@ -66,9 +66,21 @@ class Ranker:
                 hf_model_name = huggingface_model_map[model_name]
                 
                 self.logger.info(f"Loading HuggingFace model: {hf_model_name}")
-                self.hf_tokenizer = AutoTokenizer.from_pretrained(hf_model_name)
+                
+                # 캐시 디렉토리 설정
+                if not self.model_dir.exists():
+                    self.model_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 모델과 토크나이저 로드
+                self.hf_tokenizer = AutoTokenizer.from_pretrained(
+                    hf_model_name,
+                    cache_dir=str(self.model_dir),
+                    local_files_only=False
+                )
                 self.hf_model = AutoModelForSequenceClassification.from_pretrained(
                     hf_model_name,
+                    cache_dir=str(self.model_dir),
+                    local_files_only=False,
                     trust_remote_code=True,
                     torch_dtype=torch.float32
 #                    torch_dtype=torch.float16 gpu 사용시 변경
@@ -118,8 +130,12 @@ class Ranker:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         if not self.model_dir.exists():
-            self.logger.info(f"Downloading {model_name}...")
-            self._download_model_files(model_name)
+            if model_name in huggingface_rankers and use_direct_hf_download:
+                self.logger.info(f"Model directory will be created by HuggingFace Hub...")
+                self.model_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                self.logger.info(f"Downloading {model_name}...")
+                self._download_model_files(model_name)
 
     def _download_model_files(self, model_name: str):
         """ Downloads and extracts the model files from a specified URL.

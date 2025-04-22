@@ -7,6 +7,7 @@ huggingface_model_map = {
 }
 listwise_rankers = {'rank_zephyr_7b_v1_full'}
 huggingface_rankers = {'ko-reranker-v1.1', 'gte-multilingual-reranker-base'}
+use_direct_hf_download = True  # HuggingFace Hub에서 직접 다운로드 사용
 
 default_cache_dir = "/tmp"
 default_model = "ms-marco-TinyBERT-L-2-v2"
