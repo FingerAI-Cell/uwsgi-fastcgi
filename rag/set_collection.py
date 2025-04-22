@@ -23,11 +23,12 @@ def main(args):
     data_passage_id = milvus_db.create_field_schema('passage_id', dtype='INT64')
     data_domain = milvus_db.create_field_schema('domain', dtype='VARCHAR', max_length=32)
     data_title = milvus_db.create_field_schema('title', dtype='VARCHAR', max_length=128)
+    data_author = milvus_db.create_field_schema('author', dtype='VARCHAR', max_length=128)
     data_text = milvus_db.create_field_schema('text', dtype='VARCHAR', max_length=512)   # 500B (500글자 단위로 문서 분할)
     data_text_emb = milvus_db.create_field_schema('text_emb', dtype='FLOAT_VECTOR', dim=1024)
     data_info = milvus_db.create_field_schema('info', dtype='JSON')
     data_tags = milvus_db.create_field_schema('tags', dtype='JSON')
-    schema_field_list = [data_doc_id, data_passage_id, data_domain, data_title, data_text, data_text_emb, data_info, data_tags]
+    schema_field_list = [data_doc_id, data_passage_id, data_domain, data_title, data_author, data_text, data_text_emb, data_info, data_tags]
 
     schema = milvus_db.create_schema(schema_field_list, 'schema for fai-rag, using fastcgi')
     collection = milvus_db.create_collection(args.collection_name, schema, shards_num=2)
