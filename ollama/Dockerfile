@@ -16,6 +16,9 @@ WORKDIR /app
 COPY init.sh models.txt ./
 RUN chmod 755 init.sh && \
     chmod 644 models.txt
+# 안전한 위치로 이동
+COPY init.sh /usr/local/bin/init.sh
+RUN chmod +x /usr/local/bin/init.sh
 
 # Ollama 실행을 위한 기본 포트 노출
 EXPOSE 11434

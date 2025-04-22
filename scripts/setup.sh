@@ -292,6 +292,8 @@ case "$1" in
     echo "Ollama 모델 다운로드 중..."
     sleep 3
     if docker ps | grep -q milvus-ollama-cpu; then
+      chmod 755 "$ROOT_DIR/ollama/init.sh"
+      ls -l "$ROOT_DIR/ollama/init.sh"
       docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
     else
       echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
@@ -310,6 +312,8 @@ case "$1" in
     echo "Ollama 모델 다운로드 중..."
     sleep 3
     if docker ps | grep -q milvus-ollama-gpu; then
+      chmod 755 "$ROOT_DIR/ollama/init.sh"
+      ls -l "$ROOT_DIR/ollama/init.sh"
       docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
     else
       echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
@@ -385,6 +389,8 @@ case "$1" in
     # 컨테이너가 실행 중인지 확인
     if docker ps | grep -q milvus-ollama-gpu; then
       # 모델 다운로드 시도
+      chmod 755 "$ROOT_DIR/ollama/init.sh"
+      ls -l "$ROOT_DIR/ollama/init.sh"
       docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
     else
       echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
@@ -401,6 +407,8 @@ case "$1" in
     # 컨테이너가 실행 중인지 확인
     if docker ps | grep -q milvus-ollama-cpu; then
       # 모델 다운로드 시도
+      chmod 755 "$ROOT_DIR/ollama/init.sh"
+      ls -l "$ROOT_DIR/ollama/init.sh"
       docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
     else
       echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
@@ -417,6 +425,8 @@ case "$1" in
     # 컨테이너가 실행 중인지 확인
     if docker ps | grep -q milvus-ollama-gpu; then
       # 모델 다운로드 시도
+      chmod 755 "$ROOT_DIR/ollama/init.sh"
+      ls -l "$ROOT_DIR/ollama/init.sh"
       docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
     else
       echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
@@ -433,6 +443,8 @@ case "$1" in
     echo "Ollama 모델 다운로드 중..."
     sleep 3
     if docker ps | grep -q milvus-ollama-cpu; then
+    chmod 755 "$ROOT_DIR/ollama/init.sh"
+      ls -l "$ROOT_DIR/ollama/init.sh"
       docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
     else
       echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
@@ -445,6 +457,18 @@ case "$1" in
     docker compose up -d nginx rag reranker prompt ollama-gpu
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
+
+    # 모델 다운로드 스크립트 실행
+    echo "Ollama 모델 다운로드 중..."
+    sleep 3
+    if docker ps | grep -q milvus-ollama-gpu; then
+    chmod 755 "$ROOT_DIR/ollama/init.sh"
+      ls -l "$ROOT_DIR/ollama/init.sh"
+      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
+    fi
+    ;;
     ;;
   *)
     echo "Usage: $0 {all|all-gpu|rag|reranker|reranker-gpu|prompt|rag-reranker|rag-reranker-gpu|db|app-only|app-only-gpu|ollama|prompt_ollama|ollama-gpu|prompt_ollama-gpu}"
