@@ -10,6 +10,9 @@ RUN apt-get update && \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Python 환경 설정
+ENV PYTHONPATH=/usr/local/lib/python3.10/site-packages:$PYTHONPATH
+
 # 필요한 Python 패키지 설치
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -25,6 +28,7 @@ COPY . .
 
 # 시작 스크립트 생성
 RUN echo '#!/bin/bash\n\
+pip uninstall -y flashrank\n\
 pip install -e /usr/local/lib/python3.10/site-packages/flashrank\n\
 exec uwsgi --ini /reranker/uwsgi.ini' > /start.sh && \
     chmod +x /start.sh

@@ -9,6 +9,9 @@ RUN apt-get update && \
     git && \
     rm -rf /var/lib/apt/lists/*
 
+# Python 환경 설정
+ENV PYTHONPATH=/usr/local/lib/python3.10/site-packages:$PYTHONPATH
+
 # Python 버전은 기본 제공되므로 conda로 다시 설치하지 않음
 RUN mkdir -p /var/log/reranker
 COPY requirements.gpu.txt requirements.txt
@@ -18,10 +21,19 @@ RUN pip install --no-cache-dir -r requirements.txt 2>&1 | tee /tmp/pip.log && ca
 # flashrank 기본 패키지 설치
 RUN pip install flashrank
 
+# uwsgi 설치 및 확인
+RUN pip install --no-cache-dir uwsgi && \
+    if command -v uwsgi; then \
+        echo "✅ uwsgi found:" $(which uwsgi) && uwsgi --version; \
+    else \
+        echo "❌ uwsgi not found. Please check if it's installed!" && exit 1; \
+    fi
+
 COPY . .
 
 # 시작 스크립트 생성
 RUN echo '#!/bin/bash\n\
+pip uninstall -y flashrank\n\
 pip install -e /usr/local/lib/python3.10/site-packages/flashrank\n\
 exec uwsgi --ini /reranker/uwsgi.ini' > /start.sh && \
     chmod +x /start.sh
@@ -31,15 +43,5 @@ RUN mkdir -p /reranker/models
 
 EXPOSE 9020
 
-# ✅ uwsgi 실행 스크립트 (경로 고정)
-RUN echo -e '#!/bin/bash\nexec $(which uwsgi) --ini /reranker/uwsgi.ini' > /opt/nvidia/entrypoint.d/uwsgi.sh && \
-    chmod +x /opt/nvidia/entrypoint.d/uwsgi.sh
-
-RUN if command -v uwsgi; then \
-    echo "✅ uwsgi found:" $(which uwsgi) && uwsgi --version; \
-  else \
-    echo "❌ uwsgi not found. Please check if it's installed!" && exit 1; \
-  fi
-
-# ✅ CMD 명확히 지정
+# 실행 명령
 CMD ["/start.sh"]
