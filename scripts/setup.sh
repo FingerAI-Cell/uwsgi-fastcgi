@@ -160,6 +160,7 @@ setup_nginx() {
             cp nginx/templates/rag.conf.template nginx/locations-enabled/rag.conf
             cp nginx/templates/reranker.conf.template nginx/locations-enabled/reranker.conf
             cp nginx/templates/prompt.conf.template nginx/locations-enabled/prompt.conf
+            cp nginx/templates/vision.conf.template nginx/locations-enabled/vision.conf
             ;;
         "rag")
             # rag만 복사
@@ -178,10 +179,14 @@ setup_nginx() {
             cp nginx/templates/rag.conf.template nginx/locations-enabled/rag.conf
             cp nginx/templates/reranker.conf.template nginx/locations-enabled/reranker.conf
             ;;
+        "vision")
+            # vision만 복사
+            cp nginx/templates/vision.conf.template nginx/locations-enabled/vision.conf
+            ;;
     esac
     
     # 소켓 파일 권한 설정 (공유 폴더 고려)
-    for sock in /tmp/rag.sock /tmp/reranker.sock /tmp/prompt.sock; do
+    for sock in /tmp/rag.sock /tmp/reranker.sock /tmp/prompt.sock /tmp/vision.sock; do
         if [ -S "$sock" ]; then
             chmod 666 "$sock" 2>/dev/null || true
         else
@@ -204,6 +209,8 @@ export UWSGI_CHMOD_SOCKET=666
 # 사용 가능한 서비스 목록
 prompt_services=(
     "vision"          # Vision 서비스
+    "vision-ollama"   # Vision + Ollama 서비스 (CPU)
+    "vision-ollama-gpu" # Vision + Ollama 서비스 (GPU)
     "rag_reranker"    # RAG + Reranker 서비스 조합
     "prompt"          # Prompt 서비스
     "rag"            # RAG 서비스
@@ -223,6 +230,8 @@ prompt_services=(
 declare -A profiles=(
     ["vision"]="vision-only"
     ["vision-gpu"]="vision-only,gpu-only"
+    ["vision-ollama"]="vision-only,ollama-only,cpu-only"
+    ["vision-ollama-gpu"]="vision-only,gpu-only"
     ["rag_reranker"]="app-only"
     ["rag_reranker-gpu"]="app-only,gpu-only"
     ["prompt"]="prompt-only"
@@ -292,10 +301,10 @@ fi
 # 서비스 시작
 case "$1" in
   "all")
-    echo "모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(CPU) + DB)"
+    echo "모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(CPU) + DB + Vision)"
     setup_nginx "all"
     setup_reranker "cpu"
-    docker compose --profile all --profile cpu-only up -d
+    docker compose --profile all --profile cpu-only up -d vision
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
     docker restart milvus-standalone milvus-rag
@@ -312,10 +321,10 @@ case "$1" in
     fi
     ;;
   "all-gpu")
-    echo "모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(GPU) + DB)"
+    echo "모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(GPU) + DB + Vision)"
     setup_nginx "all"
     setup_reranker "gpu"
-    docker compose --profile gpu-only up -d nginx rag reranker prompt ollama-gpu standalone etcd etcd_init minio
+    docker compose --profile gpu-only up -d nginx rag reranker prompt ollama-gpu standalone etcd etcd_init minio vision
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
     docker restart milvus-standalone milvus-rag
@@ -445,9 +454,9 @@ case "$1" in
     fi
     ;;
   "app-only")
-    echo "앱 서비스만 시작 중... (RAG + Reranker + Prompt + Ollama(CPU), DB 제외)"
+    echo "앱 서비스만 시작 중... (RAG + Reranker + Prompt + Ollama(CPU) + Vision, DB 제외)"
     setup_nginx "all"
-    docker compose up -d nginx rag reranker prompt ollama
+    docker compose up -d nginx rag reranker prompt ollama vision
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
     
@@ -463,10 +472,10 @@ case "$1" in
     fi
     ;;
   "app-only-gpu")
-    echo "앱 서비스만 시작 중... (RAG + Reranker + Prompt + Ollama(GPU), DB 제외)"
+    echo "앱 서비스만 시작 중... (RAG + Reranker + Prompt + Ollama(GPU) + Vision, DB 제외)"
     setup_nginx "all"
     setup_reranker "gpu"
-    docker compose up -d nginx rag reranker prompt ollama-gpu
+    docker compose up -d nginx rag reranker prompt ollama-gpu vision
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
 
@@ -476,7 +485,7 @@ case "$1" in
     if docker ps | grep -q milvus-ollama-gpu; then
     chmod 755 "$ROOT_DIR/ollama/init.sh"
       ls -l "$ROOT_DIR/ollama/init.sh"
-      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
     else
       echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
     fi
@@ -486,10 +495,42 @@ case "$1" in
     setup_nginx "vision"
     docker compose --profile vision-only up -d
     ;;
+  "vision-ollama")
+    echo "Vision과 Ollama 서비스 조합 시작 중... (CPU 모드)"
+    setup_nginx "vision"
+    docker compose --profile vision-only --profile ollama-only --profile cpu-only up -d
+    
+    # 모델 다운로드 스크립트 실행
+    echo "Ollama 모델 다운로드 중..."
+    sleep 3
+    if docker ps | grep -q milvus-ollama-cpu; then
+      chmod 755 "$ROOT_DIR/ollama/init.sh"
+      ls -l "$ROOT_DIR/ollama/init.sh"
+      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
+    fi
+    ;;
+  "vision-ollama-gpu")
+    echo "Vision과 Ollama 서비스 조합 시작 중... (GPU 모드)"
+    setup_nginx "vision"
+    docker compose --profile vision-only --profile gpu-only up -d
+    
+    # 모델 다운로드 스크립트 실행
+    echo "Ollama 모델 다운로드 중..."
+    sleep 3
+    if docker ps | grep -q milvus-ollama-gpu; then
+      chmod 755 "$ROOT_DIR/ollama/init.sh"
+      ls -l "$ROOT_DIR/ollama/init.sh"
+      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
+    fi
+    ;;
   *)
-    echo "Usage: $0 {all|all-gpu|rag|reranker|reranker-gpu|prompt|rag-reranker|rag-reranker-gpu|db|app-only|app-only-gpu|ollama|prompt_ollama|ollama-gpu|prompt_ollama-gpu|vision}"
-    echo "  all              - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(CPU) + DB)"
-    echo "  all-gpu          - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(GPU) + DB)"
+    echo "Usage: $0 {all|all-gpu|rag|reranker|reranker-gpu|prompt|rag-reranker|rag-reranker-gpu|db|app-only|app-only-gpu|ollama|prompt_ollama|ollama-gpu|prompt_ollama-gpu|vision|vision-ollama|vision-ollama-gpu}"
+    echo "  all              - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(CPU) + DB + Vision)"
+    echo "  all-gpu          - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(GPU) + DB + Vision)"
     echo "  rag              - RAG 서비스만 시작 (DB 포함)"
     echo "  reranker         - Reranker 서비스만 시작 (CPU 모드)"
     echo "  reranker-gpu     - Reranker 서비스만 시작 (GPU 모드)"
@@ -497,12 +538,14 @@ case "$1" in
     echo "  rag-reranker     - RAG와 Reranker 서비스 시작 (CPU 모드, DB 포함)"
     echo "  rag-reranker-gpu - RAG와 Reranker 서비스 시작 (GPU 모드, DB 포함)"
     echo "  db               - 데이터베이스 서비스만 시작 (Milvus, Etcd, MinIO)"
-    echo "  app-only         - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(CPU), DB 제외)"
-    echo "  app-only-gpu     - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(GPU), DB 제외)"
+    echo "  app-only         - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(CPU) + Vision, DB 제외)"
+    echo "  app-only-gpu     - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(GPU) + Vision, DB 제외)"
     echo "  ollama           - Ollama 서비스만 시작 (CPU 모드)"
     echo "  ollama-gpu       - Ollama 서비스만 시작 (GPU 모드)"
     echo "  prompt_ollama    - Prompt와 Ollama 서비스 조합 (CPU 모드)"
     echo "  prompt_ollama-gpu - Prompt와 Ollama 서비스 조합 (GPU 모드)"
     echo "  vision           - Vision 서비스만 시작"
+    echo "  vision-ollama    - Vision과 Ollama 서비스 조합 (CPU 모드)"
+    echo "  vision-ollama-gpu - Vision과 Ollama 서비스 조합 (GPU 모드)"
     ;;
 esac
