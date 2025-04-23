@@ -20,17 +20,20 @@ logger = logging.getLogger(__name__)
 def load_config():
     try:
         with open('/vision/config.json', 'r') as f:
-            return json.load(f)
+            config = json.load(f)
+            logger.info(f"로드된 설정: {config}")  # 설정 내용 로깅
+            return config
     except Exception as e:
         logger.error(f"설정 파일 로드 실패: {str(e)}")
         return {}
 
 config = load_config()
+logger.info(f"전역 config 변수 내용: {config}")  # 전역 변수에 저장된 설정 내용 로깅
 
 def call_ollama_api(model: str, prompt: str, image_url: str) -> Optional[Dict[str, Any]]:
     """Ollama API를 호출하여 이미지 분석을 수행합니다."""
     try:
-        ollama_url = os.getenv('OLLAMA_ENDPOINT', config.get('ollama_endpoint', 'http://ollama:11434'))
+        ollama_url = os.environ.get("OLLAMA_ENDPOINT", "http://localhost:11434")
         logger.info(f"Ollama URL: {ollama_url}")
         
         # 이미지 URL에서 이미지를 다운로드하고 base64로 인코딩
@@ -50,6 +53,7 @@ def call_ollama_api(model: str, prompt: str, image_url: str) -> Optional[Dict[st
             "images": [image_base64],
             "stream": False  # 스트리밍 비활성화
         }
+        logger.info(f"Ollama API 요청 데이터 - model: {model}")  # 모델명 로깅
         logger.info("Ollama API 요청 준비 완료")
         
         # API 호출
