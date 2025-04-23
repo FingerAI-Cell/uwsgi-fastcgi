@@ -212,7 +212,7 @@ prompt_services=(
     "ollama"          # Ollama 서비스 (CPU)
     "ollama-gpu"      # Ollama 서비스 (GPU)
     "prompt_ollama"   # Prompt + Ollama 서비스 조합 (CPU)
-    "prompt_ollama-gpu"# Prompt + Ollama 서비스 조합 (GPU)
+    "prompt_ollama-gpu" # Prompt + Ollama 서비스 조합 (GPU)
     "all"             # 모든 서비스 (CPU 모드)
     "all-gpu"         # 모든 서비스 (GPU 모드)
     "app-only"        # 앱 서비스만 (CPU 모드)
