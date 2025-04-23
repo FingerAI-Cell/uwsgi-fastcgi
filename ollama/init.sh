@@ -50,7 +50,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         if [ "$TOTAL_RAM_GB" -lt 13 ] && [[ "$line" != gemma:2b ]]; then
             echo "RAM 부족 (${TOTAL_RAM_GB}GB): 무거운 모델($line)은 건너뜁니다."
             continue
-        elif [ "$TOTAL_RAM_GB" -lt 24 ] && [[ "$line" == mixtral* ]]; then
+        elif [ "$TOTAL_RAM_GB" -lt 24 ] && [[ "$line" == mixtral* ]]; then                                                                                                                                         
             echo "RAM 부족 (${TOTAL_RAM_GB}GB): 대형 모델($line)은 건너뜁니다."
             continue
         fi

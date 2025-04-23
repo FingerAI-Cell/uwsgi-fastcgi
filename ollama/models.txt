@@ -1,4 +1,4 @@
-# 경량 모델 (4-8GB RAM)
+﻿# 경량 모델 (4-8GB RAM)
 #gemma:2b
 
 # 중형 모델 (13GB+ RAM)
@@ -8,4 +8,4 @@
 # 대형 모델 (24GB+ RAM 또는 GPU 필수)
 #mixtral
 gemma3:12b
-llama3.2-vision  # Meta의 Llama 3.2 Vision 11B 모델
+llama3.2-vision:11b
