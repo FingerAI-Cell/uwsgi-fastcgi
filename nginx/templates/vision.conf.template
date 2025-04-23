@@ -1,27 +1,17 @@
 location /vision/ {
     include fastcgi_params;
-    fastcgi_param PATH_INFO $fastcgi_script_name;
-    fastcgi_param SCRIPT_NAME "";
     fastcgi_pass unix:/tmp/vision.sock;
+    fastcgi_param SCRIPT_NAME /vision;
+    fastcgi_param PATH_INFO $fastcgi_script_name;
+    fastcgi_param QUERY_STRING $query_string;
+    fastcgi_param REQUEST_METHOD $request_method;
+    fastcgi_param CONTENT_TYPE $content_type;
+    fastcgi_param CONTENT_LENGTH $content_length;
+    fastcgi_pass_request_body on;
+    fastcgi_intercept_errors on;
+    fastcgi_read_timeout 300s; # 5분 타임아웃
     
-    # 파일 업로드 설정
-    client_max_body_size 100M;
-    fastcgi_read_timeout 300;
-    fastcgi_send_timeout 300;
-    
-    # CORS 설정
-    add_header 'Access-Control-Allow-Origin' '*';
-    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
-    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
-    
-    # OPTIONS 요청 처리
-    if ($request_method = 'OPTIONS') {
-        add_header 'Access-Control-Allow-Origin' '*';
-        add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
-        add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
-        add_header 'Access-Control-Max-Age' 1728000;
-        add_header 'Content-Type' 'text/plain; charset=utf-8';
-        add_header 'Content-Length' 0;
-        return 204;
-    }
+    # 로깅
+    access_log /var/log/nginx/vision_access.log;
+    error_log /var/log/nginx/vision_error.log error;
 } 
