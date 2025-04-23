@@ -82,12 +82,17 @@ def health_check():
 def analyze_media():
     """이미지 분석을 수행합니다."""
     try:
+        logger.info("이미지 분석 요청 시작")
         # 요청 데이터 검증
         data = request.get_json()
+        logger.info(f"받은 요청 데이터: {data}")
+        
         if not data:
+            logger.error("JSON 데이터가 없음")
             return jsonify({"error": "JSON 데이터가 필요합니다"}), 400
             
         if 'url' not in data:
+            logger.error("이미지 URL이 없음")
             return jsonify({"error": "이미지 URL이 필요합니다"}), 400
             
         # 파라미터 추출
@@ -95,13 +100,19 @@ def analyze_media():
         prompt = data.get('prompt', "이 이미지에 대해 설명해주세요")
         model = data.get('model', config.get('default_model', 'llama3.2-vision'))
         
+        logger.info(f"분석 파라미터 - URL: {image_url}, Prompt: {prompt}, Model: {model}")
+        
         # Ollama API 호출
+        logger.info("Ollama API 호출 시작")
         result = call_ollama_api(model, prompt, image_url)
         if not result:
+            logger.error("Ollama API 호출 실패")
             return jsonify({"error": "이미지 분석에 실패했습니다"}), 500
             
+        logger.info(f"Ollama API 응답: {result}")
+            
         # 응답 반환
-        return jsonify({
+        response = {
             "description": result.get('response'),
             "image_url": image_url,
             "model": model,
@@ -110,10 +121,12 @@ def analyze_media():
             "prompt_eval_count": result.get('prompt_eval_count'),
             "eval_count": result.get('eval_count'),
             "eval_duration": result.get('eval_duration')
-        }), 200
+        }
+        logger.info(f"최종 응답: {response}")
+        return jsonify(response), 200
             
     except Exception as e:
-        logger.error(f"미디어 분석 중 오류 발생: {str(e)}")
+        logger.error(f"미디어 분석 중 오류 발생: {str(e)}", exc_info=True)
         return jsonify({"error": "미디어 분석 중 오류가 발생했습니다"}), 500
 
 if __name__ == '__main__':
