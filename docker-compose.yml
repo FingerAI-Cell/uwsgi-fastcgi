@@ -262,6 +262,7 @@ services:
       - all
       - vision-only
       - app-only
+      - gpu-only
 
 networks:
   rag_network:

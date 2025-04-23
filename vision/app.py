@@ -93,7 +93,7 @@ def analyze_media():
         # 파라미터 추출
         image_url = data['url']
         prompt = data.get('prompt', "이 이미지에 대해 설명해주세요")
-        model = data.get('model', config.get('default_model', 'llama:3.2-11b-vision'))
+        model = data.get('model', config.get('default_model', 'llama3.2-vision'))
         
         # Ollama API 호출
         result = call_ollama_api(model, prompt, image_url)
