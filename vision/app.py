@@ -4,6 +4,7 @@ import logging
 import json
 import requests
 from typing import Optional, Dict, Any
+import base64
 
 app = Flask(__name__)
 
@@ -30,14 +31,26 @@ def call_ollama_api(model: str, prompt: str, image_url: str) -> Optional[Dict[st
     """Ollama API를 호출하여 이미지 분석을 수행합니다."""
     try:
         ollama_url = os.getenv('OLLAMA_ENDPOINT', config.get('ollama_endpoint', 'http://ollama:11434'))
+        logger.info(f"Ollama URL: {ollama_url}")
+        
+        # 이미지 URL에서 이미지를 다운로드하고 base64로 인코딩
+        try:
+            image_response = requests.get(image_url)
+            image_response.raise_for_status()
+            image_base64 = base64.b64encode(image_response.content).decode('utf-8')
+            logger.info("이미지 다운로드 및 base64 인코딩 완료")
+        except Exception as e:
+            logger.error(f"이미지 다운로드 실패: {str(e)}")
+            return None
         
         # API 요청 데이터
         payload = {
             "model": model,
             "prompt": prompt,
-            "images": [image_url],
+            "images": [image_base64],
             "stream": False  # 스트리밍 비활성화
         }
+        logger.info("Ollama API 요청 준비 완료")
         
         # API 호출
         response = requests.post(
@@ -47,7 +60,10 @@ def call_ollama_api(model: str, prompt: str, image_url: str) -> Optional[Dict[st
         )
         
         # 응답 검증
-        response.raise_for_status()
+        if response.status_code != 200:
+            logger.error(f"Ollama API 오류 응답: {response.text}")
+            return None
+            
         result = response.json()
         
         if not result.get('response'):
@@ -66,7 +82,7 @@ def call_ollama_api(model: str, prompt: str, image_url: str) -> Optional[Dict[st
         logger.error("Ollama API 응답을 JSON으로 파싱할 수 없습니다")
         return None
     except Exception as e:
-        logger.error(f"예상치 못한 오류 발생: {str(e)}")
+        logger.error(f"예상치 못한 오류 발생: {str(e)}", exc_info=True)
         return None
 
 @app.route('/vision/health', methods=['GET'])

@@ -248,7 +248,6 @@ services:
       - ./vision:/vision
       - shared_tmp:/tmp
       - ./volumes/logs/vision:/var/log/vision
-      - ./volumes/vision/uploads:/vision/uploads
     environment:
       - VISION_CONFIG=/vision/config.json
       - OLLAMA_ENDPOINT=${OLLAMA_ENDPOINT}
