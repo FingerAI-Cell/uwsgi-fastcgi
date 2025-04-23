@@ -69,7 +69,7 @@ def call_ollama_api(model: str, prompt: str, image_url: str) -> Optional[Dict[st
         logger.error(f"예상치 못한 오류 발생: {str(e)}")
         return None
 
-@app.route('/health', methods=['GET'])
+@app.route('/vision/health', methods=['GET'])
 def health_check():
     """서비스 상태를 확인합니다."""
     return jsonify({
@@ -78,7 +78,7 @@ def health_check():
         "default_model": config.get('default_model')
     }), 200
 
-@app.route('/analyze', methods=['POST'])
+@app.route('/vision/analyze', methods=['POST'])
 def analyze_media():
     """이미지 분석을 수행합니다."""
     try:
