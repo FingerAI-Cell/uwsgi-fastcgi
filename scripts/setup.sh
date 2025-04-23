@@ -142,7 +142,7 @@ echo "소유권 확인:"
 ls -ld "$MILVUS_PATH"
 
 # 로컬 볼륨 디렉토리 생성 (설정 파일과 로그용)
-mkdir -p ./volumes/logs/{nginx,rag,reranker,prompt}
+mkdir -p ./volumes/logs/{nginx,rag,reranker,prompt,vision}
 
 # nginx 설정 파일 관리
 setup_nginx() {
@@ -249,7 +249,67 @@ declare -A profiles=(
     ["app-only-gpu"]="app-only,gpu-only"
 )
 
-# Reranker 설정 함수 수정
+# 서비스 설명 목록
+declare -A service_descriptions=(
+    ["all"]="모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(CPU) + DB + Vision)"
+    ["all-gpu"]="모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(GPU) + DB + Vision)"
+    ["rag"]="RAG 서비스만 시작 (DB 포함)"
+    ["reranker"]="Reranker 서비스만 시작 (CPU 모드)"
+    ["reranker-gpu"]="Reranker 서비스만 시작 (GPU 모드)"
+    ["prompt"]="Prompt 서비스만 시작"
+    ["rag-reranker"]="RAG와 Reranker 서비스 시작 (CPU 모드, DB 포함)"
+    ["rag-reranker-gpu"]="RAG와 Reranker 서비스 시작 (GPU 모드, DB 포함)"
+    ["db"]="데이터베이스 서비스만 시작 (Milvus, Etcd, MinIO)"
+    ["app-only"]="앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(CPU) + Vision, DB 제외)"
+    ["app-only-gpu"]="앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(GPU) + Vision, DB 제외)"
+    ["ollama"]="Ollama 서비스만 시작 (CPU 모드)"
+    ["ollama-gpu"]="Ollama 서비스만 시작 (GPU 모드)"
+    ["prompt_ollama"]="Prompt와 Ollama 서비스 조합 (CPU 모드)"
+    ["prompt_ollama-gpu"]="Prompt와 Ollama 서비스 조합 (GPU 모드)"
+    ["vision"]="Vision 서비스만 시작"
+    ["vision-ollama"]="Vision과 Ollama 서비스 조합 (CPU 모드)"
+    ["vision-ollama-gpu"]="Vision과 Ollama 서비스 조합 (GPU 모드)"
+)
+
+# 서비스 구성별 필요 컨테이너 매핑
+declare -A service_containers=(
+    ["all"]="nginx rag reranker prompt ollama standalone etcd etcd_init minio vision"
+    ["all-gpu"]="nginx rag reranker prompt ollama-gpu standalone etcd etcd_init minio vision"
+    ["rag"]="nginx rag standalone etcd etcd_init minio"
+    ["reranker"]="nginx reranker"
+    ["prompt"]="nginx prompt"
+    ["rag-reranker"]="nginx rag reranker standalone etcd etcd_init minio"
+    ["db"]="standalone etcd etcd_init minio"
+    ["app-only"]="nginx rag reranker prompt ollama vision"
+    ["app-only-gpu"]="nginx rag reranker prompt ollama-gpu vision"
+    ["ollama"]="ollama"
+    ["ollama-gpu"]="ollama-gpu"
+    ["prompt_ollama"]="nginx prompt ollama"
+    ["prompt_ollama-gpu"]="nginx prompt ollama-gpu"
+    ["vision"]="nginx vision"
+    ["vision-ollama"]="nginx vision ollama"
+    ["vision-ollama-gpu"]="nginx vision ollama-gpu"
+)
+
+# nginx 설정 모드 매핑
+declare -A nginx_modes=(
+    ["all"]="all"
+    ["all-gpu"]="all"
+    ["rag"]="rag"
+    ["reranker"]="reranker"
+    ["prompt"]="prompt"
+    ["rag-reranker"]="rag-reranker"
+    ["rag-reranker-gpu"]="rag-reranker"
+    ["app-only"]="all"
+    ["app-only-gpu"]="all"
+    ["prompt_ollama"]="prompt"
+    ["prompt_ollama-gpu"]="prompt"
+    ["vision"]="vision"
+    ["vision-ollama"]="vision"
+    ["vision-ollama-gpu"]="vision"
+)
+
+# Reranker 설정 함수
 setup_reranker() {
     local mode=$1
     echo "Reranker 설정 구성 중... (모드: $mode)"
@@ -289,263 +349,133 @@ setup_reranker() {
     echo "Reranker 설정이 성공적으로 변경되었습니다."
 }
 
+# 공통 함수: RAG 컨테이너 numpy 패키지 수정
+fix_rag_numpy() {
+    if docker ps | grep -q milvus-rag; then
+        echo "RAG 컨테이너의 numpy 패키지 수정 중..."
+        docker exec -it milvus-rag pip uninstall numpy -y
+        docker exec -it milvus-rag pip install numpy==1.24.4
+    fi
+}
+
+# 공통 함수: Ollama 모델 다운로드
+download_ollama_models() {
+    local container_name=$1
+    echo "Ollama 모델 다운로드 중..."
+    sleep 3
+    if docker ps | grep -q $container_name; then
+        chmod 755 "$ROOT_DIR/ollama/init.sh"
+        ls -l "$ROOT_DIR/ollama/init.sh"
+        docker exec $container_name /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
+    else
+        echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs $container_name"
+    fi
+}
+
+# 컨테이너 시작 함수
+start_containers() {
+    local mode=$1
+    local containers=$2
+    local use_profile=$3
+    
+    echo "${service_descriptions[$mode]}"
+    
+    # nginx 설정
+    if [[ -n "${nginx_modes[$mode]}" ]]; then
+        setup_nginx "${nginx_modes[$mode]}"
+    fi
+    
+    # reranker 설정 (GPU 모드이면)
+    if [[ "$mode" == *"-gpu" ]] && [[ "$containers" == *"reranker"* ]]; then
+        setup_reranker "gpu"
+    elif [[ "$containers" == *"reranker"* ]] && [[ "$mode" != "db" ]]; then
+        setup_reranker "cpu"
+    fi
+    
+    # 컨테이너 시작
+    if [ "$use_profile" = true ]; then
+        # 프로필 사용
+        if [[ "$mode" == *"-gpu" ]]; then
+            docker compose --profile gpu-only up -d
+        elif [ "$mode" = "db" ]; then
+            docker compose --profile db-only up -d
+        elif [ "$mode" = "rag" ]; then
+            docker compose --profile rag-only up -d
+        elif [ "$mode" = "reranker" ]; then
+            docker compose --profile reranker-only up -d
+        elif [ "$mode" = "prompt" ]; then
+            docker compose --profile prompt-only up -d
+        elif [ "$mode" = "vision" ]; then
+            docker compose --profile vision-only up -d
+        elif [ "$mode" = "vision-ollama" ]; then
+            docker compose --profile vision-only --profile ollama-only --profile cpu-only up -d
+        elif [ "$mode" = "vision-ollama-gpu" ]; then
+            docker compose --profile vision-only --profile gpu-only up -d
+        elif [ "$mode" = "ollama" ]; then
+            docker compose --profile ollama-only --profile cpu-only up -d
+        elif [ "$mode" = "prompt_ollama" ]; then
+            docker compose --profile prompt-only --profile ollama-only --profile cpu-only up -d
+        elif [ "$mode" = "prompt_ollama-gpu" ]; then
+            docker compose --profile prompt-only --profile gpu-only up -d
+        else
+            docker compose --profile all --profile cpu-only up -d
+        fi
+    else
+        # 명시적 컨테이너 지정
+        docker compose up -d $containers
+    fi
+    
+    # RAG가 포함된 경우 numpy 패치
+    if [[ "$containers" == *"rag"* ]]; then
+        fix_rag_numpy
+        # 경우에 따라 DB 컨테이너 재시작
+        if [[ "$containers" == *"standalone"* ]]; then
+            docker restart milvus-standalone milvus-rag
+        fi
+    fi
+    
+    # Ollama가 포함된 경우 모델 다운로드
+    if [[ "$containers" == *"ollama"* ]] || [[ "$mode" == *"-gpu" && "$mode" != "reranker-gpu" && "$mode" != "rag-reranker-gpu" ]]; then
+        download_ollama_models $OLLAMA_CONTAINER
+    fi
+}
+
+# 사용법 출력 함수
+print_usage() {
+    local modes=""
+    for mode in "${!service_descriptions[@]}"; do
+        modes="$modes|$mode"
+    done
+    modes=${modes:1}  # 첫 번째 | 제거
+    
+    echo "Usage: $0 {$modes}"
+    for mode in "${!service_descriptions[@]}"; do
+        printf "  %-18s - %s\n" "$mode" "${service_descriptions[$mode]}"
+    done
+}
+
 # GPU/CPU 모드에 따라 .env 파일 설정
 if [[ "$1" == *"-gpu" ]]; then
-  echo "[env] GPU 모드로 설정합니다"
-  cp .env.gpu .env
+    echo "[env] GPU 모드로 설정합니다"
+    cp .env.gpu .env
+    OLLAMA_CONTAINER="milvus-ollama-gpu"
 else
-  echo "[env] CPU 모드로 설정합니다"
-  cp .env.cpu .env
+    echo "[env] CPU 모드로 설정합니다"
+    cp .env.cpu .env
+    OLLAMA_CONTAINER="milvus-ollama-cpu"
 fi
 
 # 서비스 시작
-case "$1" in
-  "all")
-    echo "모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(CPU) + DB + Vision)"
-    setup_nginx "all"
-    setup_reranker "cpu"
-    docker compose --profile all --profile cpu-only up -d vision
-    docker exec -it milvus-rag pip uninstall numpy -y
-    docker exec -it milvus-rag pip install numpy==1.24.4
-    docker restart milvus-standalone milvus-rag
-    
-    # 모델 다운로드 스크립트 실행
-    echo "Ollama 모델 다운로드 중..."
-    sleep 3
-    if docker ps | grep -q milvus-ollama-cpu; then
-      chmod 755 "$ROOT_DIR/ollama/init.sh"
-      ls -l "$ROOT_DIR/ollama/init.sh"
-      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
-    else
-      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
-    fi
-    ;;
-  "all-gpu")
-    echo "모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(GPU) + DB + Vision)"
-    setup_nginx "all"
-    setup_reranker "gpu"
-    docker compose --profile gpu-only up -d nginx rag reranker prompt ollama-gpu standalone etcd etcd_init minio vision
-    docker exec -it milvus-rag pip uninstall numpy -y
-    docker exec -it milvus-rag pip install numpy==1.24.4
-    docker restart milvus-standalone milvus-rag
-    
-    # 모델 다운로드 스크립트 실행
-    echo "Ollama 모델 다운로드 중..."
-    sleep 3
-    if docker ps | grep -q milvus-ollama-gpu; then
-      chmod 755 "$ROOT_DIR/ollama/init.sh"
-      ls -l "$ROOT_DIR/ollama/init.sh"
-      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
-    else
-      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
-    fi
-    ;;
-  "rag")
-    echo "RAG 서비스 시작 중... (RAG + DB)"
-    setup_nginx "rag"
-    docker compose --profile rag-only up -d
-    docker exec -it milvus-rag pip uninstall numpy -y
-    docker exec -it milvus-rag pip install numpy==1.24.4
-    docker restart milvus-standalone milvus-rag
-    ;;
-  "reranker")
-    echo "Reranker 서비스만 시작"
-    setup_reranker "cpu"
-    docker compose --profile reranker-only up -d
-    ;;
-  "reranker-gpu")
-    echo "Reranker 서비스만 시작 (GPU 모드)"
-    setup_reranker "gpu"
-    docker compose --profile reranker-only up -d
-    ;;
-  "prompt")
-    echo "Prompt 서비스만 시작 중..."
-    setup_nginx "prompt"
-    docker compose --profile prompt-only up -d
-    ;;
-  "rag-reranker")
-    echo "RAG + Reranker 서비스 시작 중... (DB 포함)"
-    setup_nginx "rag-reranker"
-    setup_reranker "cpu"
-    docker compose up -d nginx rag reranker standalone etcd etcd_init minio
-    docker exec -it milvus-rag pip uninstall numpy -y
-    docker exec -it milvus-rag pip install numpy==1.24.4
-    docker restart milvus-standalone milvus-rag
-    ;;
-  "rag-reranker-gpu")
-    echo "RAG + Reranker 서비스 시작 중... (GPU 모드, DB 포함)"
-    setup_nginx "rag-reranker"
-    setup_reranker "gpu"
-    docker compose up -d nginx rag reranker standalone etcd etcd_init minio
-    docker exec -it milvus-rag pip uninstall numpy -y
-    docker exec -it milvus-rag pip install numpy==1.24.4
-    docker restart milvus-standalone milvus-rag
-    ;;
-  "db")
-    echo "데이터베이스 서비스만 시작 중..."
-    docker compose --profile db-only up -d
-    ;;
-  "ollama")
-    echo "Ollama 서비스 시작 중... (CPU 모드)"
-    docker compose --profile ollama-only --profile cpu-only up -d
-    # 모델 다운로드 스크립트 실행
-    echo "Ollama 모델 다운로드 중..."
-    # 컨테이너가 완전히 시작될 때까지 잠시 대기
-    sleep 3
-    # 컨테이너가 실행 중인지 확인
-    if docker ps | grep -q milvus-ollama-cpu; then
-      # 모델 다운로드 시도
-      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
-    else
-      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
-    fi
-    ;;
-  "ollama-gpu")
-    echo "Ollama 서비스 시작 중... (GPU 모드)"
-    docker compose --profile gpu-only up -d
-    # 모델 다운로드 스크립트 실행
-    echo "Ollama 모델 다운로드 중..."
-    # 컨테이너가 완전히 시작될 때까지 잠시 대기
-    sleep 3
-    # 컨테이너가 실행 중인지 확인
-    if docker ps | grep -q milvus-ollama-gpu; then
-      # 모델 다운로드 시도
-      chmod 755 "$ROOT_DIR/ollama/init.sh"
-      ls -l "$ROOT_DIR/ollama/init.sh"
-      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
-    else
-      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
-    fi
-    ;;
-  "prompt_ollama")
-    echo "Prompt와 Ollama 서비스 조합 시작 중... (CPU 모드)"
-    setup_nginx "prompt"
-    docker compose --profile prompt-only --profile ollama-only --profile cpu-only up -d
-    # 모델 다운로드 스크립트 실행
-    echo "Ollama 모델 다운로드 중..."
-    # 컨테이너가 완전히 시작될 때까지 잠시 대기
-    sleep 3
-    # 컨테이너가 실행 중인지 확인
-    if docker ps | grep -q milvus-ollama-cpu; then
-      # 모델 다운로드 시도
-      chmod 755 "$ROOT_DIR/ollama/init.sh"
-      ls -l "$ROOT_DIR/ollama/init.sh"
-      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
-    else
-      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
-    fi
-    ;;
-  "prompt_ollama-gpu")
-    echo "Prompt와 Ollama 서비스 조합 시작 중... (GPU 모드)"
-    setup_nginx "prompt"
-    docker compose --profile prompt-only --profile gpu-only up -d
-    # 모델 다운로드 스크립트 실행
-    echo "Ollama 모델 다운로드 중..."
-    # 컨테이너가 완전히 시작될 때까지 잠시 대기
-    sleep 3
-    # 컨테이너가 실행 중인지 확인
-    if docker ps | grep -q milvus-ollama-gpu; then
-      # 모델 다운로드 시도
-      chmod 755 "$ROOT_DIR/ollama/init.sh"
-      ls -l "$ROOT_DIR/ollama/init.sh"
-      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
-    else
-      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
-    fi
-    ;;
-  "app-only")
-    echo "앱 서비스만 시작 중... (RAG + Reranker + Prompt + Ollama(CPU) + Vision, DB 제외)"
-    setup_nginx "all"
-    docker compose up -d nginx rag reranker prompt ollama vision
-    docker exec -it milvus-rag pip uninstall numpy -y
-    docker exec -it milvus-rag pip install numpy==1.24.4
-    
-    # 모델 다운로드 스크립트 실행
-    echo "Ollama 모델 다운로드 중..."
-    sleep 3
-    if docker ps | grep -q milvus-ollama-cpu; then
-    chmod 755 "$ROOT_DIR/ollama/init.sh"
-      ls -l "$ROOT_DIR/ollama/init.sh"
-      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
-    else
-      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
-    fi
-    ;;
-  "app-only-gpu")
-    echo "앱 서비스만 시작 중... (RAG + Reranker + Prompt + Ollama(GPU) + Vision, DB 제외)"
-    setup_nginx "all"
-    setup_reranker "gpu"
-    docker compose up -d nginx rag reranker prompt ollama-gpu vision
-    docker exec -it milvus-rag pip uninstall numpy -y
-    docker exec -it milvus-rag pip install numpy==1.24.4
+if [ -z "$1" ] || [ ! -n "${service_descriptions[$1]}" ]; then
+    print_usage
+    exit 1
+fi
 
-    # 모델 다운로드 스크립트 실행
-    echo "Ollama 모델 다운로드 중..."
-    sleep 3
-    if docker ps | grep -q milvus-ollama-gpu; then
-    chmod 755 "$ROOT_DIR/ollama/init.sh"
-      ls -l "$ROOT_DIR/ollama/init.sh"
-      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
-    else
-      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
-    fi
-    ;;
-  "vision")
-    echo "Vision 서비스 시작 중..."
-    setup_nginx "vision"
-    docker compose --profile vision-only up -d
-    ;;
-  "vision-ollama")
-    echo "Vision과 Ollama 서비스 조합 시작 중... (CPU 모드)"
-    setup_nginx "vision"
-    docker compose --profile vision-only --profile ollama-only --profile cpu-only up -d
-    
-    # 모델 다운로드 스크립트 실행
-    echo "Ollama 모델 다운로드 중..."
-    sleep 3
-    if docker ps | grep -q milvus-ollama-cpu; then
-      chmod 755 "$ROOT_DIR/ollama/init.sh"
-      ls -l "$ROOT_DIR/ollama/init.sh"
-      docker exec milvus-ollama-cpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
-    else
-      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-cpu"
-    fi
-    ;;
-  "vision-ollama-gpu")
-    echo "Vision과 Ollama 서비스 조합 시작 중... (GPU 모드)"
-    setup_nginx "vision"
-    docker compose --profile vision-only --profile gpu-only up -d
-    
-    # 모델 다운로드 스크립트 실행
-    echo "Ollama 모델 다운로드 중..."
-    sleep 3
-    if docker ps | grep -q milvus-ollama-gpu; then
-      chmod 755 "$ROOT_DIR/ollama/init.sh"
-      ls -l "$ROOT_DIR/ollama/init.sh"
-      docker exec milvus-ollama-gpu /app/init.sh || echo "모델 다운로드에 실패했습니다. Ollama API를 통해 수동으로 모델을 다운로드하세요."
-    else
-      echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
-    fi
-    ;;
-  *)
-    echo "Usage: $0 {all|all-gpu|rag|reranker|reranker-gpu|prompt|rag-reranker|rag-reranker-gpu|db|app-only|app-only-gpu|ollama|prompt_ollama|ollama-gpu|prompt_ollama-gpu|vision|vision-ollama|vision-ollama-gpu}"
-    echo "  all              - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(CPU) + DB + Vision)"
-    echo "  all-gpu          - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(GPU) + DB + Vision)"
-    echo "  rag              - RAG 서비스만 시작 (DB 포함)"
-    echo "  reranker         - Reranker 서비스만 시작 (CPU 모드)"
-    echo "  reranker-gpu     - Reranker 서비스만 시작 (GPU 모드)"
-    echo "  prompt           - Prompt 서비스만 시작"
-    echo "  rag-reranker     - RAG와 Reranker 서비스 시작 (CPU 모드, DB 포함)"
-    echo "  rag-reranker-gpu - RAG와 Reranker 서비스 시작 (GPU 모드, DB 포함)"
-    echo "  db               - 데이터베이스 서비스만 시작 (Milvus, Etcd, MinIO)"
-    echo "  app-only         - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(CPU) + Vision, DB 제외)"
-    echo "  app-only-gpu     - 앱 서비스만 시작 (RAG + Reranker + Prompt + Ollama(GPU) + Vision, DB 제외)"
-    echo "  ollama           - Ollama 서비스만 시작 (CPU 모드)"
-    echo "  ollama-gpu       - Ollama 서비스만 시작 (GPU 모드)"
-    echo "  prompt_ollama    - Prompt와 Ollama 서비스 조합 (CPU 모드)"
-    echo "  prompt_ollama-gpu - Prompt와 Ollama 서비스 조합 (GPU 모드)"
-    echo "  vision           - Vision 서비스만 시작"
-    echo "  vision-ollama    - Vision과 Ollama 서비스 조합 (CPU 모드)"
-    echo "  vision-ollama-gpu - Vision과 Ollama 서비스 조합 (GPU 모드)"
-    ;;
-esac
+# 컨테이너 시작
+if [ -n "${service_containers[$1]}" ]; then
+    # 명시적 컨테이너 목록이 있는 경우
+    start_containers "$1" "${service_containers[$1]}" false
+else
+    # 프로필 사용
+    start_containers "$1" "" true
+fi
