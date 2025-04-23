@@ -29,5 +29,5 @@ ENV PYTHONUNBUFFERED=1
 ENV FLASK_APP=app.py
 ENV FLASK_ENV=production
 
-# uWSGI로 실행
-CMD ["uwsgi", "--ini", "/vision/uwsgi.ini"] 
+# uWSGI로 실행 (Prompt 서비스와 동일한 방식)
+CMD ["uwsgi", "--socket", "/tmp/vision.sock", "--protocol", "fastcgi", "--module", "app:app", "--master", "--processes", "4", "--threads", "2", "--chmod-socket=666", "--logto", "/var/log/vision/uwsgi.log"] 
