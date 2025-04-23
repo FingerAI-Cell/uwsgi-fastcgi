@@ -240,6 +240,29 @@ services:
     profiles:
       - gpu-only
 
+  # Vision 서비스
+  vision:
+    build: ./vision
+    container_name: milvus-vision
+    volumes:
+      - ./vision:/vision
+      - shared_tmp:/tmp
+      - ./volumes/logs/vision:/var/log/vision
+      - ./volumes/vision/uploads:/vision/uploads
+    environment:
+      - VISION_CONFIG=/vision/config.json
+      - OLLAMA_ENDPOINT=${OLLAMA_ENDPOINT}
+      - UWSGI_PROTOCOL=fastcgi
+      - UWSGI_SOCKET=/tmp/vision.sock
+      - UWSGI_CHMOD_SOCKET=666
+    networks:
+      - rag_network
+    command: uwsgi --ini /vision/uwsgi.ini
+    profiles:
+      - all
+      - vision-only
+      - app-only
+
 networks:
   rag_network:
     name: rag_network

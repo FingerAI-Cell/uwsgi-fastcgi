@@ -27,6 +27,8 @@
 | 12 | [/prompt/summarize](#12-promptsummarize) | 문서 요약 |
 | 13 | [/prompt/chat](#13-promptchat) | 챗봇 응답 |
 | 14 | [/prompt/models](#14-promptmodels) | 모델 목록 |
+| 15 | [/vision/health](#15-visionhealth) | Vision 상태 |
+| 16 | [/vision/analyze](#16-visionanalyze) | 이미지 분석 |
 
 > **모든 URL** 는 `http://localhost` 기준이며, 실제 배포 시 호스트/포트를 맞춰 수정하세요.
 
@@ -308,7 +310,7 @@ curl -G http://localhost/rag/data/show --data-urlencode "collection_name=news"
 }
 ```
 
-### 실패 응답 예시 (없는 컬렉션 – **HTTP 200**)
+### 실패 응답 예시 (없는 컬렉션 – **HTTP 200**)
 ```json
 {
   "error": "유효한 Collection 이름을 입력해야 합니다.",
@@ -459,7 +461,7 @@ curl -X POST "http://localhost/reranker/rerank?top_k=3" \
 ```
 
 ### 응답 파라미터
-SearchResultModel + `reranked: true`
+SearchResultModel + `reranked: true`
 
 ### 성공 응답 예시
 ```json
@@ -665,6 +667,102 @@ curl -X GET http://localhost/prompt/models
 ### 실패 응답 예시
 ```json
 { "error": "모델 목록을 가져오는 중 오류가 발생했습니다" }
+```
+
+---
+
+## 15. /vision/health
+### 기본 정보
+| 항목 | 내용 |
+|------|------|
+| Method | **GET** |
+| URL | `/vision/health` |
+| 설명 | Vision 서비스 상태 확인 |
+
+### 요청 파라미터
+없음
+
+### 요청 예시
+```bash
+curl -X GET http://localhost/vision/health
+```
+
+### 응답 파라미터
+| 필드 | Type | 설명 |
+|------|------|------|
+| status | String | 서비스 상태 |
+| service | String | "vision" |
+| default_model | String | 기본 사용 모델 |
+
+### 성공 응답 예시
+```json
+{
+  "status": "healthy",
+  "service": "vision",
+  "default_model": "llama:3.2-11b-vision"
+}
+```
+
+---
+
+## 16. /vision/analyze
+### 기본 정보
+| 항목 | 내용 |
+|------|------|
+| Method | **POST** |
+| URL | `/vision/analyze` |
+| Content‑Type | `application/json` |
+| 설명 | 이미지 분석 수행 |
+
+### 요청 파라미터 (Body)
+| 이름 | 필수 | Type | 설명 |
+|------|------|------|------|
+| url | Y | String | 분석할 이미지 URL |
+| prompt | N | String | 분석 프롬프트 (기본값: "이 이미지에 대해 설명해주세요") |
+| model | N | String | 사용할 모델 (기본값: llama:3.2-11b-vision) |
+
+### 요청 예시
+```bash
+curl -X POST http://localhost/vision/analyze \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com/image.jpg",
+    "prompt": "이 이미지에 대해 설명해주세요",
+    "model": "llama:3.2-11b-vision"
+  }'
+```
+
+### 응답 파라미터
+| 필드 | Type | 설명 |
+|------|------|------|
+| description | String | 이미지 분석 결과 |
+| image_url | String | 분석된 이미지 URL |
+| model | String | 사용된 모델 |
+| total_duration | Number | 총 처리 시간 (ms) |
+| load_duration | Number | 모델 로딩 시간 (ms) |
+| prompt_eval_count | Number | 프롬프트 평가 횟수 |
+| eval_count | Number | 총 평가 횟수 |
+| eval_duration | Number | 평가 소요 시간 (ms) |
+
+### 성공 응답 예시
+```json
+{
+  "description": "이 이미지는 푸른 하늘을 배경으로 한 현대적인 도시 풍경을 보여줍니다...",
+  "image_url": "https://example.com/image.jpg",
+  "model": "llama:3.2-11b-vision",
+  "total_duration": 2345,
+  "load_duration": 123,
+  "prompt_eval_count": 50,
+  "eval_count": 100,
+  "eval_duration": 2000
+}
+```
+
+### 실패 응답 예시
+```json
+{
+  "error": "이미지 분석에 실패했습니다"
+}
 ```
 
 ---

@@ -1,0 +1,6 @@
+{
+    "upload_folder": "/vision/uploads",
+    "log_path": "/var/log/vision",
+    "ollama_endpoint": "http://ollama:11434",
+    "default_model": "llama:3.2-11b-vision"
+} 

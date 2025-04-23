@@ -77,8 +77,12 @@ case "$1" in
     echo "🛑 Prompt + Ollama 서비스 종료 중... (GPU 모드)"
     $DOCKER_CMD compose --profile prompt-only --profile gpu-only down
     ;;
+  "vision")
+    echo "🛑 Vision 서비스 종료 중..."
+    $DOCKER_CMD compose --profile vision-only down
+    ;;
   *)
-    echo "Usage: $0 {all|all-gpu|rag|reranker|prompt|rag-reranker|db|app-only|app-only-gpu|ollama|ollama-gpu|prompt_ollama|prompt_ollama-gpu}"
+    echo "Usage: $0 {all|all-gpu|rag|reranker|prompt|rag-reranker|db|app-only|app-only-gpu|ollama|ollama-gpu|prompt_ollama|prompt_ollama-gpu|vision}"
     echo "  all        - 모든 서비스 종료 (CPU 모드)"
     echo "  all-gpu    - 모든 서비스 종료 (GPU 모드)"
     echo "  rag          - RAG 서비스만 종료 (DB 포함)"
@@ -92,6 +96,7 @@ case "$1" in
     echo "  ollama-gpu   - Ollama 서비스만 종료 (GPU 모드)"
     echo "  prompt_ollama - Prompt와 Ollama 서비스 종료 (CPU 모드)"
     echo "  prompt_ollama-gpu - Prompt와 Ollama 서비스 종료 (GPU 모드)"
+    echo "  vision       - Vision 서비스만 종료"
     exit 1
     ;;
 esac

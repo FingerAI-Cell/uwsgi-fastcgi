@@ -203,23 +203,26 @@ export UWSGI_CHMOD_SOCKET=666
 
 # 사용 가능한 서비스 목록
 prompt_services=(
-    "rag_reranker" # RAG + Reranker 서비스 조합
-    "prompt" # Prompt 서비스
-    "rag" # RAG 서비스
-    "reranker" # Reranker 서비스
-    "milvus" # Milvus 서비스만
-    "ollama" # Ollama 서비스 (CPU)
-    "ollama-gpu" # Ollama 서비스 (GPU)
-    "prompt_ollama" # Prompt + Ollama 서비스 조합 (CPU)
-    "prompt_ollama-gpu" # Prompt + Ollama 서비스 조합 (GPU)
-    "all" # 모든 서비스 (CPU 모드)
-    "all-gpu" # 모든 서비스 (GPU 모드)
-    "app-only" # 앱 서비스만 (CPU 모드)
-    "app-only-gpu" # 앱 서비스만 (GPU 모드)
+    "vision"          # Vision 서비스
+    "rag_reranker"    # RAG + Reranker 서비스 조합
+    "prompt"          # Prompt 서비스
+    "rag"            # RAG 서비스
+    "reranker"        # Reranker 서비스
+    "milvus"          # Milvus 서비스만
+    "ollama"          # Ollama 서비스 (CPU)
+    "ollama-gpu"      # Ollama 서비스 (GPU)
+    "prompt_ollama"   # Prompt + Ollama 서비스 조합 (CPU)
+    "prompt_ollama-gpu"# Prompt + Ollama 서비스 조합 (GPU)
+    "all"             # 모든 서비스 (CPU 모드)
+    "all-gpu"         # 모든 서비스 (GPU 모드)
+    "app-only"        # 앱 서비스만 (CPU 모드)
+    "app-only-gpu"    # 앱 서비스만 (GPU 모드)
 )
 
 # 각 서비스 별 프로필 목록
 declare -A profiles=(
+    ["vision"]="vision-only"
+    ["vision-gpu"]="vision-only,gpu-only"
     ["rag_reranker"]="app-only"
     ["rag_reranker-gpu"]="app-only,gpu-only"
     ["prompt"]="prompt-only"
@@ -478,8 +481,13 @@ case "$1" in
       echo "Ollama 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs milvus-ollama-gpu"
     fi
     ;;
+  "vision")
+    echo "Vision 서비스 시작 중..."
+    setup_nginx "vision"
+    docker compose --profile vision-only up -d
+    ;;
   *)
-    echo "Usage: $0 {all|all-gpu|rag|reranker|reranker-gpu|prompt|rag-reranker|rag-reranker-gpu|db|app-only|app-only-gpu|ollama|prompt_ollama|ollama-gpu|prompt_ollama-gpu}"
+    echo "Usage: $0 {all|all-gpu|rag|reranker|reranker-gpu|prompt|rag-reranker|rag-reranker-gpu|db|app-only|app-only-gpu|ollama|prompt_ollama|ollama-gpu|prompt_ollama-gpu|vision}"
     echo "  all              - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(CPU) + DB)"
     echo "  all-gpu          - 모든 서비스 시작 (RAG + Reranker + Prompt + Ollama(GPU) + DB)"
     echo "  rag              - RAG 서비스만 시작 (DB 포함)"
@@ -495,5 +503,6 @@ case "$1" in
     echo "  ollama-gpu       - Ollama 서비스만 시작 (GPU 모드)"
     echo "  prompt_ollama    - Prompt와 Ollama 서비스 조합 (CPU 모드)"
     echo "  prompt_ollama-gpu - Prompt와 Ollama 서비스 조합 (GPU 모드)"
+    echo "  vision           - Vision 서비스만 시작"
     ;;
 esac

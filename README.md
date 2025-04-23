@@ -655,3 +655,18 @@ curl -X POST "http://localhost/prompt/summarize" \
 - **GPU 모드**: 더 큰 모델(mistral, llama3 등)을 사용할 수 있으며, 응답 속도가 빠릅니다.
 - 개발이나 테스트 환경에서는 CPU 모드를, 프로덕션 환경에서는 GPU 모드를 권장합니다.
 - RAM이 16GB 이상 있으면 CPU에서도 mistral 모델(7B)을 실행할 수 있지만, 매우 느립니다.
+
+# Vision 서비스 API (/vision/ 경로)
+```bash
+# 상태 확인 API
+curl -X GET http://localhost/vision/health
+
+# 이미지 분석 API
+curl -X POST http://localhost/vision/analyze \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com/image.jpg",
+    "prompt": "이 이미지에 대해 설명해주세요",
+    "model": "llama:3.2-11b-vision"
+  }'
+```
