@@ -13,18 +13,30 @@ from pydantic import BaseModel, Field
 from urllib.parse import quote_plus
 
 # 로깅 설정
+log_dir = "/var/log/reranker"
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# 스트림 핸들러만 사용
+# 스트림 핸들러 설정
 stream_handler = logging.StreamHandler()
 stream_handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 stream_handler.setFormatter(formatter)
+
+# 파일 핸들러 설정
+file_handler = logging.FileHandler(os.path.join(log_dir, 'app.log'))
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(formatter)
+
+# 핸들러 추가
 logger.addHandler(stream_handler)
+logger.addHandler(file_handler)
 
 # 상대 경로 import 대신 절대 경로 import로 변경
 from service import RerankerService

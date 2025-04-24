@@ -6,12 +6,16 @@ import logging
 import json 
 import os 
 
-logger = logging.getLogger('api_logger')
-logger.setLevel(logging.INFO)
-file_handler = logging.FileHandler('api-result.log')
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("/var/log/rag/app.log") if os.path.exists("/var/log/rag") else logging.FileHandler("app.log")
+    ]
+)
+logger = logging.getLogger("rag-backend")
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False

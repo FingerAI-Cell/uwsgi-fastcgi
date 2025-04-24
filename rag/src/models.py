@@ -7,6 +7,7 @@ import torch
 import warnings
 import torch
 import os
+import logging
 
 # 특정 경고 메시지 무시
 # warnings.filterwarnings("ignore", category=UserWarning, message="TypedStorage is deprecated")
@@ -18,6 +19,13 @@ class Model:
        
     def set_gpu(self):
         self.device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            logging.info(f"CUDA is available. GPU count: {torch.cuda.device_count()}")
+            for i in range(torch.cuda.device_count()):
+                logging.info(f"GPU {i}: {torch.cuda.get_device_name(i)}")
+            logging.info(f"Current GPU memory usage: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+        else:
+            logging.warning("CUDA is not available. Using CPU.")
 
     def set_random_state(self, seed=42):
         self.random_state = seed
@@ -36,15 +44,25 @@ class EmbModel(Model):
     def set_emb_model(self, model_type='bge'):
         if model_type == 'bge':
             from FlagEmbedding import BGEM3FlagModel
-            self.bge_emb = BGEM3FlagModel('BAAI/bge-m3',  use_fp16=True, device=self.device)
+            self.bge_emb = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True, device=self.device)
+            logging.info(f"Loaded BGE model on device: {self.device}")
+            if torch.cuda.is_available():
+                logging.info(f"GPU Memory after model load: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
         
              
     def bge_embed_data(self, text):
+        if torch.cuda.is_available():
+            logging.info(f"GPU Memory before embedding: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+            
         if isinstance(text, str):
             # encode result  => dense_vecs, lexical weights, colbert_vecs
             embeddings = self.bge_emb.encode(text, batch_size=self.emb_config['batch_size'], max_length=self.emb_config['max_length'])['dense_vecs']
         else:       
             embeddings = self.bge_emb.encode(list(text), batch_size=self.emb_config['batch_size'], max_length=self.emb_config['max_length'])['dense_vecs']  
+            
+        if torch.cuda.is_available():
+            logging.info(f"GPU Memory after embedding: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+            
         embeddings = list(map(np.float32, embeddings))
         return embeddings
 

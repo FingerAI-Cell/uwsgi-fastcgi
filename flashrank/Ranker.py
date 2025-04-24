@@ -44,9 +44,25 @@ class Ranker:
             log_level (str): Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
         """
         
-        # Setting up logging
+        # 로그 디렉토리 설정
+        log_dir = "/var/log/reranker"
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+            
+        # 로깅 설정
         logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO))
         self.logger = logging.getLogger(__name__)
+        
+        # 로그 포맷 설정
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        
+        # 파일 핸들러 설정
+        file_handler = logging.FileHandler(os.path.join(log_dir, 'ranker.log'))
+        file_handler.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+        file_handler.setFormatter(formatter)
+        
+        # 핸들러 추가
+        self.logger.addHandler(file_handler)
 
         self.cache_dir: Path = Path(cache_dir)
         self.model_dir: Path = self.cache_dir / model_name
@@ -279,16 +295,21 @@ class Ranker:
             self.logger.debug("Running HuggingFace reranking...")
             import torch
             
+            if self.device == "cuda":
+                self.logger.info(f"GPU Memory before inference: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+            
             pairs = [[query, passage["text"]] for passage in passages]
             
             with torch.no_grad():
                 inputs = self.hf_tokenizer(pairs, padding=True, truncation=True, return_tensors='pt', max_length=self.max_length)
-                # GPU로 입력 데이터 이동
                 if self.device == "cuda":
                     inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                    self.logger.info(f"GPU Memory after input loading: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+                
                 scores = self.hf_model(**inputs, return_dict=True).logits.view(-1, ).float()
-                # CPU로 결과 이동 후 numpy 변환
+                
                 if self.device == "cuda":
+                    self.logger.info(f"GPU Memory after inference: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
                     scores = scores.cpu()
                 scores = scores.numpy()
             
@@ -306,6 +327,10 @@ class Ranker:
         # LLM 방식 (Listwise ranking)
         elif self.llm_model is not None:
             self.logger.debug("Running listwise ranking..")
+            if self.device == "cuda":
+                self.logger.info("LLM model is using GPU layers")
+            else:
+                self.logger.warning("LLM model is running on CPU")
             num_of_passages = len(passages)
             messages = self._get_prefix_prompt(query, num_of_passages)
 
@@ -336,6 +361,9 @@ class Ranker:
         # ONNX 모델 방식 (Pairwise ranking)
         else:
             self.logger.debug("Running pairwise ranking..")
+            # ONNX provider 정보 로깅
+            if hasattr(self.session, '_providers'):
+                self.logger.info(f"Active ONNX providers: {self.session._providers}")
             query_passage_pairs = [[query, passage["text"]] for passage in passages]
 
             input_text = self.tokenizer.encode_batch(query_passage_pairs)
