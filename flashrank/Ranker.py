@@ -68,11 +68,17 @@ class Ranker:
         self.model_dir: Path = self.cache_dir / model_name
         self.max_length = max_length
         
-        # GPU 사용 가능 여부 확인
+        # GPU 사용 설정
         try:
             import torch
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.logger.info(f"Using device: {self.device}")
+            if torch.cuda.is_available():
+                os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # GPU 0 사용
+                self.device = "cuda:0"
+                self.logger.info(f"Using GPU 0: {self.device}")
+                self.logger.info(f"GPU Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+            else:
+                self.device = "cpu"
+                self.logger.info("GPU not available, using CPU only")
         except ImportError:
             self.device = "cpu"
             self.logger.info("PyTorch not found, using CPU only")

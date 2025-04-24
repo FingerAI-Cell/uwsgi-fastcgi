@@ -5,6 +5,7 @@ Service layer for reranking functionality
 import os
 import json
 import logging
+import torch
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from flashrank import Ranker, RerankRequest
@@ -115,11 +116,16 @@ class RerankerService:
         Returns:
             Configuration dictionary
         """
+        default_batch_size = {
+            "cpu": 32,
+            "gpu": 256
+        }
+        
         default_config = {
             "model_name": os.getenv("FLASHRANK_MODEL", "ms-marco-TinyBERT-L-2-v2"),
             "cache_dir": os.getenv("FLASHRANK_CACHE_DIR", "/reranker/models"),
             "max_length": int(os.getenv("FLASHRANK_MAX_LENGTH", "512")),
-            "batch_size": int(os.getenv("FLASHRANK_BATCH_SIZE", "32"))
+            "batch_size": default_batch_size
         }
         
         if not config_path:
@@ -128,6 +134,15 @@ class RerankerService:
         try:
             with open(config_path, 'r') as f:
                 config = json.load(f)
+                
+                # GPU 여부에 따라 배치 사이즈 선택
+                if isinstance(config.get("batch_size"), dict):
+                    mode = "gpu" if torch.cuda.is_available() else "cpu"
+                    config["batch_size"] = config["batch_size"].get(mode, default_batch_size[mode])
+                elif isinstance(config.get("batch_size"), (int, str)):
+                    # 이전 형식의 설정을 위한 하위 호환성 유지
+                    config["batch_size"] = int(config["batch_size"])
+                    
                 return {**default_config, **config}
         except Exception as e:
             logger.warning(f"Failed to load config from {config_path}: {e}")

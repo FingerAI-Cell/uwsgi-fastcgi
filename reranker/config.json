@@ -2,5 +2,8 @@
     "model_name": "gte-multilingual-reranker-base",
     "cache_dir": "/reranker/models",
     "max_length": 512,
-    "batch_size": 32
+    "batch_size": {
+        "cpu": 32,
+        "gpu": 256
+    }
 } 

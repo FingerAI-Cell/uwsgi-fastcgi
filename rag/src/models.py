@@ -18,14 +18,14 @@ class Model:
         self.set_gpu()
        
     def set_gpu(self):
-        self.device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
         if torch.cuda.is_available():
-            logging.info(f"CUDA is available. GPU count: {torch.cuda.device_count()}")
-            for i in range(torch.cuda.device_count()):
-                logging.info(f"GPU {i}: {torch.cuda.get_device_name(i)}")
-            logging.info(f"Current GPU memory usage: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # GPU 0 사용
+            self.device = torch.device("cuda:0")
+            logging.info(f"GPU is available. Using device: {self.device}")
+            logging.info(f"GPU Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
         else:
-            logging.warning("CUDA is not available. Using CPU.")
+            self.device = torch.device("cpu")
+            logging.info("GPU is not available. Using CPU instead.")
 
     def set_random_state(self, seed=42):
         self.random_state = seed
@@ -33,12 +33,23 @@ class Model:
 
 class EmbModel(Model):
     def __init__(self, config):
-        super().__init__(config) 
+        super().__init__(config)
+        # GPU/CPU에 따른 기본 배치 사이즈 설정
+        self.default_batch_sizes = {
+            "cpu": 12,
+            "gpu": 256
+        }
     
-    def set_embbeding_config(self, batch_size=12, max_length=1024):
+    def set_embbeding_config(self, batch_size=None, max_length=1024):
+        # GPU 여부에 따라 기본 배치 사이즈 선택
+        if batch_size is None:
+            mode = "gpu" if torch.cuda.is_available() else "cpu"
+            batch_size = self.default_batch_sizes[mode]
+            logging.info(f"Using {mode.upper()} mode with batch_size: {batch_size}")
+        
         self.emb_config = {
-            "batch_size": batch_size, 
-            "max_length": max_length 
+            "batch_size": batch_size,
+            "max_length": max_length
         }
 
     def set_emb_model(self, model_type='bge'):
