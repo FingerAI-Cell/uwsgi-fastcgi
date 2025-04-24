@@ -52,6 +52,15 @@ class Ranker:
         self.model_dir: Path = self.cache_dir / model_name
         self.max_length = max_length
         
+        # GPU 사용 가능 여부 확인
+        try:
+            import torch
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.logger.info(f"Using device: {self.device}")
+        except ImportError:
+            self.device = "cpu"
+            self.logger.info("PyTorch not found, using CPU only")
+        
         self.llm_model = None
         self.hf_model = None
         self.hf_tokenizer = None
@@ -82,9 +91,11 @@ class Ranker:
                     cache_dir=str(self.model_dir),
                     local_files_only=False,
                     trust_remote_code=True,
-                    torch_dtype=torch.float32
-#                    torch_dtype=torch.float16 gpu 사용시 변경
+                    torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
                 )
+                # GPU로 모델 이동
+                if self.device == "cuda":
+                    self.hf_model.to(self.device)
                 self.hf_model.eval()
             except ImportError:
                 raise ImportError("Please install torch and transformers to use HuggingFace models: pip install torch transformers")
@@ -99,15 +110,39 @@ class Ranker:
             if model_name in listwise_rankers:
                 try:
                     from llama_cpp import Llama
+                    # GPU 지원을 위한 옵션 설정
+                    gpu_layers = -1 if self.device == "cuda" else 0
                     self.llm_model = Llama(
-                    model_path=str(self.model_dir / model_file),
-                    n_ctx=max_length,  
-                    n_threads=8,          
-                    ) 
+                        model_path=str(self.model_dir / model_file),
+                        n_ctx=max_length,
+                        n_threads=8,
+                        n_gpu_layers=gpu_layers  # GPU 사용 시 모든 레이어를 GPU로
+                    )
+                    self.logger.info(f"LLM model loaded with GPU layers: {gpu_layers}")
                 except ImportError:
-                    raise ImportError("Please install it using 'pip install flashrank[listwise]' to run LLM based listwise rerankers.")
+                    raise ImportError("Please install llama-cpp-python with GPU support: CMAKE_ARGS='-DLLAMA_CUBLAS=on' pip install llama-cpp-python")
             else:
-                self.session = ort.InferenceSession(str(self.model_dir / model_file))
+                # ONNX Runtime providers 설정
+                providers = []
+                if self.device == "cuda":
+                    providers.extend([
+                        ('CUDAExecutionProvider', {
+                            'device_id': 0,
+                            'arena_extend_strategy': 'kNextPowerOfTwo',
+                            'gpu_mem_limit': 2 * 1024 * 1024 * 1024,
+                            'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                            'do_copy_in_default_stream': True,
+                        }),
+                        'CPUExecutionProvider'
+                    ])
+                else:
+                    providers.append('CPUExecutionProvider')
+                    
+                self.logger.info(f"Using ONNX Runtime providers: {providers}")
+                self.session = ort.InferenceSession(
+                    str(self.model_dir / model_file),
+                    providers=providers
+                )
                 self.tokenizer: Tokenizer = self._get_tokenizer(max_length)
 
     def _prepare_model_dir(self, model_name: str):
@@ -244,12 +279,18 @@ class Ranker:
             self.logger.debug("Running HuggingFace reranking...")
             import torch
             
-            # 쿼리와 패시지 쌍 생성
             pairs = [[query, passage["text"]] for passage in passages]
             
             with torch.no_grad():
                 inputs = self.hf_tokenizer(pairs, padding=True, truncation=True, return_tensors='pt', max_length=self.max_length)
-                scores = self.hf_model(**inputs, return_dict=True).logits.view(-1, ).float().cpu().numpy()
+                # GPU로 입력 데이터 이동
+                if self.device == "cuda":
+                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                scores = self.hf_model(**inputs, return_dict=True).logits.view(-1, ).float()
+                # CPU로 결과 이동 후 numpy 변환
+                if self.device == "cuda":
+                    scores = scores.cpu()
+                scores = scores.numpy()
             
             # 점수를 sigmoid 함수로 0~1 사이로 정규화
             scores = 1 / (1 + np.exp(-scores))
@@ -304,12 +345,14 @@ class Ranker:
 
             use_token_type_ids = token_type_ids is not None and not np.all(token_type_ids == 0)
 
-            onnx_input = {"input_ids": input_ids.astype(np.int64), "attention_mask": attention_mask.astype(np.int64)}
+            onnx_input = {
+                "input_ids": input_ids.astype(np.int64), 
+                "attention_mask": attention_mask.astype(np.int64)
+            }
             if use_token_type_ids:
                 onnx_input["token_type_ids"] = token_type_ids.astype(np.int64)
 
             outputs = self.session.run(None, onnx_input)
-
             logits = outputs[0]
 
             if logits.shape[1] == 1:

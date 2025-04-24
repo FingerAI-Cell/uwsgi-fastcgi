@@ -1,6 +1,9 @@
 """
 Reranker models for improving search results
 """
+"""
+혹여나 다른 구현 옵션이 필요할까봐 구현
+"""
 
 import os
 import json

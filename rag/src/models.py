@@ -36,7 +36,8 @@ class EmbModel(Model):
     def set_emb_model(self, model_type='bge'):
         if model_type == 'bge':
             from FlagEmbedding import BGEM3FlagModel
-            self.bge_emb = BGEM3FlagModel('BAAI/bge-m3',  use_fp16=True)
+            self.bge_emb = BGEM3FlagModel('BAAI/bge-m3',  use_fp16=True, device=self.device)
+        
              
     def bge_embed_data(self, text):
         if isinstance(text, str):
