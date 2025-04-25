@@ -65,11 +65,18 @@ class EmbModel(Model):
         if torch.cuda.is_available():
             logging.info(f"GPU Memory before embedding: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
             
+        batch_size = self.emb_config['batch_size']
+        logging.info(f"Using batch size: {batch_size}")
+        
         if isinstance(text, str):
             # encode result  => dense_vecs, lexical weights, colbert_vecs
-            embeddings = self.bge_emb.encode(text, batch_size=self.emb_config['batch_size'], max_length=self.emb_config['max_length'])['dense_vecs']
+            embeddings = self.bge_emb.encode(text, batch_size=batch_size, max_length=self.emb_config['max_length'])['dense_vecs']
+            logging.info(f"Embedded single text with batch size {batch_size}")
         else:       
-            embeddings = self.bge_emb.encode(list(text), batch_size=self.emb_config['batch_size'], max_length=self.emb_config['max_length'])['dense_vecs']  
+            total_samples = len(text)
+            logging.info(f"Embedding {total_samples} texts with batch size {batch_size}")
+            embeddings = self.bge_emb.encode(list(text), batch_size=batch_size, max_length=self.emb_config['max_length'])['dense_vecs']  
+            logging.info(f"Completed embedding {total_samples} texts in {total_samples//batch_size + (1 if total_samples%batch_size else 0)} batches")
             
         if torch.cuda.is_available():
             logging.info(f"GPU Memory after embedding: {torch.cuda.memory_allocated()/1024**2:.2f}MB")

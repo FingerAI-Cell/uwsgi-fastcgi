@@ -304,30 +304,67 @@ class Ranker:
             if self.device == "cuda":
                 self.logger.info(f"GPU Memory before inference: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
             
-            pairs = [[query, passage["text"]] for passage in passages]
+            # 배치 크기 설정 (GPU/CPU에 따라 다르게)
+            batch_size = 256 if self.device == "cuda" else 32
+            self.logger.info(f"Using batch size: {batch_size} on device: {self.device}")
             
-            with torch.no_grad():
-                inputs = self.hf_tokenizer(pairs, padding=True, truncation=True, return_tensors='pt', max_length=self.max_length)
-                if self.device == "cuda":
-                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                    self.logger.info(f"GPU Memory after input loading: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
-                
-                scores = self.hf_model(**inputs, return_dict=True).logits.view(-1, ).float()
-                
-                if self.device == "cuda":
-                    self.logger.info(f"GPU Memory after inference: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
-                    scores = scores.cpu()
-                scores = scores.numpy()
+            # 전체 패시지 수
+            total_passages = len(passages)
+            self.logger.info(f"Total passages to process: {total_passages}")
             
-            # 점수를 sigmoid 함수로 0~1 사이로 정규화
-            scores = 1 / (1 + np.exp(-scores))
+            # 배치 단위로 처리
+            all_scores = []
+            retry_count = 0
+            max_retries = 3
+            
+            while retry_count < max_retries:
+                try:
+                    for i in range(0, total_passages, batch_size):
+                        batch_passages = passages[i:i + batch_size]
+                        batch_pairs = [[query, passage["text"]] for passage in batch_passages]
+                        self.logger.info(f"Processing batch {i//batch_size + 1}/{(total_passages + batch_size - 1)//batch_size} with {len(batch_pairs)} pairs")
+                        
+                        with torch.no_grad():
+                            inputs = self.hf_tokenizer(batch_pairs, padding=True, truncation=True, return_tensors='pt', max_length=self.max_length)
+                            if self.device == "cuda":
+                                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                                self.logger.info(f"GPU Memory after input loading: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+                            
+                            batch_scores = self.hf_model(**inputs, return_dict=True).logits.view(-1, ).float()
+                            
+                            if self.device == "cuda":
+                                self.logger.info(f"GPU Memory after inference: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+                                batch_scores = batch_scores.cpu()
+                            batch_scores = batch_scores.numpy()
+                            all_scores.extend(1 / (1 + np.exp(-batch_scores)))  # sigmoid 정규화
+                            
+                            # 메모리 정리
+                            del inputs, batch_scores
+                            if self.device == "cuda":
+                                torch.cuda.empty_cache()
+                    
+                    break  # 성공적으로 처리 완료
+                    
+                except RuntimeError as e:
+                    if "out of memory" in str(e) and self.device == "cuda":
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            self.logger.warning(f"GPU OOM error. Reducing batch size and retrying. Attempt {retry_count}/{max_retries}")
+                            torch.cuda.empty_cache()  # 메모리 정리
+                            batch_size = batch_size // 2  # 배치 사이즈 절반으로 감소
+                            all_scores = []  # 점수 리스트 초기화
+                            continue
+                    raise  # 다른 에러이거나 최대 재시도 횟수 초과
             
             # 점수 할당
-            for score, passage in zip(scores, passages):
+            for score, passage in zip(all_scores, passages):
                 passage["score"] = float(score)
             
             # 점수 기준으로 내림차순 정렬
             passages.sort(key=lambda x: x["score"], reverse=True)
+            
+            self.logger.info(f"Completed reranking {total_passages} passages in {(total_passages + batch_size - 1)//batch_size} batches")
+            
             return passages
 
         # LLM 방식 (Listwise ranking)
@@ -367,36 +404,73 @@ class Ranker:
         # ONNX 모델 방식 (Pairwise ranking)
         else:
             self.logger.debug("Running pairwise ranking..")
-            # ONNX provider 정보 로깅
             if hasattr(self.session, '_providers'):
                 self.logger.info(f"Active ONNX providers: {self.session._providers}")
-            query_passage_pairs = [[query, passage["text"]] for passage in passages]
+            
+            # 배치 크기 설정
+            batch_size = 256 if 'CUDAExecutionProvider' in (self.session._providers if hasattr(self.session, '_providers') else []) else 32
+            self.logger.info(f"Using batch size: {batch_size} for ONNX model")
+            
+            total_passages = len(passages)
+            self.logger.info(f"Total passages to process: {total_passages}")
+            
+            all_scores = []
+            retry_count = 0
+            max_retries = 3
+            
+            while retry_count < max_retries:
+                try:
+                    for i in range(0, total_passages, batch_size):
+                        batch_passages = passages[i:i + batch_size]
+                        batch_pairs = [[query, passage["text"]] for passage in batch_passages]
+                        self.logger.info(f"Processing batch {i//batch_size + 1}/{(total_passages + batch_size - 1)//batch_size} with {len(batch_pairs)} pairs")
+                        
+                        input_text = self.tokenizer.encode_batch(batch_pairs)
+                        input_ids = np.array([e.ids for e in input_text])
+                        token_type_ids = np.array([e.type_ids for e in input_text])
+                        attention_mask = np.array([e.attention_mask for e in input_text])
 
-            input_text = self.tokenizer.encode_batch(query_passage_pairs)
-            input_ids = np.array([e.ids for e in input_text])
-            token_type_ids = np.array([e.type_ids for e in input_text])
-            attention_mask = np.array([e.attention_mask for e in input_text])
+                        use_token_type_ids = token_type_ids is not None and not np.all(token_type_ids == 0)
 
-            use_token_type_ids = token_type_ids is not None and not np.all(token_type_ids == 0)
+                        onnx_input = {
+                            "input_ids": input_ids.astype(np.int64), 
+                            "attention_mask": attention_mask.astype(np.int64)
+                        }
+                        if use_token_type_ids:
+                            onnx_input["token_type_ids"] = token_type_ids.astype(np.int64)
 
-            onnx_input = {
-                "input_ids": input_ids.astype(np.int64), 
-                "attention_mask": attention_mask.astype(np.int64)
-            }
-            if use_token_type_ids:
-                onnx_input["token_type_ids"] = token_type_ids.astype(np.int64)
+                        outputs = self.session.run(None, onnx_input)
+                        logits = outputs[0]
 
-            outputs = self.session.run(None, onnx_input)
-            logits = outputs[0]
+                        if logits.shape[1] == 1:
+                            batch_scores = 1 / (1 + np.exp(-logits.flatten()))
+                        else:
+                            exp_logits = np.exp(logits)
+                            batch_scores = exp_logits[:, 1] / np.sum(exp_logits, axis=1)
+                        
+                        all_scores.extend(batch_scores)
+                        self.logger.info(f"Completed batch {i//batch_size + 1}")
+                        
+                        # 메모리 정리
+                        del input_text, input_ids, token_type_ids, attention_mask, onnx_input, outputs, logits, batch_scores
+                    
+                    break  # 성공적으로 처리 완료
+                    
+                except RuntimeError as e:
+                    if "out of memory" in str(e) and 'CUDAExecutionProvider' in (self.session._providers if hasattr(self.session, '_providers') else []):
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            self.logger.warning(f"GPU OOM error. Reducing batch size and retrying. Attempt {retry_count}/{max_retries}")
+                            batch_size = batch_size // 2  # 배치 사이즈 절반으로 감소
+                            all_scores = []  # 점수 리스트 초기화
+                            continue
+                    raise  # 다른 에러이거나 최대 재시도 횟수 초과
 
-            if logits.shape[1] == 1:
-                scores = 1 / (1 + np.exp(-logits.flatten()))
-            else:
-                exp_logits = np.exp(logits)
-                scores = exp_logits[:, 1] / np.sum(exp_logits, axis=1)
-
-            for score, passage in zip(scores, passages):
-                passage["score"] = score
+            # 점수 할당
+            for score, passage in zip(all_scores, passages):
+                passage["score"] = float(score)
 
             passages.sort(key=lambda x: x["score"], reverse=True)
+            self.logger.info(f"Completed reranking {total_passages} passages in {(total_passages + batch_size - 1)//batch_size} batches")
+            
             return passages
