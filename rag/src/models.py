@@ -55,8 +55,17 @@ class EmbModel(Model):
     def set_emb_model(self, model_type='bge'):
         if model_type == 'bge':
             from FlagEmbedding import BGEM3FlagModel
-            self.bge_emb = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True, device=self.device)
-            logging.info(f"Loaded BGE model on device: {self.device}")
+            mode = "gpu" if torch.cuda.is_available() else "cpu"
+            batch_size = self.default_batch_sizes[mode]
+            
+            self.bge_emb = BGEM3FlagModel(
+                'BAAI/bge-m3', 
+                use_fp16=True,
+                device=self.device,
+                compute_dtype=torch.float16,
+                batch_size=batch_size  # 모델 초기화 시 배치 사이즈 설정
+            )
+            logging.info(f"Loaded BGE model on device: {self.device} with batch_size: {batch_size}")
             if torch.cuda.is_available():
                 logging.info(f"GPU Memory after model load: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
         
@@ -68,15 +77,45 @@ class EmbModel(Model):
         batch_size = self.emb_config['batch_size']
         logging.info(f"Using batch size: {batch_size}")
         
-        if isinstance(text, str):
-            # encode result  => dense_vecs, lexical weights, colbert_vecs
-            embeddings = self.bge_emb.encode(text, batch_size=batch_size, max_length=self.emb_config['max_length'])['dense_vecs']
-            logging.info(f"Embedded single text with batch size {batch_size}")
-        else:       
-            total_samples = len(text)
-            logging.info(f"Embedding {total_samples} texts with batch size {batch_size}")
-            embeddings = self.bge_emb.encode(list(text), batch_size=batch_size, max_length=self.emb_config['max_length'])['dense_vecs']  
-            logging.info(f"Completed embedding {total_samples} texts in {total_samples//batch_size + (1 if total_samples%batch_size else 0)} batches")
+        try:
+            if isinstance(text, str):
+                embeddings = self.bge_emb.encode(text, max_length=self.emb_config['max_length'])['dense_vecs']
+                logging.info(f"Embedded single text with batch size {batch_size}")
+            else:       
+                total_samples = len(text)
+                logging.info(f"Embedding {total_samples} texts with batch size {batch_size}")
+                
+                # 메모리 효율을 위한 배치 처리
+                embeddings = []
+                for i in range(0, total_samples, batch_size):
+                    batch_texts = list(text[i:i + batch_size])
+                    batch_embeddings = self.bge_emb.encode(batch_texts, batch_size=batch_size, max_length=self.emb_config['max_length'])['dense_vecs']
+                    embeddings.extend(batch_embeddings)
+                    
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()  # 배치 처리 후 메모리 정리
+                        
+                logging.info(f"Completed embedding {total_samples} texts in {total_samples//batch_size + (1 if total_samples%batch_size else 0)} batches")
+                
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                # OOM 발생 시 배치 사이즈 감소
+                original_batch_size = batch_size
+                batch_size = batch_size // 2
+                logging.warning(f"GPU OOM detected. Reducing batch size from {original_batch_size} to {batch_size}")
+                
+                # 재시도
+                if isinstance(text, str):
+                    embeddings = self.bge_emb.encode(text, batch_size=batch_size, max_length=self.emb_config['max_length'])['dense_vecs']
+                else:
+                    embeddings = []
+                    for i in range(0, len(text), batch_size):
+                        batch_texts = list(text[i:i + batch_size])
+                        batch_embeddings = self.bge_emb.encode(batch_texts, batch_size=batch_size, max_length=self.emb_config['max_length'])['dense_vecs']
+                        embeddings.extend(batch_embeddings)
+                        torch.cuda.empty_cache()
+            else:
+                raise e
             
         if torch.cuda.is_available():
             logging.info(f"GPU Memory after embedding: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
