@@ -236,7 +236,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['1']  # GPU 1 사용
+              device_ids: ['0', '1']  # GPU 0, 1 모두 사용
               capabilities: [gpu]
     profiles:
       - gpu-only
