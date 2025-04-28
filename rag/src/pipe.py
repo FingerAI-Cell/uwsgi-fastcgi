@@ -53,46 +53,131 @@ class InteractManager:
         '''
         domain = collection
         '''
-        data_doc_id = self.vectorenv.create_field_schema('doc_id', dtype='VARCHAR', is_primary=True, max_length=1024)
+        # 각 passage의 고유 식별자
+        data_passage_uid = self.vectorenv.create_field_schema('passage_uid', dtype='VARCHAR', is_primary=True, max_length=1024)
+        # doc_id는 이제 일반 필드
+        data_doc_id = self.vectorenv.create_field_schema('doc_id', dtype='VARCHAR', max_length=1024)
         data_passage_id = self.vectorenv.create_field_schema('passage_id', dtype='INT64')
         data_domain = self.vectorenv.create_field_schema('domain', dtype='VARCHAR', max_length=32)
         data_title = self.vectorenv.create_field_schema('title', dtype='VARCHAR', max_length=128)
-        data_author = self.vectorenv.create_field_schema('author', dtype='VARCHAR', max_length=128)  # 작성자 필드 추가
-        data_text = self.vectorenv.create_field_schema('text', dtype='VARCHAR', max_length=512)   # 500B (500글자 단위로 문서 분할)
+        data_author = self.vectorenv.create_field_schema('author', dtype='VARCHAR', max_length=128)
+        data_text = self.vectorenv.create_field_schema('text', dtype='VARCHAR', max_length=512)
         data_text_emb = self.vectorenv.create_field_schema('text_emb', dtype='FLOAT_VECTOR', dim=1024)
         data_info = self.vectorenv.create_field_schema('info', dtype='JSON')
         data_tags = self.vectorenv.create_field_schema('tags', dtype='JSON')
-        schema_field_list = [data_doc_id, data_passage_id, data_domain, data_title, data_author, data_text, data_text_emb, data_info, data_tags]
+        schema_field_list = [data_passage_uid, data_doc_id, data_passage_id, data_domain, data_title, data_author, data_text, data_text_emb, data_info, data_tags]
 
         schema = self.vectorenv.create_schema(schema_field_list, 'schema for fai-rag, using fastcgi')
         collection = self.vectorenv.create_collection(domain_name, schema, shards_num=2)
-        self.vectorenv.create_index(collection, field_name='text_emb')   # doc_id 필드에 index 생성 
+        self.vectorenv.create_index(collection, field_name='text_emb')
 
     def delete_data(self, domain, doc_id):
-        hashed_doc_id = self.data_p.hash_text(doc_id, hash_type='blake')
-        data_to_delete = f"doc_id == {hashed_doc_id}"  
-        self.vectordb.delete_data(filter=data_to_delete, collection_name=domain)
+        """
+        특정 도메인에서 doc_id에 해당하는 모든 passage를 삭제합니다.
+        
+        Args:
+            domain (str): 삭제할 도메인
+            doc_id (str): 삭제할 문서 ID
+        """
+        try:
+            print(f"[DEBUG] Deleting all passages for doc_id: {doc_id} in domain: {domain}")
+            
+            # doc_id가 이미 해시된 값인지 확인
+            is_already_hashed = len(doc_id) >= 64 and all(c in '0123456789abcdef' for c in doc_id.lower())
+            hashed_doc_id = doc_id if is_already_hashed else self.data_p.hash_text(doc_id, hash_type='blake')
+            
+            # 삭제할 문서 조건 설정
+            expr = f"doc_id == '{hashed_doc_id}'"
+            
+            # 삭제 전에 존재하는지 확인
+            collection = self.vectordb.get_collection(collection_name=domain)
+            results = collection.query(
+                expr=expr,
+                output_fields=["doc_id"],
+                limit=1
+            )
+            
+            if not results:
+                print(f"[DEBUG] No documents found with doc_id: {doc_id} in domain: {domain}")
+                return
+            
+            # 문서 삭제 실행
+            print(f"[DEBUG] Executing delete operation for doc_id: {hashed_doc_id}")
+            self.vectordb.delete_data(expr, collection_name=domain)
+            print(f"[DEBUG] Successfully deleted all passages for doc_id: {doc_id} in domain: {domain}")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to delete data: {str(e)}")
+            raise
 
-    def insert_data(self, domain, doc_id, title, author, text, info, tags):
-        hashed_doc_id = self.data_p.hash_text(doc_id, hash_type='blake')
-        chunked_texts = self.data_p.chunk_text(text)
-        for chunk in chunked_texts:
-            chunk, passage_id = chunk[0], chunk[1]
-            chunk_emb = self.emb_model.bge_embed_data(chunk)
-            data = [
-                {
-                    "doc_id": hashed_doc_id, 
-                    "passage_id": passage_id, 
-                    "domain": domain, 
-                    "title": title, 
-                    "author": author,
-                    "text": chunk, 
-                    "text_emb": chunk_emb, 
-                    "info": info, 
-                    "tags": tags
-                }
-            ]        
-            self.vectordb.insert_data(data, collection_name=domain)
+    def insert_data(self, domain, doc_id, title, author, text, info, tags, ignore=True):
+        try:
+            print(f"[DEBUG] Original text length: {len(text)}")
+            hashed_doc_id = self.data_p.hash_text(doc_id, hash_type='blake')
+            
+            # 중복 문서 체크
+            collection = self.vectordb.get_collection(collection_name=domain)
+            expr = f"doc_id == '{hashed_doc_id}'"
+            results = collection.query(
+                expr=expr,
+                output_fields=["doc_id"],
+                limit=1
+            )
+            
+            # 중복된 문서가 존재하는 경우
+            if results:
+                print(f"[DEBUG] Document with doc_id {hashed_doc_id} already exists in domain {domain}")
+                if ignore:
+                    print(f"[DEBUG] Ignoring insert due to ignore=True")
+                    return "skipped"  # 중복으로 인한 건너뛰기 상태 반환
+                else:
+                    print(f"[DEBUG] Deleting existing document due to ignore=False")
+                    # 기존 문서 삭제
+                    self.delete_data(domain, hashed_doc_id)
+                    print(f"[DEBUG] Successfully deleted existing document")
+            
+            # 텍스트 청킹 및 삽입
+            chunked_texts = self.data_p.chunk_text(text)
+            print(f"[DEBUG] Number of chunks: {len(chunked_texts)}")
+            
+            for i, (chunk, passage_id) in enumerate(chunked_texts):
+                print(f"[DEBUG] Processing chunk {i+1}/{len(chunked_texts)}")
+                
+                # 텍스트 길이 체크
+                if len(chunk) > 512:
+                    print(f"[ERROR] Text chunk length ({len(chunk)}) exceeds maximum length (512)")
+                    raise ValueError(f"Text chunk length ({len(chunk)}) exceeds maximum allowed length (512)")
+                
+                # passage의 고유 식별자 생성
+                passage_uid = f"{hashed_doc_id}_{passage_id}"
+                
+                chunk_emb = self.emb_model.bge_embed_data(chunk)
+                data = [
+                    {
+                        "passage_uid": passage_uid,  # 고유 식별자
+                        "doc_id": hashed_doc_id, 
+                        "passage_id": passage_id, 
+                        "domain": domain, 
+                        "title": title, 
+                        "author": author,
+                        "text": chunk, 
+                        "text_emb": chunk_emb, 
+                        "info": info, 
+                        "tags": tags
+                    }
+                ]        
+                print(f"[DEBUG] Inserting chunk {i+1} with passage_uid: {passage_uid}")
+                self.vectordb.insert_data(data, collection_name=domain)
+                print(f"[DEBUG] Successfully inserted chunk {i+1}")
+            
+            return "success"  # 성공적인 삽입 상태 반환
+                
+        except ValueError as ve:
+            print(f"[ERROR] Validation error: {str(ve)}")
+            raise
+        except Exception as e:
+            print(f"[ERROR] Failed to insert data: {str(e)}")
+            raise
     
     def retrieve_data(self, query, top_k, filter_conditions=None):
         """
@@ -102,7 +187,8 @@ class InteractManager:
             query (str): 검색할 텍스트 (필수)
             top_k (int): 반환할 결과 개수
             filter_conditions (dict): 필터링 조건
-                - domain: 도메인 필터
+                - domain: 단일 도메인 검색용
+                - domains: 복수 도메인 검색용 (리스트)
                 - date_range: {'start': 'YYYYMMDD', 'end': 'YYYYMMDD'}
                   (날짜는 YYYYMMDD 형식의 문자열, 예: '20220804')
                 - title: 제목 검색어
@@ -120,7 +206,13 @@ class InteractManager:
         expr_parts = []
         
         # 도메인 필터
-        domain = filter_conditions.get('domain') if filter_conditions else None
+        domain = None
+        if filter_conditions:
+            if 'domain' in filter_conditions:
+                domain = filter_conditions['domain']
+            elif 'domains' in filter_conditions:
+                # domains가 있으면 단일 도메인 검색에서는 무시 (app.py에서 처리)
+                return []
         
         if not domain:
             # 도메인이 지정되지 않은 경우 기본 도메인 사용
@@ -128,13 +220,12 @@ class InteractManager:
         
         print(f"[DEBUG] Using domain: {domain}")
         
-        # 컬렉션이 있는지 확인하고 없으면 생성
+        # 컬렉션이 있는지 확인
         collections = utility.list_collections()
         print(f"[DEBUG] Available collections: {collections}")
         
         if domain not in collections:
             print(f"[DEBUG] Collection {domain} not found")
-            # 도메인에 해당하는 컬렉션이 없으면 오류 반환
             return []
             
         # 컬렉션을 로드하고 사용
@@ -184,6 +275,7 @@ class InteractManager:
         
         # 최종 검색 표현식 구성
         expr = " && ".join(expr_parts) if expr_parts else None
+        print(f"[DEBUG] Final search expression: {expr}")
         
         # 벡터 검색 수행
         query_emb = self.emb_model.bge_embed_data(cleansed_text)
@@ -202,163 +294,82 @@ class InteractManager:
             print(f"[DEBUG] Search result: {search_result}")
             results = self.vectordb.decode_search_result(search_result, include_metadata=True)
             print(f"[DEBUG] Decoded results: {results}")
+            return results
         except Exception as e:
             print(f"[DEBUG] Search error: {str(e)}")
             return []
-        
-        # 검색 결과 포맷팅
-        formatted_results = []
-        for result in results:
-            print(f"[DEBUG] Formatting result: {result}")
-            
-            # 기본 결과 구조
-            formatted_result = {
-                "doc_id": None,
-                "passage_id": None,
-                "domain": None,
-                "title": None,
-                "author": None,
-                "text": None,
-                "info": None,
-                "tags": None
-            }
-            
-            # fields 속성이 있으면 활용
-            if hasattr(result, 'fields') and result.fields:
-                print(f"[DEBUG] Using fields attribute: {result.fields}")
-                formatted_result.update(result.fields)
-            elif 'fields' in result:
-                print(f"[DEBUG] Using fields from dict: {result['fields']}")
-                formatted_result.update(result['fields'])
-            else:
-                # 일반 딕셔너리에서 직접 키 추출
-                for key in ['doc_id', 'passage_id', 'domain', 'title', "author", 'text', 'info', 'tags']:
-                    if key in result:
-                        formatted_result[key] = result[key]
-            
-            # Hit 속성에서 텍스트 추출
-            hit_str = str(result)
-            entity_match = re.search(r"entity:\s*(\{.+\})", hit_str)
-            if entity_match:
-                try:
-                    entity_str = entity_match.group(1)
-                    entity_str = entity_str.replace("'", "\"")
-                    entity_str = re.sub(r'([{,])\s*(\w+):', r'\1"\2":', entity_str)
-                    try:
-                        entity_dict = json.loads(entity_str)
-                        print(f"[DEBUG] Using hit string entity: {entity_dict}")
-                        formatted_result.update(entity_dict)
-                    except:
-                        try:
-                            entity_str = entity_str.replace("\"", "'")
-                            entity_dict = ast.literal_eval(entity_str)
-                            print(f"[DEBUG] Using hit string entity with ast: {entity_dict}")
-                            formatted_result.update(entity_dict)
-                        except Exception as e:
-                            print(f"[DEBUG] Error parsing entity string: {e}")
-                except Exception as e:
-                    print(f"[DEBUG] Error extracting entity: {e}")
-            
-            # score 속성 추가
-            if 'score' in result:
-                formatted_result["score"] = float(result['score'])
-            elif hasattr(result, 'score'):
-                formatted_result["score"] = float(result.score)
-            
-            print(f"[DEBUG] Final formatted result: {formatted_result}")
-            formatted_results.append(formatted_result)
-        
-        return formatted_results
 
-    def get_document_passages(self, doc_id):
+    def get_document_passages(self, doc_id, collection_name=None):
         """
-        doc_id로 문서의 모든 패시지를 조회합니다.
+        특정 문서의 모든 패시지를 가져옴
+        - doc_id: 문서 ID
+        - collection_name: 컬렉션 이름 (없으면 모든 컬렉션 검색)
+        - 패시지 리스트 반환 (없으면 빈 리스트)
         """
-        try:
-            print(f"[DEBUG] get_document_passages called with doc_id: {doc_id}")
-            
-            # doc_id가 None이거나 빈 문자열인 경우 처리
-            if not doc_id:
-                print("[DEBUG] doc_id is empty")
-                return None
-            
-            # 이미 해시된 ID인지 확인 (64자 이상의 16진수 문자열)
-            is_already_hashed = len(doc_id) >= 64 and all(c in '0123456789abcdef' for c in doc_id.lower())
-            
-            if is_already_hashed:
-                print(f"[DEBUG] doc_id appears to be already hashed, using as-is")
-                hashed_doc_id = doc_id
-            else:
-                hashed_doc_id = self.data_p.hash_text(doc_id, hash_type='blake')
-                print(f"[DEBUG] Original doc_id hashed to: {hashed_doc_id}")
+        if not doc_id:
+            print("[WARNING] Empty doc_id")
+            return []
+        
+        if collection_name:
+            collections = [self.vectordb.get_collection(collection_name)]
+        else:
+            collections = [self.vectordb.get_collection(name) for name in utility.list_collections()]
+        
+        all_passages = []
+        for collection in collections:
+            try:
+                expr = f'doc_id == "{doc_id}"'
+                print(f"[DEBUG] Searching collection {collection.name} with expr: {expr}")
                 
-            print(f"[DEBUG] Using hashed_doc_id: {hashed_doc_id}")
-            
-            try:
-                # 도메인 이름을 지정해야 함 (기본값으로 'news' 사용)
-                collection = self.vectordb.get_collection(collection_name="news")
-                print(f"[DEBUG] Collection obtained: {collection.name}, entities: {collection.num_entities}")
-            except Exception as e:
-                print(f"[DEBUG] Error getting collection: {str(e)}")
-                return None
-            
-            # doc_id로 문서 조회
-            expr = f"doc_id == '{hashed_doc_id}'"
-            print(f"[DEBUG] Query expression: {expr}")
-            
-            try:
                 results = collection.query(
                     expr=expr,
-                    output_fields=["doc_id", "passage_id", "domain", "title", "author" "text", "info", "tags"]
+                    output_fields=["doc_id", "passage_id", "domain", "title", "author", "text", "info", "tags"]
                 )
-                print(f"[DEBUG] Query results count: {len(results) if results else 0}")
-            except Exception as e:
-                print(f"[DEBUG] Error querying collection: {str(e)}")
-                return None
-            
-            if not results:
-                print(f"[DEBUG] No results found for doc_id: {doc_id}, hashed: {hashed_doc_id}")
-                return None
                 
-            # 결과 정리
-            doc_info = {
-                "doc_id": doc_id,
-                "domain": results[0]["domain"],
-                "title": results[0]["title"],
-                "author": results[0]["author"],
-                "info": results[0]["info"],
-                "tags": results[0]["tags"],
-                "passages": []
-            }
-            
-            # 패시지 정렬 및 추가
-            try:
-                sorted_passages = sorted(results, key=lambda x: x["passage_id"])
-                for passage in sorted_passages:
-                    doc_info["passages"].append({
-                        "passage_id": passage['passage_id'],
-                        "text": passage["text"],
-                        "position": passage["passage_id"]
-                    })
-                print(f"[DEBUG] Processed {len(doc_info['passages'])} passages")
+                if results:
+                    all_passages.extend(results)
+                    print(f"[DEBUG] Found {len(results)} passages in {collection.name}")
+                    
             except Exception as e:
-                print(f"[DEBUG] Error processing passages: {str(e)}")
-                # 에러가 있더라도 기본 정보는 반환
-                
-            return doc_info
-            
-        except Exception as e:
-            print(f"[DEBUG] Unhandled exception in get_document_passages: {str(e)}")
+                print(f"[ERROR] Failed to query collection {collection.name}: {str(e)}")
+                continue
+        
+        if not all_passages:
+            print(f"[DEBUG] No passages found for doc_id: {doc_id}")
             return None
+            
+        # 첫 번째 passage에서 공통 정보 추출
+        first_passage = all_passages[0]
+        result = {
+            "doc_id": first_passage["doc_id"],
+            "domain": first_passage["domain"],
+            "title": first_passage["title"],
+            "author": first_passage["author"],
+            "info": first_passage["info"],
+            "tags": first_passage["tags"],
+            "passages": []
+        }
+        
+        # passage 정보만 추출하여 정렬 후 추가
+        for passage in sorted(all_passages, key=lambda x: int(x["passage_id"])):
+            result["passages"].append({
+                "passage_id": passage["passage_id"],
+                "text": passage["text"],
+                "position": passage["passage_id"]  # passage_id를 position으로 사용
+            })
+        
+        print(f"[DEBUG] Total {len(result['passages'])} passages retrieved")
+        return result
 
     def get_specific_passage(self, doc_id, passage_id):
         """
         doc_id와 passage_id로 특정 패시지를 조회합니다.
+        모든 도메인에서 검색을 수행합니다.
         """
         try:
             print(f"[DEBUG] get_specific_passage called with doc_id: {doc_id}, passage_id: {passage_id}")
             
-            # 이미 해시된 ID인지 확인 (64자 이상의 16진수 문자열)
+            # 이미 해시된 ID인지 확인
             is_already_hashed = len(doc_id) >= 64 and all(c in '0123456789abcdef' for c in doc_id.lower())
             
             if is_already_hashed:
@@ -367,67 +378,70 @@ class InteractManager:
             else:
                 hashed_doc_id = self.data_p.hash_text(doc_id, hash_type='blake')
                 print(f"[DEBUG] Original doc_id hashed to: {hashed_doc_id}")
-                
-            print(f"[DEBUG] Using hashed_doc_id: {hashed_doc_id}")
             
             # passage_id가 문자열인 경우 처리
             try:
                 if isinstance(passage_id, str):
-                    # 'p'로 시작하는 경우 'p' 제거
                     if passage_id.startswith('p'):
                         passage_num = int(passage_id[1:])
                     else:
-                        # 숫자 문자열인 경우 그대로 변환
                         passage_num = int(passage_id)
                 else:
-                    # 이미 숫자인 경우 그대로 사용
                     passage_num = int(passage_id)
                 print(f"[DEBUG] Converted passage_id to number: {passage_num}")
             except (ValueError, TypeError) as e:
                 print(f"[DEBUG] Error converting passage_id: {e}")
                 return None
             
-            try:
-                # 도메인 이름을 지정해야 함 (기본값으로 'news' 사용)
-                collection = self.vectordb.get_collection(collection_name="news")
-                print(f"[DEBUG] Collection obtained: {collection.name}, entities: {collection.num_entities}")
-            except Exception as e:
-                print(f"[DEBUG] Error getting collection: {str(e)}")
-                return None
+            # 모든 컬렉션 목록 가져오기
+            collections = self.vectordb.get_list_collection()
+            print(f"[DEBUG] Available collections: {collections}")
             
-            # doc_id와 passage_id로 특정 패시지 조회
-            expr = f"doc_id == '{hashed_doc_id}' && passage_id == {passage_num}"
-            print(f"[DEBUG] Query expression: {expr}")
+            # 각 컬렉션에서 검색
+            for collection_name in collections:
+                try:
+                    print(f"[DEBUG] Searching in collection: {collection_name}")
+                    collection = self.vectordb.get_collection(collection_name=collection_name)
+                    print(f"[DEBUG] Collection obtained: {collection.name}, entities: {collection.num_entities}")
+                    
+                    # doc_id와 passage_id로 특정 패시지 조회
+                    expr = f"doc_id == '{hashed_doc_id}' && passage_id == {passage_num}"
+                    print(f"[DEBUG] Query expression: {expr}")
+                    
+                    try:
+                        results = collection.query(
+                            expr=expr,
+                            output_fields=["doc_id", "passage_id", "domain", "title", "author", "text", "info", "tags"]
+                        )
+                        print(f"[DEBUG] Query results count: {len(results) if results else 0}")
+                        
+                        if results:
+                            passage = results[0]
+                            result = {
+                                "doc_id": doc_id,
+                                "passage_id": passage['passage_id'],
+                                "text": passage["text"],
+                                "position": passage["passage_id"],
+                                "metadata": {
+                                    "domain": passage["domain"],
+                                    "title": passage["title"],
+                                    "info": passage["info"],
+                                    "tags": passage["tags"]
+                                }
+                            }
+                            print(f"[DEBUG] Found passage in collection {collection_name}")
+                            return result
+                            
+                    except Exception as e:
+                        print(f"[DEBUG] Error querying collection {collection_name}: {str(e)}")
+                        continue
+                        
+                except Exception as e:
+                    print(f"[DEBUG] Error accessing collection {collection_name}: {str(e)}")
+                    continue
             
-            try:
-                results = collection.query(
-                    expr=expr,
-                    output_fields=["doc_id", "passage_id", "domain", "title", "author" "text", "info", "tags"]
-                )
-                print(f"[DEBUG] Query results count: {len(results) if results else 0}")
-            except Exception as e:
-                print(f"[DEBUG] Error querying collection: {str(e)}")
-                return None
-            
-            if not results:
-                print(f"[DEBUG] No results found for query: {expr}")
-                return None
-                
-            passage = results[0]
-            result = {
-                "doc_id": doc_id,
-                "passage_id": passage['passage_id'],
-                "text": passage["text"],
-                "position": passage["passage_id"],
-                "metadata": {
-                    "domain": passage["domain"],
-                    "title": passage["title"],
-                    "info": passage["info"],
-                    "tags": passage["tags"]
-                }
-            }
-            print(f"[DEBUG] Returning result for passage: {result['passage_id']}")
-            return result
+            print(f"[DEBUG] Passage not found in any collection")
+            return None
             
         except Exception as e:
             print(f"[DEBUG] Unhandled exception in get_specific_passage: {str(e)}")

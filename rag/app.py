@@ -76,7 +76,7 @@ def search_data():
     # 기본 검색 파라미터
     query_text = request.args.get('query_text')
     top_k = request.args.get('top_k', 5)
-    domain = request.args.get('domain')  # 선택적 도메인 필터
+    domains = request.args.getlist('domain')  # 도메인 리스트로 받기
 
     # 추가 필터링 파라미터
     author = request.args.get('author')  # 작성자 필터 추가
@@ -127,10 +127,22 @@ def search_data():
                 "search_result": None
             }), 400
     
+    # 도메인 유효성 검증
+    available_collections = milvus_db.get_list_collection()
+    if domains:
+        invalid_domains = [d for d in domains if d not in available_collections]
+        if invalid_domains:
+            return jsonify({
+                "result_code": "F000007",
+                "message": f"유효하지 않은 도메인이 포함되어 있습니다: {', '.join(invalid_domains)}",
+                "available_domains": available_collections,
+                "search_result": None
+            }), 400
+    
     # 필터 조건 파싱
     filter_conditions = {}
-    if domain:
-        filter_conditions['domain'] = domain
+    if domains:
+        filter_conditions['domains'] = domains  # 복수 도메인 지원
     if author:  # 작성자 필터 추가
         filter_conditions['author'] = author
     if start_date or end_date:
@@ -157,11 +169,45 @@ def search_data():
             }), 400
     
     try:
-        search_results = interact_manager.retrieve_data(
-            query_text, 
-            top_k, 
-            filter_conditions=filter_conditions
-        )
+        # 각 도메인별 검색 결과 수집
+        all_results = []
+        searched_domains = domains if domains else [available_collections[0]]  # 도메인이 지정되지 않으면 첫 번째 도메인만 사용
+        
+        for domain in searched_domains:
+            domain_filter_conditions = dict(filter_conditions)
+            domain_filter_conditions['domain'] = domain
+            
+            results = interact_manager.retrieve_data(
+                query_text, 
+                top_k, 
+                filter_conditions=domain_filter_conditions
+            )
+            
+            # 도메인 정보 추가
+            for result in results:
+                result['domain'] = domain
+            
+            all_results.extend(results)
+        
+        # 전체 결과를 score 기준으로 재정렬하고 top_k개만 선택
+        all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+        final_results = all_results[:top_k]
+        
+        # 각 결과에서 불필요한 필드 제거 및 정리
+        cleaned_results = []
+        for result in final_results:
+            cleaned_result = {
+                "doc_id": result.get('doc_id'),
+                "passage_id": result.get('passage_id'),
+                "domain": result.get('domain'),
+                "title": result.get('title'),
+                "author": result.get('author'),
+                "text": result.get('text'),
+                "info": result.get('info'),
+                "tags": result.get('tags'),
+                "score": result.get('score')
+            }
+            cleaned_results.append(cleaned_result)
         
         response_data = {
             "result_code": "F000000",
@@ -169,9 +215,12 @@ def search_data():
             "search_params": {
                 "query_text": query_text,
                 "top_k": top_k,
+                "domains": searched_domains,
                 "filters": filter_conditions
             },
-            "search_result": search_results
+            "total_results": len(all_results),
+            "returned_results": len(cleaned_results),
+            "search_result": cleaned_results
         }
         
         return Response(json.dumps(response_data, ensure_ascii=False), 
@@ -188,59 +237,182 @@ def search_data():
 @app.route('/rag/insert', methods=['POST'])
 def insert_data():
     '''
-    doc_id: yyyymmdd-title-author   e.g) 20240301-메타버스 뉴스-삼성전자
-    data: {
-        "domain": "news"   - collection_name 
-        "title": "메타버스 뉴스"
-        "author": "삼성전자"  # 작성자 (기업 또는 특정인물)
-        "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다 ... "
-        "info": {
-            "press_num": "비즈니스 워치"
-            "url": "http://~"
-        }
-        "tags": {
-            "date": "20220804"
-            "user": "user01"
-        }
+    {
+        "documents": [
+            {
+                "domain": "news",
+                "title": "메타버스 뉴스",
+                "author": "삼성전자",
+                "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
+                "info": {
+                    "press_num": "비즈니스 워치",
+                    "url": "http://example.com/news/1"
+                },
+                "tags": {
+                    "date": "20240315",
+                    "user": "admin"
+                }
+            }
+        ],
+        "ignore": true
     }
     '''
-    data = request.json
-    doc_id = f"{data['tags']['date'].replace('-','')}-{data['title']}-{data['author']}"
-    if data['domain'] not in milvus_db.get_list_collection():
-        interact_manager.create_domain(data['domain'])
-    interact_manager.insert_data(data['domain'], doc_id, data['title'], data['author'], data['text'], data['info'], data['tags'])
-    return jsonify({"status": "received"}), 200
+    try:
+        request_data = request.json
+        if not request_data:
+            return jsonify({
+                "result_code": "F000001",
+                "message": "요청 본문이 비어있습니다."
+            }), 400
+
+        if "documents" not in request_data:
+            return jsonify({
+                "result_code": "F000002",
+                "message": "documents 필드는 필수입니다."
+            }), 400
+
+        if not isinstance(request_data["documents"], list) or len(request_data["documents"]) == 0:
+            return jsonify({
+                "result_code": "F000003",
+                "message": "documents는 최소 1개 이상의 문서를 포함해야 합니다."
+            }), 400
+
+        # ignore 옵션 처리 (기본값: True)
+        ignore = request_data.get('ignore', True)
+
+        # 필수 필드 검증
+        required_fields = ['domain', 'title', 'author', 'text', 'tags']
+        results = []
+        
+        # 상태별 카운터 초기화
+        status_counts = {
+            "success": 0,  # 새로 삽입됨
+            "skipped": 0,  # 중복으로 무시됨
+            "error": 0     # 오류 발생
+        }
+        
+        for doc in request_data["documents"]:
+            try:
+                # 필수 필드 검증
+                missing_fields = [field for field in required_fields if field not in doc]
+                if missing_fields:
+                    results.append({
+                        "status": "error",
+                        "result_code": "F000004",
+                        "message": f"필수 필드가 누락되었습니다: {', '.join(missing_fields)}",
+                        "title": doc.get('title', 'unknown')
+                    })
+                    status_counts["error"] += 1
+                    continue
+
+                if 'date' not in doc['tags']:
+                    results.append({
+                        "status": "error",
+                        "result_code": "F000005",
+                        "message": "tags.date는 필수 입력값입니다.",
+                        "title": doc['title']
+                    })
+                    status_counts["error"] += 1
+                    continue
+
+                # doc_id 생성 및 해시 처리
+                raw_doc_id = f"{doc['tags']['date'].replace('-','')}-{doc['title']}-{doc['author']}"
+                doc_id = env_manager.data_p.hash_text(raw_doc_id, hash_type='blake')
+                
+                # 도메인이 없으면 생성
+                if doc['domain'] not in milvus_db.get_list_collection():
+                    interact_manager.create_domain(doc['domain'])
+                    # 새로 생성된 컬렉션 로드
+                    collection = Collection(doc['domain'])
+                    collection.load()
+                    print(f"[DEBUG] New collection {doc['domain']} created and loaded")
+                
+                # 데이터 삽입 시도
+                insert_status = interact_manager.insert_data(
+                    doc['domain'], 
+                    doc_id,  # 해시된 doc_id 사용
+                    doc['title'], 
+                    doc['author'], 
+                    doc['text'], 
+                    doc.get('info', {}),
+                    doc['tags'],
+                    ignore=ignore  # 전체 요청에 대한 ignore 값 사용
+                )
+                
+                if insert_status == "skipped":
+                    results.append({
+                        "status": "skipped",
+                        "result_code": "F000000",
+                        "message": "이미 존재하는 문서로 건너뛰었습니다.",
+                        "doc_id": doc_id,
+                        "raw_doc_id": raw_doc_id,
+                        "domain": doc['domain'],
+                        "title": doc['title']
+                    })
+                    status_counts["skipped"] += 1
+                else:  # success
+                    results.append({
+                        "status": "success",
+                        "result_code": "F000000",
+                        "message": "문서가 성공적으로 저장되었습니다.",
+                        "doc_id": doc_id,
+                        "raw_doc_id": raw_doc_id,
+                        "domain": doc['domain'],
+                        "title": doc['title']
+                    })
+                    status_counts["success"] += 1
+                
+            except Exception as e:
+                logger.error(f"Error inserting document: {str(e)}")
+                results.append({
+                    "status": "error",
+                    "result_code": "F000006",
+                    "message": f"문서 저장 중 오류가 발생했습니다: {str(e)}",
+                    "title": doc.get('title', 'unknown')
+                })
+                status_counts["error"] += 1
+
+        # 전체 상태 결정
+        if status_counts["error"] == len(request_data["documents"]):
+            overall_status = "error"  # 모두 실패
+        elif status_counts["error"] == 0 and status_counts["skipped"] == 0:
+            overall_status = "success"  # 모두 성공
+        elif status_counts["error"] == 0:
+            overall_status = "partial_success"  # 일부는 성공하고 일부는 건너뜀
+        else:
+            overall_status = "partial_error"  # 일부 실패
+        
+        return jsonify({
+            "status": overall_status,
+            "message": f"총 {len(request_data['documents'])}개 문서 중 {status_counts['success']}개 성공, {status_counts['skipped']}개 건너뜀, {status_counts['error']}개 실패",
+            "status_counts": status_counts,
+            "results": results
+        }), 200 if overall_status != "error" else 500
+        
+    except Exception as e:
+        logger.error(f"Error in insert endpoint: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "result_code": "F000007",
+            "message": f"요청 처리 중 오류가 발생했습니다: {str(e)}"
+        }), 500
 
 @app.route('/rag/delete', methods=['DELETE'])
 def delete_data():
     '''
     data: {
-        "date": "20220804"
-        "title": "메타버스%20뉴스"
-        "author": "삼성전자"  # 작성자 추가
-        "domain": "news"
+        "domain": "news",  # 도메인(컬렉션) 이름
+        "doc_id": "20220804-메타버스 뉴스-삼성전자"  # 문서 ID
     }
     '''
-    doc_date = request.args.get('date')
-    doc_title = request.args.get('title')
-    doc_author = request.args.get('author')
+    doc_id = request.args.get('doc_id')
     doc_domain = request.args.get('domain')
     
     # 필수 파라미터 체크
-    if not doc_date:
+    if not doc_id:
         return jsonify({
-            "error": "date is required",
-            "message": "날짜(date)는 필수 입력값입니다."
-        }), 400
-    if not doc_title:
-        return jsonify({
-            "error": "title is required",
-            "message": "제목(title)은 필수 입력값입니다."
-        }), 400
-    if not doc_author:
-        return jsonify({
-            "error": "author is required",
-            "message": "작성자(author)는 필수 입력값입니다."
+            "error": "doc_id is required",
+            "message": "문서 ID(doc_id)는 필수 입력값입니다."
         }), 400
     if not doc_domain:
         return jsonify({
@@ -248,9 +420,22 @@ def delete_data():
             "message": "도메인(domain)은 필수 입력값입니다."
         }), 400
         
-    doc_id = f"{doc_date.replace('-','')}-{doc_title}-{doc_author}"
-    interact_manager.delete_data(doc_domain, doc_id)
-    return jsonify({"status": "received"}), 200
+    try:
+        interact_manager.delete_data(doc_domain, doc_id)
+        return jsonify({
+            "result_code": "F000000",
+            "message": "문서가 성공적으로 삭제되었습니다.",
+            "doc_id": doc_id,
+            "domain": doc_domain
+        }), 200
+    except Exception as e:
+        logger.error(f"Error deleting document: {str(e)}")
+        return jsonify({
+            "result_code": "F000001",
+            "message": f"문서 삭제 중 오류가 발생했습니다: {str(e)}",
+            "doc_id": doc_id,
+            "domain": doc_domain
+        }), 500
 
 @app.route('/rag/document', methods=['GET'])
 def get_document():

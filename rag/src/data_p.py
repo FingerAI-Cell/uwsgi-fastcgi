@@ -41,46 +41,76 @@ class DataProcessor:
         # 정확한 바이트 경계를 찾았으면 그 이전 문자까지 반환
         return left - 1
 
-    def chunk_text(self, text, max_bytes=500, overlap_bytes=250):
+    def chunk_text(self, text, max_bytes=512, overlap_bytes=256):
         """
         벡터 임베딩 전, 텍스트를 바이트 단위로 분할.
-        - max_bytes: 청크당 최대 바이트 수 (기본값 500바이트)
-        - overlap_bytes: 청크 간 중복되는 바이트 수 (기본값 250바이트)
+        - max_bytes: 청크당 최대 바이트 수 (기본값 512바이트)
+        - overlap_bytes: 청크 간 중복되는 바이트 수 (기본값 256바이트)
         - (text_chunk, chunk_no) 리스트 반환
         """
-        if self.get_text_bytes(text) <= max_bytes:
+        if not text:
+            print("[WARNING] Empty or None text input")
+            return [(text or "", 1)]
+            
+        if max_bytes <= 0:
+            print("[WARNING] Invalid max_bytes value, using default 512")
+            max_bytes = 512
+            
+        if overlap_bytes >= max_bytes:
+            print("[WARNING] overlap_bytes too large, adjusting to max_bytes/2")
+            overlap_bytes = max_bytes // 2
+
+        text_bytes = text.encode('utf-8')
+        total_bytes = len(text_bytes)
+        print(f"[DEBUG] Input text: {len(text)} chars, {total_bytes} bytes")
+        
+        if total_bytes <= max_bytes:
+            print("[DEBUG] Text bytes within max_bytes, returning single chunk")
             return [(text, 1)]
         
         chunks = []
         chunk_no = 1
-        current_pos = 0
+        start_idx = 0
         
-        while current_pos < len(text):
-            # 현재 위치에서 시작하는 텍스트에서 max_bytes에 맞는 문자 위치 찾기
-            if current_pos == 0:
-                # 첫 번째 청크는 overlap 없이 max_bytes까지
-                end_pos = self.find_byte_boundary(text[current_pos:], max_bytes)
-                chunk = text[current_pos:current_pos + end_pos]
-                chunks.append((chunk, chunk_no))
-                current_pos = current_pos + end_pos - self.find_byte_boundary(text[current_pos:current_pos + end_pos], overlap_bytes)
-            else:
-                # 이후 청크는 이전 청크와 overlap_bytes만큼 중복
-                end_pos = self.find_byte_boundary(text[current_pos:], max_bytes)
-                if end_pos == 0:  # 남은 텍스트가 없으면 종료
-                    break
-                chunk = text[current_pos:current_pos + end_pos]
-                chunks.append((chunk, chunk_no))
-                # 다음 시작 위치 계산 (현재 청크의 끝에서 overlap_bytes만큼 앞으로)
-                current_pos = current_pos + end_pos - self.find_byte_boundary(text[current_pos:current_pos + end_pos], overlap_bytes)
+        while start_idx < len(text):
+            # 현재 위치에서 시작하는 가능한 최대 길이의 청크 찾기
+            end_idx = start_idx
+            current_chunk = text[start_idx:end_idx+1].encode('utf-8')
             
-            chunk_no += 1
+            while end_idx < len(text) and len(current_chunk) < max_bytes:
+                end_idx += 1
+                if end_idx < len(text):
+                    current_chunk = text[start_idx:end_idx+1].encode('utf-8')
             
-            # 마지막 청크가 너무 작으면 이전 청크와 병합
-            if chunk_no > 1 and current_pos < len(text) and self.get_text_bytes(text[current_pos:]) < overlap_bytes:
-                last_chunk, last_no = chunks.pop()
-                merged_chunk = text[current_pos - self.find_byte_boundary(text[current_pos - len(last_chunk):current_pos], max_bytes):]
-                chunks.append((merged_chunk, last_no))
+            # 마지막 문자가 max_bytes를 초과하면 한 문자 뒤로
+            if len(current_chunk) > max_bytes and end_idx > start_idx:
+                end_idx -= 1
+                current_chunk = text[start_idx:end_idx].encode('utf-8')
+            
+            chunk = text[start_idx:end_idx]
+            chunk_bytes = len(chunk.encode('utf-8'))
+            print(f"[DEBUG] Creating chunk {chunk_no}: pos {start_idx}-{end_idx} (bytes={chunk_bytes})")
+            
+            if chunk:  # 빈 청크는 추가하지 않음    
+                chunks.append((chunk, chunk_no))
+                chunk_no += 1
+            
+            if end_idx >= len(text):
                 break
+                
+            # 다음 시작 위치 계산 (overlap 고려)
+            next_start = end_idx - (overlap_bytes // 2)  # overlap_bytes의 절반만큼 뒤로 이동
+            if next_start <= start_idx:  # 진전이 없으면
+                next_start = start_idx + 1  # 최소 1문자는 전진
+            
+            start_idx = next_start
+        
+        print(f"[DEBUG] Created {len(chunks)} chunks")
+        for i, (chunk, no) in enumerate(chunks):
+            bytes_len = len(chunk.encode('utf-8'))
+            print(f"[DEBUG] Chunk {i+1}: bytes={bytes_len}, id={no}")
+            if bytes_len > max_bytes:
+                print(f"[WARNING] Chunk {i+1} exceeds max_bytes: {bytes_len} > {max_bytes}")
         
         return chunks
 

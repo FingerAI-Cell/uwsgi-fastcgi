@@ -74,6 +74,12 @@ curl -X GET http://localhost/rag/
 ### 요청 파라미터 (Body)
 | 필드 | 필수 | Type | 설명 |
 |------|------|------|------|
+| documents | Y | Array | 삽입할 문서 배열 |
+| ignore | N | Boolean | 중복 문서 무시 여부 (기본값: true) |
+
+각 문서 객체의 구조:
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
 | domain | Y | String | 컬렉션 이름 (예: `news`) |
 | title | Y | String | 문서 제목 |
 | author | Y | String | 작성자/기관 |
@@ -86,27 +92,67 @@ curl -X GET http://localhost/rag/
 curl -X POST http://localhost/rag/insert \
   -H "Content-Type: application/json" \
   -d '{
-    "domain": "news",
-    "title": "메타버스 뉴스",
-    "author": "삼성전자",
-    "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
-    "info": { "press_num": "비즈니스 워치", "url": "http://example.com/news/1" },
-    "tags": { "date": "20240315", "user": "admin" }
+    "documents": [
+      {
+        "domain": "news",
+        "title": "메타버스 뉴스",
+        "author": "삼성전자",
+        "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
+        "info": { "press_num": "비즈니스 워치", "url": "http://example.com/news/1" },
+        "tags": { "date": "20240315", "user": "admin" }
+      }
+    ],
+    "ignore": true
   }'
 ```
 
 ### 응답 파라미터
 | 필드 | Type | 설명 |
 |------|------|------|
-| status | String | `"received"` 고정 |
+| status | String | 전체 처리 상태 ("success", "partial_success", "partial_error", "error") |
+| message | String | 처리 결과 메시지 |
+| status_counts | Object | 상태별 처리 건수 (`success`, `skipped`, `error`) |
+| results | Array | 각 문서별 처리 결과 |
 
 ### 성공 응답 예시
 ```json
-{ "status": "received" }
+{
+  "status": "success",
+  "message": "총 3개 문서 중 2개 성공, 1개 건너뜀",
+  "status_counts": {
+    "success": 2,
+    "skipped": 1,
+    "error": 0
+  },
+  "results": [
+    {
+      "status": "success",
+      "message": "문서가 성공적으로 저장되었습니다.",
+      "doc_id": "1234567890abcdef...",
+      "raw_doc_id": "20240315-메타버스 뉴스-삼성전자",
+      "domain": "news",
+      "title": "메타버스 뉴스"
+    },
+    {
+      "status": "skipped",
+      "message": "이미 존재하는 문서로 건너뛰었습니다.",
+      "doc_id": "abcdef1234567890...",
+      "raw_doc_id": "20240315-AI 뉴스-LG전자",
+      "domain": "news",
+      "title": "AI 뉴스"
+    }
+  ]
+}
 ```
 
 ### 실패 응답 예시
-서버 내부 오류(`500`) 등 – 별도 정의 없음
+```json
+{
+  "status": "error",
+  "message": "요청 본문이 비어있습니다.",
+  "error_code": "F000001"
+}
+```
 
 ---
 
@@ -123,7 +169,7 @@ curl -X POST http://localhost/rag/insert \
 |------|------|------|------|------|
 | query_text | Y | String | – | 검색어 |
 | top_k | N | Integer | 5 | 검색 결과 수 |
-| domain | N | String | – | 도메인 필터 |
+| domain | N | String[] | – | 도메인 필터 (복수 지정 가능) |
 | author | N | String | – | 작성자 필터 |
 | start_date | N | String | – | 시작일 `YYYYMMDD` |
 | end_date | N | String | – | 종료일 `YYYYMMDD` |
@@ -131,7 +177,7 @@ curl -X POST http://localhost/rag/insert \
 | info_filter | N | String | – | `info` JSON 문자열 |
 | tags_filter | N | String | – | `tags` JSON 문자열 |
 
-### 요청 예시
+### 요청 예시 (단일 도메인)
 ```bash
 curl -G http://localhost/rag/search \
   --data-urlencode "query_text=메타버스" \
@@ -141,13 +187,39 @@ curl -G http://localhost/rag/search \
   --data-urlencode "end_date=20240315"
 ```
 
+### 요청 예시 (복수 도메인)
+```bash
+curl -G http://localhost/rag/search \
+  --data-urlencode "query_text=메타버스" \
+  --data-urlencode "top_k=5" \
+  --data-urlencode "domain=news" \
+  --data-urlencode "domain=test" \
+  --data-urlencode "start_date=20240301" \
+  --data-urlencode "end_date=20240315"
+```
+
 ### 응답 파라미터
 | 필드 | Type | 설명 |
 |------|------|------|
 | result_code | String | `F000000` 성공 등 |
 | message | String | 결과 메시지 |
-| search_params | Object | 적용 파라미터 |
-| search_result | Array | [{ doc_id, title, ...}] |
+| search_params | Object | 적용된 검색 파라미터 |
+| total_results | Integer | 전체 검색 결과 수 |
+| returned_results | Integer | 반환된 결과 수 |
+| search_result | Array | 검색 결과 배열 |
+
+각 검색 결과 객체의 구조:
+| 필드 | Type | 설명 |
+|------|------|------|
+| doc_id | String | 문서 ID |
+| passage_id | Integer | 패시지 ID |
+| domain | String | 도메인 |
+| title | String | 제목 |
+| author | String | 작성자 |
+| text | String | 본문 내용 |
+| info | Object | 추가 정보 |
+| tags | Object | 태그 정보 |
+| score | Float | 유사도 점수 |
 
 ### 성공 응답 예시
 ```json
@@ -157,21 +229,39 @@ curl -G http://localhost/rag/search \
   "search_params": {
     "query_text": "메타버스",
     "top_k": 5,
-    "filters": { "domain": "news" }
+    "domains": ["news", "blog"],
+    "filters": {
+      "date_range": {
+        "start": "20240301",
+        "end": "20240315"
+      }
+    }
   },
+  "total_results": 10,
+  "returned_results": 5,
   "search_result": [
     {
-      "doc_id": "20240315-메타버스-뉴스",
+      "doc_id": "109f405744d2f1e0eccb880c70c6c6e9...",
+      "passage_id": 1,
+      "domain": "news",
       "title": "메타버스 뉴스",
       "author": "삼성전자",
-      "text": "메타버스는...",
+      "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
+      "info": {
+        "press_num": "비즈니스 워치",
+        "url": "http://example.com/news/1"
+      },
+      "tags": {
+        "date": "20240315",
+        "user": "admin"
+      },
       "score": 0.95
     }
   ]
 }
 ```
 
-### 실패 응답 예시 (검색어 누락)
+### 실패 응답 예시
 ```json
 {
   "result_code": "F000001",
@@ -193,14 +283,12 @@ curl -G http://localhost/rag/search \
 ### 요청 파라미터 (Query)
 | 이름 | 필수 | Type | 설명 |
 |------|------|------|------|
-| date | Y | String | `YYYYMMDD` |
-| title | Y | String | 제목 |
-| author | Y | String | 작성자 |
+| doc_id | Y | String | 문서 ID |
 | domain | Y | String | 도메인 |
 
 ### 요청 예시
 ```bash
-curl -X DELETE "http://localhost/rag/delete?date=20240315&title=메타버스%20뉴스&author=삼성전자&domain=news"
+curl -X DELETE "http://localhost/rag/delete?doc_id=20240315-메타버스-뉴스&domain=news"
 ```
 
 ### 응답 파라미터
@@ -631,7 +719,6 @@ curl -X POST http://localhost/prompt/chat \
   "response": "메타버스는 가상과 현실이 융합된 디지털 공간입니다..."
 }
 ```
-
 ### 실패 응답 예시
 ```json
 { "error": "질문이 필요합니다" }
@@ -768,4 +855,6 @@ curl -X POST http://localhost/vision/analyze \
 ---
 
 > **문서 업데이트 완료** – 필요 시 추가 요청 주세요.
+
+
 
