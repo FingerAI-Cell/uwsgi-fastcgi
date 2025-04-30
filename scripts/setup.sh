@@ -377,19 +377,41 @@ download_models() {
     local mode=$1
     echo "=== RAG 모델 다운로드 시작 ==="
     
-    # 모델 저장 디렉토리 생성
-    mkdir -p ./models
+    # 프로젝트 루트 디렉토리의 models 폴더 생성
+    MODEL_DIR="$ROOT_DIR/models"
+    echo "모델 저장 경로: $MODEL_DIR"
+    mkdir -p "$MODEL_DIR"
     
+    # Python 가상환경 생성 및 필요 패키지 설치
+    echo "필요한 패키지 설치 중..."
+    python3 -m pip install --no-cache-dir torch transformers FlagEmbedding
+
     # RAG 모델 다운로드
     echo "RAG 임베딩 모델 다운로드 중..."
-    if [ ! -d "./models/bge-m3" ]; then
-        git lfs install
-        git clone https://huggingface.co/BAAI/bge-m3 ./models/bge-m3
-    else
-        echo "RAG 모델이 이미 존재합니다."
-    fi
+    python3 -c "
+import os
+from transformers import AutoModel, AutoTokenizer
+from FlagEmbedding import BGEM3FlagModel
+
+print('Downloading BGE-M3 model...')
+model_name = 'BAAI/bge-m3'
+save_path = os.path.join('$MODEL_DIR', 'bge-m3')
+print(f'Model will be saved to: {save_path}')
+
+# 모델과 토크나이저 다운로드
+model = AutoModel.from_pretrained(model_name)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+# 모델과 토크나이저 저장
+print(f'Saving model to {save_path}...')
+model.save_pretrained(save_path)
+tokenizer.save_pretrained(save_path)
+print('Model download and save completed.')
+"
     
     echo "=== RAG 모델 다운로드 완료 ==="
+    echo "모델 저장 위치: $MODEL_DIR/bge-m3"
+    ls -la "$MODEL_DIR/bge-m3"
 }
 
 # 서비스 시작 함수 수정

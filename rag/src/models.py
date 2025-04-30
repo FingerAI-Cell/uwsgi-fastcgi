@@ -58,14 +58,19 @@ class EmbModel(Model):
             mode = "gpu" if torch.cuda.is_available() else "cpu"
             batch_size = self.default_batch_sizes[mode]
             
+            model_path = os.getenv('MODEL_PATH', '/rag/models/bge-m3')  # 환경 변수에서 경로 가져오기
+            if not os.path.exists(os.path.join(model_path, 'pytorch_model.bin')):
+                logging.error(f"모델 파일이 {model_path}에 존재하지 않습니다. setup.sh를 실행하여 모델을 먼저 다운로드해주세요.")
+                raise FileNotFoundError(f"Model files not found in {model_path}")
+                
             self.bge_emb = BGEM3FlagModel(
-                './models/bge-m3',  # 로컬 경로로 변경
+                model_path,  # 환경 변수에서 가져온 경로 사용
                 use_fp16=True,
                 device=self.device,
                 compute_dtype=torch.float16,
                 batch_size=batch_size  # 모델 초기화 시 배치 사이즈 설정
             )
-            logging.info(f"Loaded BGE model on device: {self.device} with batch_size: {batch_size}")
+            logging.info(f"Loaded BGE model from {model_path} on device: {self.device} with batch_size: {batch_size}")
             if torch.cuda.is_available():
                 logging.info(f"GPU Memory after model load: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
         
