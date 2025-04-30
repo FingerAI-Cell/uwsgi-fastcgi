@@ -378,10 +378,7 @@ download_rag_model() {
     MODEL_DIR="$ROOT_DIR/models"
     MODEL_PATH="$MODEL_DIR/bge-m3"
     echo "모델 저장 디렉토리 생성: $MODEL_DIR"
-    
-    # 디렉토리 생성 및 권한 설정
     mkdir -p "$MODEL_DIR"
-    chmod 755 "$MODEL_DIR"
     
     # 이미 모델이 존재하는지 확인
     if [ -f "$MODEL_PATH/pytorch_model.bin" ] && [ -f "$MODEL_PATH/config.json" ]; then
@@ -391,58 +388,12 @@ download_rag_model() {
     fi
     
     echo "RAG 모델 다운로드 중..."
-    # 임시 컨테이너로 모델 다운로드
+    # 임시 컨테이너로 huggingface-cli 실행
     $DOCKER_CMD run --rm \
         -v "$MODEL_DIR:/models" \
-        pytorch/pytorch:2.1.2-cuda11.8-cudnn8-devel \
-        python3 -c "
-from transformers import AutoModel, AutoTokenizer
-import os
-import sys
-
-def verify_disk_space(path, required_gb=5):
-    import shutil
-    total, used, free = shutil.disk_usage(path)
-    free_gb = free // (2**30)
-    if free_gb < required_gb:
-        print(f'Error: 최소 {required_gb}GB의 여유 공간이 필요합니다. (현재 여유 공간: {free_gb}GB)', file=sys.stderr)
-        return False
-    return True
-
-try:
-    if not verify_disk_space('/models'):
-        sys.exit(1)
-
-    print('Downloading BGE-M3 model...')
-    model_name = 'BAAI/bge-m3'
-    save_path = '/models/bge-m3'
-
-    # 저장 디렉토리 생성
-    os.makedirs(save_path, exist_ok=True)
-
-    print(f'Model will be saved to: {save_path}')
-
-    # 모델과 토크나이저 다운로드
-    model = AutoModel.from_pretrained(model_name)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    # 모델과 토크나이저 저장
-    print(f'Saving model to {save_path}...')
-    model.save_pretrained(save_path)
-    tokenizer.save_pretrained(save_path)
+        huggingface/transformers-cli:latest \
+        huggingface-cli download --resume-download BAAI/bge-m3 --local-dir /models/bge-m3
     
-    # 파일 존재 확인
-    required_files = ['pytorch_model.bin', 'config.json', 'tokenizer.json']
-    missing_files = [f for f in required_files if not os.path.exists(os.path.join(save_path, f))]
-    if missing_files:
-        print(f'Error: 필수 파일이 없습니다: {missing_files}', file=sys.stderr)
-        sys.exit(1)
-        
-    print('Model download and save completed.')
-except Exception as e:
-    print(f'Error downloading model: {str(e)}', file=sys.stderr)
-    sys.exit(1)
-"
     if [ $? -ne 0 ]; then
         echo "모델 다운로드에 실패했습니다. 로그를 확인하고 다시 시도해주세요."
         exit 1
