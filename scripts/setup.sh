@@ -389,6 +389,11 @@ download_rag_model() {
     
     echo "RAG 모델 다운로드 중..."
     
+    # 기존 lock 파일 제거
+    echo "이전 다운로드의 lock 파일 정리 중..."
+    rm -f "$MODEL_PATH/.cache/huggingface/download/"*.lock
+    rm -f "$MODEL_PATH/.cache/huggingface/download/onnx/"*.lock
+    
     # 사용할 도커 이미지 (경량 Python 이미지)
     DOCKER_IMAGE="python:3.10-slim"
     
@@ -397,7 +402,7 @@ download_rag_model() {
         -v "$MODEL_DIR:/models" \
         -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
         $DOCKER_IMAGE \
-        /bin/bash -c "pip install --no-cache-dir huggingface-hub && huggingface-cli download --resume-download BAAI/bge-m3 --local-dir /models/bge-m3"
+        /bin/bash -c "rm -f /models/bge-m3/.cache/huggingface/download/*.lock /models/bge-m3/.cache/huggingface/download/onnx/*.lock 2>/dev/null; pip install --no-cache-dir huggingface-hub && huggingface-cli download --resume-download BAAI/bge-m3 --local-dir /models/bge-m3"
     
     DOWNLOAD_STATUS=$?
     
