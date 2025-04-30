@@ -59,7 +59,7 @@ class EmbModel(Model):
             batch_size = self.default_batch_sizes[mode]
             
             self.bge_emb = BGEM3FlagModel(
-                'BAAI/bge-m3', 
+                './models/bge-m3',  # 로컬 경로로 변경
                 use_fp16=True,
                 device=self.device,
                 compute_dtype=torch.float16,

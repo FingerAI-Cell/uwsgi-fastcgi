@@ -131,6 +131,7 @@ services:
       - ./rag:/rag
       - shared_tmp:/tmp
       - ./volumes/logs/rag:/var/log/rag
+      - ./models:/rag/models
     environment:
       - MILVUS_HOST=milvus-standalone
       - MILVUS_PORT=19530

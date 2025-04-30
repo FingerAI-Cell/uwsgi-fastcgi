@@ -372,13 +372,36 @@ download_ollama_models() {
     fi
 }
 
-# 컨테이너 시작 함수
+# 모델 다운로드 함수 추가
+download_models() {
+    local mode=$1
+    echo "=== RAG 모델 다운로드 시작 ==="
+    
+    # 모델 저장 디렉토리 생성
+    mkdir -p ./models
+    
+    # RAG 모델 다운로드
+    echo "RAG 임베딩 모델 다운로드 중..."
+    if [ ! -d "./models/bge-m3" ]; then
+        git lfs install
+        git clone https://huggingface.co/BAAI/bge-m3 ./models/bge-m3
+    else
+        echo "RAG 모델이 이미 존재합니다."
+    fi
+    
+    echo "=== RAG 모델 다운로드 완료 ==="
+}
+
+# 서비스 시작 함수 수정
 start_containers() {
     local mode=$1
     local containers=$2
     local use_profile=$3
     
     echo "${service_descriptions[$mode]}"
+    
+    # 모델 다운로드 실행
+    download_models "$mode"
     
     # nginx 설정
     if [[ -n "${nginx_modes[$mode]}" ]]; then
