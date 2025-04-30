@@ -389,15 +389,23 @@ download_rag_model() {
     
     echo "RAG 모델 다운로드 중..."
     
-    # pytorch 이미지를 사용하여 모델 다운로드 (이미 CUDA 지원 포함)
+    # 사용할 도커 이미지 (경량 Python 이미지)
+    DOCKER_IMAGE="python:3.10-slim"
+    
+    # 경량 Python 이미지를 사용하여 모델 다운로드
     $DOCKER_CMD run --rm \
         -v "$MODEL_DIR:/models" \
         -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
-        pytorch/pytorch:2.1.2-cuda11.8-cudnn8-runtime \
-        pip install --no-cache-dir huggingface-hub && \
-        huggingface-cli download --resume-download BAAI/bge-m3 --local-dir /models/bge-m3
+        $DOCKER_IMAGE \
+        /bin/bash -c "pip install --no-cache-dir huggingface-hub && huggingface-cli download --resume-download BAAI/bge-m3 --local-dir /models/bge-m3"
     
-    if [ $? -ne 0 ]; then
+    DOWNLOAD_STATUS=$?
+    
+    # 다운로드 완료 후 이미지 정리
+    echo "임시 도커 이미지 정리 중..."
+    $DOCKER_CMD rmi $DOCKER_IMAGE
+    
+    if [ $DOWNLOAD_STATUS -ne 0 ]; then
         echo "모델 다운로드에 실패했습니다. 로그를 확인하고 다시 시도해주세요."
         exit 1
     fi
