@@ -1,9 +1,5 @@
 # Large model files
 models/**/pytorch_model.bin
-models/**/colbert_linear.pt
-models/**/sentencepiece.bpe.model
-models/**/sparse_linear.pt
-models/**/tokenizer.json
 
 # Unnecessary model directories
 models/**/onnx/

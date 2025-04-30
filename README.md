@@ -670,3 +670,24 @@ curl -X POST http://localhost/vision/analyze \
     "model": "llama:3.2-11b-vision"
   }'
 ```
+
+# RAG System Setup
+
+## 모델 파일 설정
+
+### 수동 전송이 필요한 파일
+BGE-M3 모델의 다음 파일은 용량 문제로 Git에서 제외되어 있어 수동 전송이 필요합니다:
+
+- `models/bge-m3/pytorch_model.bin` (2.27GB)
+
+### 전송 방법
+1. VPN 연결 후 다음 명령어로 전송:
+```bash
+scp [로컬경로]/models/bge-m3/pytorch_model.bin [서버계정]@[서버경로]/home/[홈디렉토리]/uwsgi-fastcgi/models/bge-m3/
+```
+
+2. 전송 후 setup.sh 실행:
+```bash
+cd /home/jsh0630/uwsgi-fastcgi
+./scripts/setup.sh
+```
