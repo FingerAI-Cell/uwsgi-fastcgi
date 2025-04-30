@@ -386,26 +386,39 @@ download_rag_model() {
         docker exec $container_name python3 -c "
 from transformers import AutoModel, AutoTokenizer
 import os
+import sys
 
-print('Downloading BGE-M3 model...')
-model_name = 'BAAI/bge-m3'
-save_path = '/rag/models/bge-m3'
+def download_model():
+    try:
+        print('Downloading BGE-M3 model...')
+        model_name = 'BAAI/bge-m3'
+        save_path = '/rag/models/bge-m3'
 
-# 저장 디렉토리 생성
-os.makedirs(save_path, exist_ok=True)
+        # 저장 디렉토리 생성
+        os.makedirs(save_path, exist_ok=True)
 
-print(f'Model will be saved to: {save_path}')
+        print(f'Model will be saved to: {save_path}')
 
-# 모델과 토크나이저 다운로드
-model = AutoModel.from_pretrained(model_name)
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # local_files_only를 False로 명시적 설정
+        model = AutoModel.from_pretrained(model_name, local_files_only=False)
+        tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=False)
 
-# 모델과 토크나이저 저장
-print(f'Saving model to {save_path}...')
-model.save_pretrained(save_path)
-tokenizer.save_pretrained(save_path)
-print('Model download and save completed.')
+        print(f'Saving model to {save_path}...')
+        model.save_pretrained(save_path)
+        tokenizer.save_pretrained(save_path)
+        print('Model download and save completed.')
+        return True
+    except Exception as e:
+        print(f'Error downloading model: {str(e)}', file=sys.stderr)
+        return False
+
+if not download_model():
+    sys.exit(1)
 "
+        if [ $? -ne 0 ]; then
+            echo "모델 다운로드에 실패했습니다. 네트워크 연결을 확인하고 다시 시도해주세요."
+            exit 1
+        fi
         echo "모델 저장 위치: $MODEL_DIR/bge-m3"
         ls -la "$MODEL_DIR/bge-m3"
     else
