@@ -372,30 +372,28 @@ download_ollama_models() {
     fi
 }
 
-# 모델 다운로드 함수 추가
-download_models() {
-    local mode=$1
-    echo "=== RAG 모델 다운로드 시작 ==="
+# RAG 모델 다운로드 함수
+download_rag_model() {
+    local container_name=$1
     
-    # 프로젝트 루트 디렉토리의 models 폴더 생성
+    # 호스트의 models 디렉토리 생성
     MODEL_DIR="$ROOT_DIR/models"
-    echo "모델 저장 경로: $MODEL_DIR"
+    echo "모델 저장 디렉토리 생성: $MODEL_DIR"
     mkdir -p "$MODEL_DIR"
     
-    # Python 가상환경 생성 및 필요 패키지 설치
-    echo "필요한 패키지 설치 중..."
-    python3 -m pip install --no-cache-dir torch transformers FlagEmbedding
-
-    # RAG 모델 다운로드
-    echo "RAG 임베딩 모델 다운로드 중..."
-    python3 -c "
-import os
+    echo "RAG 모델 다운로드 중..."
+    if docker ps | grep -q $container_name; then
+        docker exec $container_name python3 -c "
 from transformers import AutoModel, AutoTokenizer
-from FlagEmbedding import BGEM3FlagModel
+import os
 
 print('Downloading BGE-M3 model...')
 model_name = 'BAAI/bge-m3'
-save_path = os.path.join('$MODEL_DIR', 'bge-m3')
+save_path = '/rag/models/bge-m3'
+
+# 저장 디렉토리 생성
+os.makedirs(save_path, exist_ok=True)
+
 print(f'Model will be saved to: {save_path}')
 
 # 모델과 토크나이저 다운로드
@@ -408,22 +406,20 @@ model.save_pretrained(save_path)
 tokenizer.save_pretrained(save_path)
 print('Model download and save completed.')
 "
-    
-    echo "=== RAG 모델 다운로드 완료 ==="
-    echo "모델 저장 위치: $MODEL_DIR/bge-m3"
-    ls -la "$MODEL_DIR/bge-m3"
+        echo "모델 저장 위치: $MODEL_DIR/bge-m3"
+        ls -la "$MODEL_DIR/bge-m3"
+    else
+        echo "RAG 컨테이너가 실행되지 않았습니다. 로그를 확인하세요: docker logs $container_name"
+    fi
 }
 
-# 서비스 시작 함수 수정
+# 서비스 시작 함수
 start_containers() {
     local mode=$1
     local containers=$2
     local use_profile=$3
     
     echo "${service_descriptions[$mode]}"
-    
-    # 모델 다운로드 실행
-    download_models "$mode"
     
     # nginx 설정
     if [[ -n "${nginx_modes[$mode]}" ]]; then
@@ -477,6 +473,9 @@ start_containers() {
         if [[ "$containers" == *"standalone"* ]]; then
             docker restart milvus-standalone milvus-rag
         fi
+        
+        # RAG 모델 다운로드
+        download_rag_model "milvus-rag"
     fi
     
     # Ollama가 포함된 경우 모델 다운로드
