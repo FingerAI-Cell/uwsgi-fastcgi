@@ -15,20 +15,21 @@
 |---|------------|------|
 | 1 | [/rag/](#1-rag) | RAG 상태 확인 |
 | 2 | [/rag/insert](#2-raginsert) | 문서 삽입 |
-| 3 | [/rag/search](#3-ragsearch) | 문서 검색 |
-| 4 | [/rag/delete](#4-ragdelete) | 문서 삭제 |
-| 5 | [/rag/document](#5-ragdocument) | 문서·패시지 조회 |
-| 6 | [/rag/data/show](#6-ragdatashow) | 컬렉션 정보 조회 |
-| 7 | [/reranker/health](#7-rerankerhealth) | Reranker 상태 |
-| 8 | [/reranker/enhanced-search](#8-rerankerenhanced-search) | 통합 검색(재랭킹) |
-| 9 | [/reranker/rerank](#9-rerankerrerank) | 단건 재랭킹 |
-| 10 | [/reranker/batch_rerank](#10-rerankerbatch_rerank) | 배치 재랭킹 |
-| 11 | [/prompt/health](#11-prompthealth) | Prompt 상태 |
-| 12 | [/prompt/summarize](#12-promptsummarize) | 문서 요약 |
-| 13 | [/prompt/chat](#13-promptchat) | 챗봇 응답 |
-| 14 | [/prompt/models](#14-promptmodels) | 모델 목록 |
-| 15 | [/vision/health](#15-visionhealth) | Vision 상태 |
-| 16 | [/vision/analyze](#16-visionanalyze) | 이미지 분석 |
+| 3 | [/rag/insert/raw](#3-raginsertraw) | 문서 원본 삽입 |
+| 4 | [/rag/search](#4-ragsearch) | 문서 검색 |
+| 5 | [/rag/delete](#5-ragdelete) | 문서 삭제 |
+| 6 | [/rag/document](#6-ragdocument) | 문서·패시지 조회 |
+| 7 | [/rag/data/show](#7-ragdatashow) | 컬렉션 정보 조회 |
+| 8 | [/reranker/health](#8-rerankerhealth) | Reranker 상태 |
+| 9 | [/reranker/enhanced-search](#9-rerankerenhanced-search) | 통합 검색(재랭킹) |
+| 10 | [/reranker/rerank](#10-rerankerrerank) | 단건 재랭킹 |
+| 11 | [/reranker/batch_rerank](#11-rerankerbatch_rerank) | 배치 재랭킹 |
+| 12 | [/prompt/health](#12-prompthealth) | Prompt 상태 |
+| 13 | [/prompt/summarize](#13-promptsummarize) | 문서 요약 |
+| 14 | [/prompt/chat](#14-promptchat) | 챗봇 응답 |
+| 15 | [/prompt/models](#15-promptmodels) | 모델 목록 |
+| 16 | [/vision/health](#16-visionhealth) | Vision 상태 |
+| 17 | [/vision/analyze](#17-visionanalyze) | 이미지 분석 |
 
 > **모든 URL** 는 `http://localhost` 기준이며, 실제 배포 시 호스트/포트를 맞춰 수정하세요.
 
@@ -156,46 +157,121 @@ curl -X POST http://localhost/rag/insert \
 
 ---
 
-## 3. /rag/search
+## 3. /rag/insert/raw
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
-| Method | **GET** |
+| Method | **POST** |
+| URL | `/rag/insert/raw` |
+| Content‑Type | `application/json` |
+| 설명 | 텍스트를 분할하지 않고 그대로 저장 |
+
+### 요청 파라미터 (Body)
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| documents | Y | Array | 삽입할 문서 배열 |
+| ignore | N | Boolean | 중복 문서 처리 (기본값: true) |
+
+각 문서 객체의 구조:
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| doc_id | Y | String | 사용자 지정 문서 ID |
+| passage_id | Y | Integer | 사용자 지정 패시지 ID |
+| domain | Y | String | 컬렉션 이름 |
+| title | Y | String | 문서 제목 |
+| author | Y | String | 작성자/기관 |
+| text | Y | String | 본문 |
+| info | N | Object | `{ press_num, url }` |
+| tags | Y | Object | `{ date(YYYYMMDD), user }` |
+
+### 요청 예시
+```bash
+curl -X POST http://localhost/rag/insert/raw \
+  -H "Content-Type: application/json" \
+  -d '{
+    "documents": [
+      {
+        "doc_id": "unique_document_id",
+        "passage_id": 1,
+        "domain": "news",
+        "title": "메타버스 뉴스",
+        "author": "삼성전자",
+        "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
+        "info": { "press_num": "비즈니스 워치", "url": "http://example.com/news/1" },
+        "tags": { "date": "20240315", "user": "admin" }
+      }
+    ],
+    "ignore": true
+  }'
+```
+
+### 응답 파라미터
+| 필드 | Type | 설명 |
+|------|------|------|
+| status | String | 전체 처리 상태 ("success", "partial_success", "partial_error", "error") |
+| message | String | 처리 결과 메시지 |
+| status_counts | Object | 상태별 처리 건수 (`success`, `updated`, `skipped`, `error`) |
+| results | Array | 각 문서별 처리 결과 |
+
+### 성공 응답 예시
+```json
+{
+  "status": "success",
+  "message": "총 3개 문서 중 2개 성공, 1개 업데이트, 0개 건너뜀, 0개 실패",
+  "status_counts": {
+    "success": 2,
+    "updated": 1,
+    "skipped": 0,
+    "error": 0
+  },
+  "results": [
+    {
+      "status": "success",
+      "message": "문서가 성공적으로 저장되었습니다.",
+      "doc_id": "unique_document_id",
+      "passage_id": 1,
+      "domain": "news",
+      "title": "메타버스 뉴스"
+    }
+  ]
+}
+```
+
+---
+
+## 4. /rag/search
+### 기본 정보
+| 항목 | 내용 |
+|------|------|
+| Method | **POST** |
 | URL | `/rag/search` |
+| Content‑Type | `application/json` |
 | 설명 | Milvus에서 유사 문서 검색 |
 
-### 요청 파라미터 (Query)
-| 이름 | 필수 | Type | 기본 | 설명 |
+### 요청 파라미터 (Body)
+| 필드 | 필수 | Type | 기본 | 설명 |
 |------|------|------|------|------|
 | query_text | Y | String | – | 검색어 |
 | top_k | N | Integer | 5 | 검색 결과 수 |
-| domain | N | String[] | – | 도메인 필터 (복수 지정 가능) |
+| domains | N | Array | [] | 도메인 필터 (복수 지정 가능) |
 | author | N | String | – | 작성자 필터 |
 | start_date | N | String | – | 시작일 `YYYYMMDD` |
 | end_date | N | String | – | 종료일 `YYYYMMDD` |
 | title | N | String | – | 제목 검색 |
-| info_filter | N | String | – | `info` JSON 문자열 |
-| tags_filter | N | String | – | `tags` JSON 문자열 |
+| info_filter | N | Object | – | `info` 필드 필터링 |
+| tags_filter | N | Object | – | `tags` 필드 필터링 |
 
-### 요청 예시 (단일 도메인)
+### 요청 예시
 ```bash
-curl -G http://localhost/rag/search \
-  --data-urlencode "query_text=메타버스" \
-  --data-urlencode "top_k=5" \
-  --data-urlencode "domain=news" \
-  --data-urlencode "start_date=20240301" \
-  --data-urlencode "end_date=20240315"
-```
-
-### 요청 예시 (복수 도메인)
-```bash
-curl -G http://localhost/rag/search \
-  --data-urlencode "query_text=메타버스" \
-  --data-urlencode "top_k=5" \
-  --data-urlencode "domain=news" \
-  --data-urlencode "domain=test" \
-  --data-urlencode "start_date=20240301" \
-  --data-urlencode "end_date=20240315"
+curl -X POST http://localhost/rag/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query_text": "메타버스",
+    "top_k": 5,
+    "domains": ["news", "test"],
+    "start_date": "20240301",
+    "end_date": "20240315"
+  }'
 ```
 
 ### 응답 파라미터
@@ -206,14 +282,20 @@ curl -G http://localhost/rag/search \
 | search_params | Object | 적용된 검색 파라미터 |
 | total_results | Integer | 전체 검색 결과 수 |
 | returned_results | Integer | 반환된 결과 수 |
-| search_result | Array | 검색 결과 배열 |
+| domain_results | Object | 도메인별 검색 결과 |
+
+각 도메인 결과 객체의 구조:
+| 필드 | Type | 설명 |
+|------|------|------|
+| total_hits | Integer | 해당 도메인의 전체 결과 수 |
+| results | Array | 검색 결과 배열 |
 
 각 검색 결과 객체의 구조:
 | 필드 | Type | 설명 |
 |------|------|------|
 | doc_id | String | 문서 ID |
+| raw_doc_id | String | 원본 문서 ID |
 | passage_id | Integer | 패시지 ID |
-| domain | String | 도메인 |
 | title | String | 제목 |
 | author | String | 작성자 |
 | text | String | 본문 내용 |
@@ -228,8 +310,8 @@ curl -G http://localhost/rag/search \
   "message": "검색이 성공적으로 완료되었습니다.",
   "search_params": {
     "query_text": "메타버스",
+    "domains": ["news", "test"],
     "top_k": 5,
-    "domains": ["news", "blog"],
     "filters": {
       "date_range": {
         "start": "20240301",
@@ -239,25 +321,36 @@ curl -G http://localhost/rag/search \
   },
   "total_results": 10,
   "returned_results": 5,
-  "search_result": [
-    {
-      "doc_id": "109f405744d2f1e0eccb880c70c6c6e9...",
-      "passage_id": 1,
-      "domain": "news",
-      "title": "메타버스 뉴스",
-      "author": "삼성전자",
-      "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
-      "info": {
-        "press_num": "비즈니스 워치",
-        "url": "http://example.com/news/1"
-      },
-      "tags": {
-        "date": "20240315",
-        "user": "admin"
-      },
-      "score": 0.95
+  "domain_results": {
+    "news": {
+      "total_hits": 7,
+      "results": [
+        {
+          "doc_id": "109f405744d2f1e0eccb880c70c6c6e9...",
+          "raw_doc_id": "20240315-메타버스 뉴스-삼성전자",
+          "passage_id": 1,
+          "title": "메타버스 뉴스",
+          "author": "삼성전자",
+          "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
+          "info": {
+            "press_num": "비즈니스 워치",
+            "url": "http://example.com/news/1"
+          },
+          "tags": {
+            "date": "20240315",
+            "user": "admin"
+          },
+          "score": 0.95
+        }
+      ]
+    },
+    "test": {
+      "total_hits": 3,
+      "results": [
+        // ... test 도메인의 결과들
+      ]
     }
-  ]
+  }
 }
 ```
 
@@ -272,7 +365,7 @@ curl -G http://localhost/rag/search \
 
 ---
 
-## 4. /rag/delete
+## 5. /rag/delete
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -283,12 +376,17 @@ curl -G http://localhost/rag/search \
 ### 요청 파라미터 (Query)
 | 이름 | 필수 | Type | 설명 |
 |------|------|------|------|
-| doc_id | Y | String | 문서 ID |
-| domain | Y | String | 도메인 |
+| doc_id | Y | String | 문서 ID (원본 raw_doc_id 또는 해시된 doc_id 모두 사용 가능) |
+| domains | Y | Array | 삭제할 도메인 배열 |
+
+> **doc_id 처리 방식**
+> - 원본 문서 ID(raw_doc_id) 또는 해시된 문서 ID(doc_id) 모두 사용 가능
+> - 시스템이 자동으로 ID 형식을 감지하여 처리
+> - 해시된 ID의 경우: 64자 길이의 16진수 문자열
 
 ### 요청 예시
 ```bash
-curl -X DELETE "http://localhost/rag/delete?doc_id=20240315-메타버스-뉴스&domain=news"
+curl -X DELETE "http://localhost/rag/delete?doc_id=20240315-메타버스-뉴스&domains=news&domains=test"
 ```
 
 ### 응답 파라미터
@@ -301,56 +399,126 @@ curl -X DELETE "http://localhost/rag/delete?doc_id=20240315-메타버스-뉴스&
 { "status": "received" }
 ```
 
-### 실패 응답 예시 (작성자 누락)
+### 실패 응답 예시
 ```json
 {
-  "error": "author is required",
-  "message": "작성자(author)는 필수 입력값입니다."
+  "error": "domains is required",
+  "message": "도메인은 필수 입력값입니다."
 }
 ```
 
 ---
 
-## 5. /rag/document
+## 6. /rag/document
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
-| Method | **GET** |
+| Method | **POST** |
 | URL | `/rag/document` |
+| Content‑Type | `application/json` |
 | 설명 | 특정 문서 혹은 패시지 조회 |
 
-### 요청 파라미터 (Query)
-| 이름 | 필수 | Type | 설명 |
+### 요청 파라미터 (Body)
+| 필드 | 필수 | Type | 설명 |
 |------|------|------|------|
-| doc_id | Y | String | 문서 ID |
-| passage_id | N | String/Int | 패시지 ID |
+| doc_id | Y | String | 문서 ID (원본 raw_doc_id 또는 해시된 doc_id 모두 사용 가능) |
+| domains | Y | Array | 검색할 도메인 배열 |
+| passage_id | N | Integer | 패시지 ID (특정 패시지만 조회 시) |
 
-### 요청 예시 (문서 전체)
+> **doc_id 처리 방식**
+> - 원본 문서 ID(raw_doc_id) 또는 해시된 문서 ID(doc_id) 모두 사용 가능
+> - 시스템이 자동으로 ID 형식을 감지하여 처리
+> - 해시된 ID의 경우: 64자 길이의 16진수 문자열
+> - 응답에는 항상 두 가지 ID가 모두 포함됨 (doc_id, raw_doc_id)
+
+### 요청 예시
 ```bash
-curl -G http://localhost/rag/document --data-urlencode "doc_id=20240315-메타버스-뉴스"
+curl -X POST http://localhost/rag/document \
+  -H "Content-Type: application/json" \
+  -d '{
+    "doc_id": "20240315-메타버스-뉴스",
+    "domains": ["news", "test"],
+    "passage_id": 1
+  }'
 ```
 
-### 응답 파라미터 (문서 전체)
+### 응답 파라미터
 | 필드 | Type | 설명 |
 |------|------|------|
-| doc_id | String | 문서 ID |
-| domain | String | 도메인 |
-| title | String | 제목 |
-| info | Object | 추가 정보 |
-| tags | Object | 태그 |
-| passages | Array | [{ passage_id, text, position }] |
+| doc_id | String | 해시된 문서 ID |
+| raw_doc_id | String | 원본 문서 ID |
+| domain_results | Object | 도메인별 결과 |
 
-### 성공 응답 예시 (문서 전체)
+도메인별 결과 객체의 구조:
+| 필드 | Type | 설명 |
+|------|------|------|
+| doc_id | String | 해시된 문서 ID |
+| raw_doc_id | String | 원본 문서 ID |
+| domain | String | 도메인명 |
+| title | String | 문서 제목 |
+| author | String | 작성자 |
+| info | Object | 추가 정보 |
+| tags | Object | 태그 정보 |
+| passages | Array | 패시지 목록 |
+
+패시지 객체의 구조:
+| 필드 | Type | 설명 |
+|------|------|------|
+| passage_id | Integer | 패시지 ID |
+| text | String | 패시지 내용 |
+| position | Integer | 패시지 순서 |
+
+### 성공 응답 예시 (전체 문서 조회)
+```json
+{
+  "doc_id": "해시된_문서_ID",
+  "raw_doc_id": "원본_문서_ID",
+  "domain_results": {
+    "news": {
+      "doc_id": "해시된_문서_ID",
+      "raw_doc_id": "원본_문서_ID",
+      "domain": "news",
+      "title": "메타버스 뉴스",
+      "author": "삼성전자",
+      "info": {
+        "press_num": "비즈니스 워치",
+        "url": "http://example.com/news/1"
+      },
+      "tags": {
+        "date": "20240315",
+        "user": "admin"
+      },
+      "passages": [
+        {
+          "passage_id": 1,
+          "text": "메타버스는...",
+          "position": 1
+        }
+      ]
+    },
+    "test": {
+      "doc_id": "해시된_문서_ID",
+      "raw_doc_id": "원본_문서_ID",
+      "domain": "test",
+      "title": "메타버스 테스트",
+      "author": "LG전자",
+      "info": { ... },
+      "tags": { ... },
+      "passages": [ ... ]
+    }
+  }
+}
+```
+
+### 성공 응답 예시 (특정 패시지 조회)
 ```json
 {
   "doc_id": "20240315-메타버스-뉴스",
-  "domain": "news",
+  "domains": ["news", "test"],
   "title": "메타버스 뉴스",
-  "info": { "press_num": "비즈니스 워치", "url": "http://example.com/news/1" },
-  "tags": { "date": "20240315", "user": "admin" },
-  "passages": [
-    { "passage_id": 1, "text": "메타버스는...", "position": 1 }
-  ]
+  "passage_id": 1,
+  "text": "메타버스는...",
+  "position": 1
 }
 ```
 
@@ -359,13 +527,25 @@ curl -G http://localhost/rag/document --data-urlencode "doc_id=20240315-메타�
 {
   "error": "Document not found",
   "doc_id": "20230101-존재-하지-않음",
+  "domains": ["news", "test"],
   "message": "요청하신 문서를 찾을 수 없습니다."
+}
+```
+
+### 실패 응답 예시 (패시지 없음)
+```json
+{
+  "error": "Passage not found",
+  "doc_id": "20240315-메타버스-뉴스",
+  "passage_id": 999,
+  "domains": ["news", "test"],
+  "message": "요청하신 패시지를 찾을 수 없습니다."
 }
 ```
 
 ---
 
-## 6. /rag/data/show
+## 7. /rag/data/show
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -408,7 +588,7 @@ curl -G http://localhost/rag/data/show --data-urlencode "collection_name=news"
 
 ---
 
-## 7. /reranker/health
+## 8. /reranker/health
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -437,7 +617,7 @@ curl -X GET http://localhost/reranker/health
 
 ---
 
-## 8. /reranker/enhanced-search
+## 9. /reranker/enhanced-search
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -508,7 +688,7 @@ curl -G http://localhost/reranker/enhanced-search \
 
 ---
 
-## 9. /reranker/rerank
+## 10. /reranker/rerank
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -575,7 +755,7 @@ SearchResultModel + `reranked: true`
 
 ---
 
-## 10. /reranker/batch_rerank
+## 11. /reranker/batch_rerank
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -623,7 +803,7 @@ curl -X POST "http://localhost/reranker/batch_rerank?top_k=5" \
 
 ---
 
-## 11. /prompt/health
+## 12. /prompt/health
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -650,7 +830,7 @@ curl -X GET http://localhost/prompt/health
 
 ---
 
-## 12. /prompt/summarize
+## 13. /prompt/summarize
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -660,17 +840,37 @@ curl -X GET http://localhost/prompt/health
 | 설명 | 검색 → 재랭킹 → LLM 요약 |
 
 ### 요청 파라미터 (Body)
-| 이름 | 필수 | Type | 설명 |
+| 필드 | 필수 | Type | 설명 |
 |------|------|------|------|
 | query | Y | String | 요약할 쿼리 |
-| domain/author/start_date/end_date | N | String | 필터 |
+| domain | N | String | 단일 도메인 필터 |
+| domains | N | Array | 복수 도메인 필터 |
+| author | N | String | 작성자 필터 |
+| start_date | N | String | 시작일 `YYYYMMDD` |
+| end_date | N | String | 종료일 `YYYYMMDD` |
+| title | N | String | 제목 검색 |
+| info_filter | N | Object | `info` 필드 필터링 |
+| tags_filter | N | Object | `tags` 필드 필터링 |
 
 ### 요청 예시
 ```bash
 curl -X POST http://localhost/prompt/summarize \
   -H "Content-Type: application/json" \
-  -d '{ "query": "메타버스 최신 동향", "domain": "news" }'
+  -d '{
+    "query": "메타버스 최신 동향",
+    "domain": "news",
+    "start_date": "20240301",
+    "end_date": "20240331"
+  }'
 ```
+
+### 응답 파라미터
+| 필드 | Type | 설명 |
+|------|------|------|
+| query | String | 요청한 쿼리 |
+| summary | String | 요약 결과 |
+| documents_count | Integer | 처리된 문서 수 |
+| prompt_length | Integer | 프롬프트 길이 |
 
 ### 성공 응답 예시
 ```json
@@ -682,14 +882,16 @@ curl -X POST http://localhost/prompt/summarize \
 }
 ```
 
-### 실패 응답 예시 (쿼리 누락)
+### 실패 응답 예시
 ```json
-{ "error": "쿼리가 필요합니다" }
+{
+  "error": "쿼리가 필요합니다"
+}
 ```
 
 ---
 
-## 13. /prompt/chat
+## 14. /prompt/chat
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -726,7 +928,7 @@ curl -X POST http://localhost/prompt/chat \
 
 ---
 
-## 14. /prompt/models
+## 15. /prompt/models
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -758,7 +960,7 @@ curl -X GET http://localhost/prompt/models
 
 ---
 
-## 15. /vision/health
+## 16. /vision/health
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -792,7 +994,7 @@ curl -X GET http://localhost/vision/health
 
 ---
 
-## 16. /vision/analyze
+## 17. /vision/analyze
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|

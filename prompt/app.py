@@ -119,27 +119,29 @@ def summarize():
         logger.info(f"RAG 서비스 호출 준비: endpoint={RAG_ENDPOINT}/search")
         search_params = {
             "query_text": query,
-            "top_k": summaryAgent.search_top
+            "top_k": summaryAgent.search_top,
+            "domains": []  # 기본 빈 도메인 리스트
         }
         
         # 추가 검색 매개변수
-        for param in ["domain", "author", "start_date", "end_date"]:
+        if "domain" in data:  # 단일 도메인 지원
+            search_params["domains"] = [data["domain"]]
+        elif "domains" in data:  # 복수 도메인 지원
+            search_params["domains"] = data["domains"]
+            
+        for param in ["author", "start_date", "end_date", "title", "info_filter", "tags_filter"]:
             if param in data:
                 search_params[param] = data[param]
                 logger.info(f"추가 검색 파라미터: {param}={data[param]}")
         
         # curl 형식의 API 호출 로깅
-        curl_command = f'curl -X GET "{RAG_ENDPOINT}/search'
-        query_params = []
-        for key, value in search_params.items():
-            query_params.append(f"{key}={value}")
-        if query_params:
-            curl_command += "?" + "&".join(query_params)
-        curl_command += '"'
+        curl_command = f'''curl -X POST "{RAG_ENDPOINT}/search" \\
+  -H "Content-Type: application/json" \\
+  -d '{json.dumps(search_params, ensure_ascii=False)}\''''
         logger.info(f"RAG API curl 형식: {curl_command}")
         
         logger.info(f"RAG 검색 요청: params={json.dumps(search_params, ensure_ascii=False)}")
-        search_response = requests.get(f"{RAG_ENDPOINT}/search", params=search_params)
+        search_response = requests.post(f"{RAG_ENDPOINT}/search", json=search_params)
         
         logger.info(f"RAG 응답 코드: {search_response.status_code}")
         if search_response.status_code != 200:

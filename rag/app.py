@@ -71,20 +71,29 @@ def show_data():
         "partition_nums": milvus_db.partition_entities_num,
     }), 200
 
-@app.route('/rag/search', methods=['GET'])
+@app.route('/rag/search', methods=['POST'])
 def search_data():
+    # JSON 데이터 받기
+    request_data = request.get_json()
+    if not request_data:
+        return jsonify({
+            "result_code": "F000000",
+            "message": "JSON 데이터가 필요합니다.",
+            "search_result": None
+        }), 400
+
     # 기본 검색 파라미터
-    query_text = request.args.get('query_text')
-    top_k = request.args.get('top_k', 5)
-    domains = request.args.getlist('domain')  # 도메인 리스트로 받기
+    query_text = request_data.get('query_text')
+    top_k = request_data.get('top_k', 5)
+    domains = request_data.get('domains', [])  # 도메인 리스트
 
     # 추가 필터링 파라미터
-    author = request.args.get('author')  # 작성자 필터 추가
-    start_date = request.args.get('start_date')  # YYYYMMDD 형식
-    end_date = request.args.get('end_date')      # YYYYMMDD 형식
-    title_query = request.args.get('title')      # 제목 검색
-    info_filter = request.args.get('info_filter') # JSON 형식의 info 필터 조건
-    tags_filter = request.args.get('tags_filter') # JSON 형식의 tags 필터 조건
+    author = request_data.get('author')  # 작성자 필터
+    start_date = request_data.get('start_date')  # YYYYMMDD 형식
+    end_date = request_data.get('end_date')      # YYYYMMDD 형식
+    title_query = request_data.get('title')      # 제목 검색
+    info_filter = request_data.get('info_filter') # info 필터 조건
+    tags_filter = request_data.get('tags_filter') # tags 필터 조건
 
     if not query_text:
         return jsonify({
@@ -142,31 +151,19 @@ def search_data():
     # 필터 조건 파싱
     filter_conditions = {}
     if domains:
-        filter_conditions['domains'] = domains  # 복수 도메인 지원
-    if author:  # 작성자 필터 추가
+        filter_conditions['domains'] = domains
+    if author:
         filter_conditions['author'] = author
     if start_date or end_date:
         filter_conditions['date_range'] = {'start': start_date, 'end': end_date}
     if title_query:
         filter_conditions['title'] = title_query
     if info_filter:
-        try:
-            filter_conditions['info'] = json.loads(info_filter)
-        except json.JSONDecodeError:
-            return jsonify({
-                "result_code": "F000003",
-                "message": "info_filter는 유효한 JSON 형식이어야 합니다.",
-                "search_result": None
-            }), 400
+        # JSON 파싱이 필요 없음 (이미 JSON 객체로 받음)
+        filter_conditions['info'] = info_filter
     if tags_filter:
-        try:
-            filter_conditions['tags'] = json.loads(tags_filter)
-        except json.JSONDecodeError:
-            return jsonify({
-                "result_code": "F000004",
-                "message": "tags_filter는 유효한 JSON 형식이어야 합니다.",
-                "search_result": None
-            }), 400
+        # JSON 파싱이 필요 없음 (이미 JSON 객체로 받음)
+        filter_conditions['tags'] = tags_filter
     
     try:
         # 각 도메인별 검색 결과 수집
@@ -198,6 +195,7 @@ def search_data():
         for result in final_results:
             cleaned_result = {
                 "doc_id": result.get('doc_id'),
+                "raw_doc_id": result.get('raw_doc_id'),
                 "passage_id": result.get('passage_id'),
                 "domain": result.get('domain'),
                 "title": result.get('title'),
@@ -397,6 +395,195 @@ def insert_data():
             "message": f"요청 처리 중 오류가 발생했습니다: {str(e)}"
         }), 500
 
+@app.route('/rag/insert/raw', methods=['POST'])
+def insert_raw_data():
+    '''
+    텍스트를 분할하지 않고 그대로 저장하는 API
+    {
+        "documents": [
+            {
+                "doc_id": "unique_document_id",  # 필수: 사용자가 지정한 고유 문서 ID
+                "passage_id": 1,  # 필수: 사용자가 지정한 passage ID
+                "domain": "news",
+                "title": "메타버스 뉴스",
+                "author": "삼성전자",
+                "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
+                "info": {
+                    "press_num": "비즈니스 워치",
+                    "url": "http://example.com/news/1"
+                },
+                "tags": {
+                    "date": "20240315",
+                    "user": "admin"
+                }
+            }
+        ],
+        "ignore": true  # true: 중복 시 건너뜀, false: 중복 시 삭제 후 재생성
+    }
+    '''
+    try:
+        request_data = request.json
+        if not request_data:
+            return jsonify({
+                "result_code": "F000001",
+                "message": "요청 본문이 비어있습니다."
+            }), 400
+
+        if "documents" not in request_data:
+            return jsonify({
+                "result_code": "F000002",
+                "message": "documents 필드는 필수입니다."
+            }), 400
+
+        if not isinstance(request_data["documents"], list) or len(request_data["documents"]) == 0:
+            return jsonify({
+                "result_code": "F000003",
+                "message": "documents는 최소 1개 이상의 문서를 포함해야 합니다."
+            }), 400
+
+        # ignore 옵션 처리 (기본값: True)
+        ignore = request_data.get('ignore', True)
+
+        # 필수 필드 검증 (doc_id, passage_id 추가)
+        required_fields = ['doc_id', 'passage_id', 'domain', 'title', 'author', 'text', 'tags']
+        results = []
+        
+        # 상태별 카운터 초기화
+        status_counts = {
+            "success": 0,  # 새로 삽입됨
+            "updated": 0,  # 업데이트됨
+            "skipped": 0,  # 중복으로 무시됨
+            "error": 0     # 오류 발생
+        }
+        
+        for doc in request_data["documents"]:
+            try:
+                # 필수 필드 검증
+                missing_fields = [field for field in required_fields if field not in doc]
+                if missing_fields:
+                    results.append({
+                        "status": "error",
+                        "result_code": "F000004",
+                        "message": f"필수 필드가 누락되었습니다: {', '.join(missing_fields)}",
+                        "title": doc.get('title', 'unknown')
+                    })
+                    status_counts["error"] += 1
+                    continue
+
+                if 'date' not in doc['tags']:
+                    results.append({
+                        "status": "error",
+                        "result_code": "F000005",
+                        "message": "tags.date는 필수 입력값입니다.",
+                        "title": doc['title']
+                    })
+                    status_counts["error"] += 1
+                    continue
+
+                # passage_id가 정수인지 확인
+                try:
+                    passage_id = int(doc['passage_id'])
+                    doc['passage_id'] = passage_id
+                except (ValueError, TypeError):
+                    results.append({
+                        "status": "error",
+                        "result_code": "F000008",
+                        "message": "passage_id는 정수여야 합니다.",
+                        "title": doc['title']
+                    })
+                    status_counts["error"] += 1
+                    continue
+                
+                # 도메인이 없으면 생성
+                if doc['domain'] not in milvus_db.get_list_collection():
+                    interact_manager.create_domain(doc['domain'])
+                    # 새로 생성된 컬렉션 로드
+                    collection = Collection(doc['domain'])
+                    collection.load()
+                    print(f"[DEBUG] New collection {doc['domain']} created and loaded")
+                
+                # 데이터 삽입 시도 (raw_insert_data 메소드 사용)
+                insert_status = interact_manager.raw_insert_data(
+                    doc['domain'], 
+                    doc['doc_id'],  # 사용자가 제공한 doc_id 사용
+                    doc['passage_id'],  # 사용자가 제공한 passage_id 사용
+                    doc['title'], 
+                    doc['author'], 
+                    doc['text'], 
+                    doc.get('info', {}),
+                    doc['tags'],
+                    ignore=ignore  # 전체 요청에 대한 ignore 값 사용
+                )
+                
+                if insert_status == "skipped":
+                    results.append({
+                        "status": "skipped",
+                        "result_code": "F000000",
+                        "message": "이미 존재하는 문서로 건너뛰었습니다.",
+                        "doc_id": doc['doc_id'],
+                        "passage_id": doc['passage_id'],
+                        "domain": doc['domain'],
+                        "title": doc['title']
+                    })
+                    status_counts["skipped"] += 1
+                elif insert_status == "updated":
+                    results.append({
+                        "status": "updated",
+                        "result_code": "F000000",
+                        "message": "기존 문서를 삭제하고 새로운 문서로 업데이트했습니다.",
+                        "doc_id": doc['doc_id'],
+                        "passage_id": doc['passage_id'],
+                        "domain": doc['domain'],
+                        "title": doc['title']
+                    })
+                    status_counts["updated"] += 1
+                else:  # success
+                    results.append({
+                        "status": "success",
+                        "result_code": "F000000",
+                        "message": "문서가 성공적으로 저장되었습니다.",
+                        "doc_id": doc['doc_id'],
+                        "passage_id": doc['passage_id'],
+                        "domain": doc['domain'],
+                        "title": doc['title']
+                    })
+                    status_counts["success"] += 1
+                
+            except Exception as e:
+                logger.error(f"Error inserting document: {str(e)}")
+                results.append({
+                    "status": "error",
+                    "result_code": "F000006",
+                    "message": f"문서 저장 중 오류가 발생했습니다: {str(e)}",
+                    "title": doc.get('title', 'unknown')
+                })
+                status_counts["error"] += 1
+
+        # 전체 상태 결정
+        if status_counts["error"] == len(request_data["documents"]):
+            overall_status = "error"  # 모두 실패
+        elif status_counts["error"] == 0 and status_counts["skipped"] == 0 and status_counts["updated"] == 0:
+            overall_status = "success"  # 모두 새로 성공
+        elif status_counts["error"] == 0:
+            overall_status = "partial_success"  # 일부는 성공/업데이트/건너뜀
+        else:
+            overall_status = "partial_error"  # 일부 실패
+        
+        return jsonify({
+            "status": overall_status,
+            "message": f"총 {len(request_data['documents'])}개 문서 중 {status_counts['success']}개 성공, {status_counts['updated']}개 업데이트, {status_counts['skipped']}개 건너뜀, {status_counts['error']}개 실패",
+            "status_counts": status_counts,
+            "results": results
+        }), 200 if overall_status != "error" else 500
+        
+    except Exception as e:
+        logger.error(f"Error in insert endpoint: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "result_code": "F000007",
+            "message": f"요청 처리 중 오류가 발생했습니다: {str(e)}"
+        }), 500
+
 @app.route('/rag/delete', methods=['DELETE'])
 def delete_data():
     '''
@@ -437,45 +624,138 @@ def delete_data():
             "domain": doc_domain
         }), 500
 
-@app.route('/rag/document', methods=['GET'])
+@app.route('/rag/document', methods=['POST'])
 def get_document():
-    doc_id = request.args.get('doc_id')
-    passage_id = request.args.get('passage_id')
+    '''
+    문서 조회 API
+    
+    Request Body:
+    {
+        "doc_id": "문서ID",
+        "domains": ["도메인1", "도메인2"],  # 검색할 도메인 리스트
+        "passage_id": 1  # optional, 특정 passage만 조회할 경우
+    }
+    
+    Response Body (전체 문서 조회 시):
+    {
+        "doc_id": "해시된 문서ID",
+        "raw_doc_id": "원본 문서ID",
+        "domain_results": {
+            "도메인1": {
+                "doc_id": "해시된 문서ID",
+                "raw_doc_id": "원본 문서ID",
+                "domain": "도메인1",
+                "title": "문서 제목",
+                "author": "작성자",
+                "info": {},  # 추가 메타데이터
+                "tags": {},  # 태그 정보
+                "passages": [
+                    {
+                        "passage_id": "패시지ID",
+                        "text": "패시지 내용",
+                        "position": "패시지 순서"
+                    },
+                    ...
+                ]
+            },
+            "도메인2": {
+                ...
+            }
+        }
+    }
+    
+    Response Body (특정 패시지 조회 시):
+    {
+        "doc_id": "문서ID",
+        "raw_doc_id": "원본 문서ID",
+        "passage_id": "패시지ID",
+        "text": "패시지 내용",
+        "position": "패시지 순서",
+        "metadata": {
+            "domain": "도메인명",
+            "title": "문서 제목",
+            "info": {},
+            "tags": {}
+        }
 
-    if not doc_id:
-        return jsonify({
-            "error": "doc_id is required",
-            "message": "문서 ID는 필수 입력값입니다."
-        }), 400
-
+    }
+    '''
     try:
-        if passage_id:
-            # 특정 패시지 조회
-            result = interact_manager.get_specific_passage(doc_id, passage_id)
-            if not result:
-                return jsonify({
-                    "error": "Passage not found",
-                    "doc_id": doc_id,
-                    "passage_id": passage_id,
-                    "message": "요청하신 패시지를 찾을 수 없습니다."
-                }), 404
-            return Response(json.dumps(result, ensure_ascii=False), content_type="application/json; charset=utf-8")
-        else:
-            # 문서의 모든 패시지 조회
-            result = interact_manager.get_document_passages(doc_id)
-            if not result:
-                return jsonify({
-                    "error": "Document not found",
-                    "doc_id": doc_id,
-                    "message": "요청하신 문서를 찾을 수 없습니다."
-                }), 404
-            return Response(json.dumps(result, ensure_ascii=False), content_type="application/json; charset=utf-8")
+        request_data = request.get_json()
+        if not request_data:
+            return jsonify({
+                "error": "invalid request",
+                "message": "요청 본문이 비어있습니다."
+            }), 400
+
+        doc_id = request_data.get('doc_id')
+        domains = request_data.get('domains', [])
+        passage_id = request_data.get('passage_id')
+
+        if not doc_id:
+            return jsonify({
+                "error": "doc_id is required",
+                "message": "문서 ID는 필수 입력값입니다."
+            }), 400
+            
+        if not domains:
+            return jsonify({
+                "error": "domains is required",
+                "message": "검색할 도메인은 필수 입력값입니다."
+            }), 400
+            
+        if not isinstance(domains, list):
+            return jsonify({
+                "error": "invalid domains format",
+                "message": "domains는 배열 형식이어야 합니다."
+            }), 400
+
+        # 도메인 유효성 검증
+        available_collections = milvus_db.get_list_collection()
+        invalid_domains = [d for d in domains if d not in available_collections]
+        if invalid_domains:
+            return jsonify({
+                "error": "invalid domains",
+                "message": f"유효하지 않은 도메인이 포함되어 있습니다: {', '.join(invalid_domains)}",
+                "available_domains": available_collections
+            }), 400
+
+        try:
+            if passage_id:
+                # 특정 패시지 조회
+                result = interact_manager.get_specific_passage(doc_id, passage_id, domains)
+                if not result:
+                    return jsonify({
+                        "error": "Passage not found",
+                        "doc_id": doc_id,
+                        "passage_id": passage_id,
+                        "domains": domains,
+                        "message": "요청하신 패시지를 찾을 수 없습니다."
+                    }), 404
+                return Response(json.dumps(result, ensure_ascii=False), content_type="application/json; charset=utf-8")
+            else:
+                # 문서의 모든 패시지 조회
+                result = interact_manager.get_document_passages(doc_id, domains)
+                if not result:
+                    return jsonify({
+                        "error": "Document not found",
+                        "doc_id": doc_id,
+                        "domains": domains,
+                        "message": "요청하신 문서를 찾을 수 없습니다."
+                    }), 404
+                return Response(json.dumps(result, ensure_ascii=False), content_type="application/json; charset=utf-8")
+        except Exception as e:
+            logger.error(f"Error retrieving document: {str(e)}")
+            return jsonify({
+                "error": "Internal server error",
+                "message": "문서 조회 중 오류가 발생했습니다."
+            }), 500
     except Exception as e:
-        logger.error(f"Error retrieving document: {str(e)}")
+        logger.error(f"Error parsing request: {str(e)}")
         return jsonify({
-            "error": "Internal server error",
-            "message": "문서 조회 중 오류가 발생했습니다."
-        }), 500
+            "error": "Invalid request",
+            "message": f"잘못된 요청입니다: {str(e)}"
+        }), 400
 
 @app.route("/rag/", methods=["GET"])
 def index():
