@@ -141,6 +141,9 @@ services:
       - MODEL_PATH=/rag/models/bge-m3
       - TRANSFORMERS_CACHE=/rag/models
       - HF_HOME=/rag/models
+      - TRANSFORMERS_OFFLINE=1
+      - HF_DATASETS_OFFLINE=1
+      - HF_HUB_OFFLINE=1
     depends_on:
       - standalone
     networks:
