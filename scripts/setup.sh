@@ -386,33 +386,36 @@ download_rag_model() {
         echo "기존 파일을 사용합니다."
         return 0
     fi
-    
+
     echo "RAG 모델 다운로드 중..."
     
-    # 기존 lock 파일 제거
-    echo "이전 다운로드의 lock 파일 정리 중..."
-    rm -f "$MODEL_PATH/.cache/huggingface/download/"*.lock
-    rm -f "$MODEL_PATH/.cache/huggingface/download/onnx/"*.lock
+    # Git을 통한 모델 다운로드
+    cd "$MODEL_DIR" || exit 1
     
-    # 사용할 도커 이미지 (경량 Python 이미지)
-    DOCKER_IMAGE="python:3.10-slim"
+    # 기존 임시 디렉토리 정리
+    rm -rf "$MODEL_DIR/BAAI-bge-m3" "$MODEL_DIR/bge-m3"
     
-    # 경량 Python 이미지를 사용하여 모델 다운로드
-    $DOCKER_CMD run --rm \
-        -v "$MODEL_DIR:/models" \
-        -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
-        $DOCKER_IMAGE \
-        /bin/bash -c "rm -f /models/bge-m3/.cache/huggingface/download/*.lock /models/bge-m3/.cache/huggingface/download/onnx/*.lock 2>/dev/null; pip install --no-cache-dir huggingface-hub && huggingface-cli download --resume-download BAAI/bge-m3 --local-dir /models/bge-m3"
-    
-    DOWNLOAD_STATUS=$?
-    
-    # 다운로드 완료 후 이미지 정리
-    echo "임시 도커 이미지 정리 중..."
-    $DOCKER_CMD rmi $DOCKER_IMAGE
-    
-    if [ $DOWNLOAD_STATUS -ne 0 ]; then
-        echo "모델 다운로드에 실패했습니다. 로그를 확인하고 다시 시도해주세요."
+    # 모델 클론
+    if ! git clone https://huggingface.co/BAAI/bge-m3; then
+        echo "모델 다운로드에 실패했습니다. Git LFS가 설치되어 있는지 확인하고 다시 시도해주세요."
         exit 1
+    fi
+    
+    # 디렉토리 이름 변경
+    if [ -d "$MODEL_DIR/BAAI-bge-m3" ]; then
+        mv "$MODEL_DIR/BAAI-bge-m3" "$MODEL_PATH"
+    elif [ -d "$MODEL_DIR/bge-m3" ]; then
+        # 이미 올바른 이름이면 건너뜀
+        :
+    else
+        # 클론된 디렉토리 찾기
+        CLONED_DIR=$(find "$MODEL_DIR" -maxdepth 1 -type d -name "*bge-m3" | head -n 1)
+        if [ -n "$CLONED_DIR" ]; then
+            mv "$CLONED_DIR" "$MODEL_PATH"
+        else
+            echo "오류: 클론된 모델 디렉토리를 찾을 수 없습니다."
+            exit 1
+        fi
     fi
     
     # 다운로드 후 권한 설정
