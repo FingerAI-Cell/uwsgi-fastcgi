@@ -388,11 +388,45 @@ download_rag_model() {
     fi
     
     echo "RAG 모델 다운로드 중..."
-    # 임시 컨테이너로 huggingface-cli 실행
-    $DOCKER_CMD run --rm \
-        -v "$MODEL_DIR:/models" \
-        huggingface/transformers-cli:latest \
-        huggingface-cli download --resume-download BAAI/bge-m3 --local-dir /models/bge-m3
+    
+    # Python 설치 확인 및 설치
+    if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
+        echo "Python이 설치되어 있지 않습니다. Python을 설치합니다..."
+        if command -v apt-get &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y python3 python3-pip
+        elif command -v yum &> /dev/null; then
+            sudo yum install -y python3 python3-pip
+        else
+            echo "패키지 관리자를 찾을 수 없습니다. Python을 수동으로 설치해주세요."
+            exit 1
+        fi
+    fi
+    
+    # pip 설치 확인 및 설치
+    if ! command -v pip3 &> /dev/null && ! command -v pip &> /dev/null; then
+        echo "pip가 설치되어 있지 않습니다. pip를 설치합니다..."
+        if command -v apt-get &> /dev/null; then
+            sudo apt-get install -y python3-pip
+        elif command -v yum &> /dev/null; then
+            sudo yum install -y python3-pip
+        else
+            echo "pip를 설치할 수 없습니다. 수동으로 설치해주세요."
+            exit 1
+        fi
+    fi
+    
+    # huggingface-cli 설치 확인 및 설치
+    if ! command -v huggingface-cli &> /dev/null; then
+        echo "huggingface-cli 설치 중..."
+        python3 -m pip install --user --upgrade huggingface-hub
+    fi
+    
+    # PATH에 ~/.local/bin 추가 (huggingface-cli가 여기에 설치될 수 있음)
+    export PATH="$HOME/.local/bin:$PATH"
+    
+    # 모델 다운로드
+    echo "BAAI/bge-m3 모델 다운로드 중..."
+    huggingface-cli download --resume-download BAAI/bge-m3 --local-dir "$MODEL_PATH"
     
     if [ $? -ne 0 ]; then
         echo "모델 다운로드에 실패했습니다. 로그를 확인하고 다시 시도해주세요."
