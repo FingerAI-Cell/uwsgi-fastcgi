@@ -25,6 +25,8 @@ RUN apt-get update && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
+RUN pip install numpy==1.24.4
+
 # 디버깅용 명령
 RUN ls -la /rag/
 RUN python -c "import sys; print(sys.path)"

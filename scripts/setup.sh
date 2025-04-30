@@ -427,7 +427,7 @@ start_containers() {
     
     # RAG가 포함된 경우 numpy 패치
     if [[ "$containers" == *"rag"* ]]; then
-        fix_rag_numpy
+        #fix_rag_numpy # 더 이상 필요 없음
         # 경우에 따라 DB 컨테이너 재시작
         if [[ "$containers" == *"standalone"* ]]; then
             docker restart milvus-standalone milvus-rag
