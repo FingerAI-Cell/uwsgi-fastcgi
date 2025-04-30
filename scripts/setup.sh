@@ -374,61 +374,42 @@ download_ollama_models() {
 
 # RAG 모델 다운로드 함수
 download_rag_model() {
-    # 모델 저장 디렉토리 생성
+    # 모델 저장 디렉토리 확인
     MODEL_DIR="$ROOT_DIR/models"
     MODEL_PATH="$MODEL_DIR/bge-m3"
-    echo "모델 저장 디렉토리 생성: $MODEL_DIR"
-    mkdir -p "$MODEL_DIR"
-    
-    # 이미 모델이 존재하는지 확인
-    if [ -f "$MODEL_PATH/pytorch_model.bin" ] && [ -f "$MODEL_PATH/config.json" ]; then
-        echo "모델 파일이 이미 존재합니다: $MODEL_PATH"
-        echo "기존 파일을 사용합니다."
-        return 0
-    fi
-
-    echo "RAG 모델 다운로드 중..."
-    
-    # Git을 통한 모델 다운로드
-    cd "$MODEL_DIR" || exit 1
-    
-    # 기존 임시 디렉토리 정리
-    rm -rf "$MODEL_DIR/BAAI-bge-m3" "$MODEL_DIR/bge-m3"
-    
-    # 모델 클론
-    if ! git clone https://huggingface.co/BAAI/bge-m3; then
-        echo "모델 다운로드에 실패했습니다. Git LFS가 설치되어 있는지 확인하고 다시 시도해주세요."
-        exit 1
-    fi
-    
-    # 디렉토리 이름 변경
-    if [ -d "$MODEL_DIR/BAAI-bge-m3" ]; then
-        mv "$MODEL_DIR/BAAI-bge-m3" "$MODEL_PATH"
-    elif [ -d "$MODEL_DIR/bge-m3" ]; then
-        # 이미 올바른 이름이면 건너뜀
-        :
-    else
-        # 클론된 디렉토리 찾기
-        CLONED_DIR=$(find "$MODEL_DIR" -maxdepth 1 -type d -name "*bge-m3" | head -n 1)
-        if [ -n "$CLONED_DIR" ]; then
-            mv "$CLONED_DIR" "$MODEL_PATH"
-        else
-            echo "오류: 클론된 모델 디렉토리를 찾을 수 없습니다."
-            exit 1
-        fi
-    fi
-    
-    # 다운로드 후 권한 설정
-    chmod -R 755 "$MODEL_PATH"
-    
-    echo "모델 저장 위치: $MODEL_PATH"
-    ls -la "$MODEL_PATH"
+    echo "모델 디렉토리 확인: $MODEL_PATH"
     
     # 필수 파일 존재 확인
-    if [ ! -f "$MODEL_PATH/pytorch_model.bin" ] || [ ! -f "$MODEL_PATH/config.json" ]; then
-        echo "오류: 필수 모델 파일이 누락되었습니다."
+    REQUIRED_FILES=(
+        "pytorch_model.bin"
+        "colbert_linear.pt"
+        "sentencepiece.bpe.model"
+        "sparse_linear.pt"
+        "tokenizer.json"
+        "config.json"
+        "tokenizer_config.json"
+        "special_tokens_map.json"
+    )
+    
+    MISSING_FILES=()
+    for file in "${REQUIRED_FILES[@]}"; do
+        if [ ! -f "$MODEL_PATH/$file" ]; then
+            MISSING_FILES+=("$file")
+        fi
+    done
+    
+    if [ ${#MISSING_FILES[@]} -ne 0 ]; then
+        echo "오류: 다음 필수 모델 파일이 누락되었습니다:"
+        printf '%s\n' "${MISSING_FILES[@]}"
+        echo "모델 파일을 올바른 위치에 배치했는지 확인해주세요."
+        echo "대용량 파일들은 수동으로 전송해야 합니다."
         exit 1
     fi
+    
+    echo "모델 파일 확인 완료: $MODEL_PATH"
+    # 권한 설정
+    chmod -R 755 "$MODEL_PATH"
+    return 0
 }
 
 # 서비스 시작 함수
