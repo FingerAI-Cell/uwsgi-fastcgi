@@ -61,7 +61,7 @@ class InteractManager:
         data_raw_doc_id = self.vectorenv.create_field_schema('raw_doc_id', dtype='VARCHAR', max_length=1024)  # 원본 doc_id 저장용
         data_passage_id = self.vectorenv.create_field_schema('passage_id', dtype='INT64')
         data_domain = self.vectorenv.create_field_schema('domain', dtype='VARCHAR', max_length=32)
-        data_title = self.vectorenv.create_field_schema('title', dtype='VARCHAR', max_length=128)
+        data_title = self.vectorenv.create_field_schema('title', dtype='VARCHAR', max_length=1024)
         data_author = self.vectorenv.create_field_schema('author', dtype='VARCHAR', max_length=128)
         data_text = self.vectorenv.create_field_schema('text', dtype='VARCHAR', max_length=10000)
         data_text_emb = self.vectorenv.create_field_schema('text_emb', dtype='FLOAT_VECTOR', dim=1024)
