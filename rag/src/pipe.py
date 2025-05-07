@@ -173,10 +173,11 @@ class InteractManager:
             for i, (chunk, passage_id) in enumerate(chunked_texts):
                 print(f"[DEBUG] Processing chunk {i+1}/{len(chunked_texts)}")
                 
-                # 텍스트 길이 체크
-                if len(chunk) > 512:
-                    print(f"[ERROR] Text chunk length ({len(chunk)}) exceeds maximum length (512)")
-                    raise ValueError(f"Text chunk length ({len(chunk)}) exceeds maximum allowed length (512)")
+                # 텍스트 길이 체크 - 새 알고리즘에서는 청크 크기가 최대 약 512바이트로 제한됨
+                chunk_bytes = len(chunk.encode('utf-8'))
+                if chunk_bytes > 512:  # 스키마 제약에 맞게 정확히 512바이트로 제한
+                    print(f"[ERROR] Text chunk too large: {chunk_bytes} bytes exceeds maximum 512 bytes")
+                    raise ValueError(f"Text chunk too large: {chunk_bytes} bytes exceeds maximum 512 bytes")
                 
                 # passage의 고유 식별자 생성
                 passage_uid = f"{hashed_doc_id}_{passage_id}"
