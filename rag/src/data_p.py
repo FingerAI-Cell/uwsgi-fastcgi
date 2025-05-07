@@ -71,26 +71,38 @@ class DataProcessor:
         total_bytes = len(text_bytes)
         print(f"[DEBUG] Input text: {len(text)} chars, {total_bytes} bytes")
         
-        if total_bytes <= max_bytes:
-            print("[DEBUG] Text bytes within max_bytes, returning single chunk")
+        # 텍스트가 너무 짧은 경우 바로 반환 (최소 2글자는 되어야 의미있는 청킹 가능)
+        if len(text) <= 2 or total_bytes <= max_bytes:
+            print("[DEBUG] Text too short or within max_bytes, returning single chunk")
             return [(text, 1)]
         
         chunks = []
         chunk_no = 1
         pos = 0  # 현재 위치 (바이트 단위)
         
-        # 첫 번째 블록 자르기
-        first_block_end = self._find_optimal_boundary(text, pos, half_max_bytes, search_margin)
-        print(f"[DEBUG] 첫 번째 블록 경계 계산: {pos} -> {first_block_end} ({first_block_end-pos} 글자)")
-        
         # 텍스트 길이 전체를 처리할 때까지 반복
-        while pos < len(text):
-            print(f"[DEBUG] 청킹 진행 중: 현재 위치={pos}/{len(text)} ({(pos/len(text)*100):.1f}%)")
+        max_iterations = len(text) * 2  # 안전장치: 최대 반복 횟수 제한 (유지)
+        iteration_count = 0
+        
+        while pos < len(text) and iteration_count < max_iterations:
+            iteration_count += 1
+            print(f"[DEBUG] 청킹 진행 중: 현재 위치={pos}/{len(text)} ({(pos/len(text)*100):.1f}%) 반복={iteration_count}")
             
             # 첫 번째 블록 경계 계산
             block1_end = self._find_optimal_boundary(text, pos, half_max_bytes, search_margin)
             block1_bytes = len(text[pos:block1_end].encode('utf-8'))
             print(f"[DEBUG] 첫 번째 블록: pos {pos}-{block1_end} ({block1_end-pos} 글자, {block1_bytes} 바이트)")
+            
+            # 첫 번째 블록이 텍스트 끝에 도달했는지 확인
+            if block1_end >= len(text):
+                print(f"[DEBUG] 첫 번째 블록이 텍스트 끝에 도달: {block1_end}/{len(text)}")
+                # 마지막 청크 생성
+                chunk = text[pos:].strip()
+                if chunk:
+                    chunk_bytes = len(chunk.encode('utf-8'))
+                    print(f"[DEBUG] Creating final chunk {chunk_no}: pos {pos}-{len(text)} (글자수={len(chunk)}, bytes={chunk_bytes})")
+                    chunks.append((chunk, chunk_no))
+                break
             
             # 두 번째 블록 경계 계산
             block2_end = self._find_optimal_boundary(text, block1_end, half_max_bytes, search_margin)
@@ -115,10 +127,18 @@ class DataProcessor:
             pos = block1_end
             print(f"[DEBUG] 다음 청크 시작점 설정: pos={pos}")
         
+        if iteration_count >= max_iterations:
+            print(f"[WARNING] 최대 반복 횟수({max_iterations})에 도달했습니다. 청킹을 중단합니다.")
+        
         print(f"[INFO] 청킹 완료: 총 {len(chunks)}개 청크 생성")
         for i, (chunk, no) in enumerate(chunks):
             bytes_len = len(chunk.encode('utf-8'))
             print(f"[DEBUG] Chunk {i+1}: id={no}, 글자수={len(chunk)}, bytes={bytes_len}")
+        
+        # 청크가 없는 경우 기본 청크 반환
+        if not chunks:
+            print(f"[WARNING] 청크가 생성되지 않았습니다. 전체 텍스트를 단일 청크로 반환합니다.")
+            return [(text, 1)]
         
         return chunks
 
@@ -137,6 +157,12 @@ class DataProcessor:
         """
         if start_pos >= len(text):
             print(f"[DEBUG] 시작 위치({start_pos})가 텍스트 길이({len(text)})보다 크거나 같음")
+            return len(text)
+        
+        # 텍스트 끝 확인: 남은 텍스트가 target_bytes보다 작으면 텍스트 끝으로 반환
+        remaining_bytes = len(text[start_pos:].encode('utf-8'))
+        if remaining_bytes <= target_bytes:
+            print(f"[DEBUG] 텍스트 끝에 도달: 남은 바이트={remaining_bytes}, 전체 텍스트 길이={len(text)}")
             return len(text)
         
         # 기본 경계값 계산 (정확히 target_bytes)
@@ -184,6 +210,7 @@ class DataProcessor:
         # 공백을 찾지 못하면 원래 계산된 경계 사용
         result = min(len(text), optimal_pos)
         print(f"[DEBUG] 최종 경계 위치: {result} (텍스트 길이={len(text)})")
+        
         return result
 
     def check_l2_threshold(self, txt, threshold, value):
