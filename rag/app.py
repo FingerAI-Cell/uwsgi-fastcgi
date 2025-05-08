@@ -757,6 +757,182 @@ def get_document():
             "message": f"잘못된 요청입니다: {str(e)}"
         }), 400
 
+@app.route('/rag/domains', methods=['GET'])
+def get_domains():
+    """
+    시스템에 등록된 모든 도메인(컬렉션) 목록을 반환합니다.
+    
+    Returns:
+        JSON: 도메인 목록과 각 도메인의 엔티티 수를 포함한 응답
+    """
+    try:
+        # 모든 컬렉션(도메인) 목록 가져오기
+        domains = milvus_db.get_list_collection()
+        
+        # 각 도메인별 정보 수집 (선택적)
+        domain_info = []
+        for domain in domains:
+            try:
+                # 컬렉션 정보 조회
+                milvus_db.get_collection_info(domain)
+                
+                # 정보 수집 및 포맷팅
+                info = {
+                    "name": domain,
+                    "entity_count": milvus_db.num_entities if hasattr(milvus_db, 'num_entities') else 0
+                }
+                domain_info.append(info)
+            except Exception as e:
+                # 컬렉션 접근 오류 발생 시 기본 정보만 추가
+                domain_info.append({
+                    "name": domain,
+                    "entity_count": 0,
+                    "error": str(e)
+                })
+        
+        return jsonify({
+            "result_code": "S000000",
+            "message": "도메인 목록을 성공적으로 조회했습니다.",
+            "domains": domain_info
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"도메인 목록 조회 중 오류 발생: {str(e)}")
+        return jsonify({
+            "result_code": "F000010",
+            "message": f"도메인 목록 조회에 실패했습니다: {str(e)}",
+            "domains": []
+        }), 500
+
+@app.route('/rag/domains/delete', methods=['POST'])
+def delete_domains():
+    """
+    지정된 도메인(컬렉션)을 완전히 삭제합니다.
+    단일 도메인 또는 도메인 목록을 받아 해당 도메인의 모든 엔티티와 컬렉션 자체를 삭제합니다.
+    
+    Request Body:
+    {
+        "domains": ["도메인1", "도메인2"] 또는 "도메인명"
+    }
+    
+    Returns:
+        JSON: 삭제 결과 정보
+    """
+    try:
+        request_data = request.get_json()
+        if not request_data:
+            return jsonify({
+                "result_code": "F000001",
+                "message": "요청 본문이 비어있습니다."
+            }), 400
+
+        domains_to_delete = request_data.get('domains')
+        if domains_to_delete is None:
+            return jsonify({
+                "result_code": "F000002",
+                "message": "domains 필드는 필수입니다."
+            }), 400
+            
+        # 문자열로 단일 도메인이 입력된 경우 리스트로 변환
+        if isinstance(domains_to_delete, str):
+            domains_to_delete = [domains_to_delete]
+        elif not isinstance(domains_to_delete, list):
+            return jsonify({
+                "result_code": "F000003",
+                "message": "domains는 문자열 또는 문자열 배열이어야 합니다."
+            }), 400
+            
+        # 빈 리스트 확인
+        if len(domains_to_delete) == 0:
+            return jsonify({
+                "result_code": "F000004",
+                "message": "삭제할 도메인이 지정되지 않았습니다."
+            }), 400
+
+        # 도메인 유효성 검증
+        available_collections = milvus_db.get_list_collection()
+        invalid_domains = [d for d in domains_to_delete if d not in available_collections]
+        non_existent_domains = invalid_domains
+        
+        # 존재하지 않는 도메인 필터링
+        domains_to_delete = [d for d in domains_to_delete if d in available_collections]
+        
+        # 삭제 결과 저장
+        results = []
+        
+        # 각 도메인별 삭제 수행
+        for domain in domains_to_delete:
+            try:
+                logger.info(f"도메인 '{domain}' 삭제 시작")
+                
+                # 컬렉션 정보 조회 (삭제 전 로깅용)
+                try:
+                    milvus_db.get_collection_info(domain)
+                    entity_count = milvus_db.num_entities if hasattr(milvus_db, 'num_entities') else 0
+                except:
+                    entity_count = "알 수 없음"
+                
+                # 컬렉션 삭제
+                milvus_db.delete_collection(domain)
+                
+                # 결과 추가
+                results.append({
+                    "name": domain,
+                    "status": "success",
+                    "entity_count": entity_count,
+                    "message": "도메인이 성공적으로 삭제되었습니다."
+                })
+                logger.info(f"도메인 '{domain}' 삭제 완료 (엔티티 수: {entity_count})")
+                
+            except Exception as e:
+                logger.error(f"도메인 '{domain}' 삭제 중 오류 발생: {str(e)}")
+                results.append({
+                    "name": domain,
+                    "status": "error",
+                    "message": f"삭제 중 오류 발생: {str(e)}"
+                })
+        
+        # 존재하지 않는 도메인 결과에 추가
+        for domain in non_existent_domains:
+            results.append({
+                "name": domain,
+                "status": "not_found",
+                "message": "존재하지 않는 도메인입니다."
+            })
+            
+        # 전체 성공/실패 상태 결정
+        success_count = sum(1 for r in results if r["status"] == "success")
+        error_count = sum(1 for r in results if r["status"] == "error")
+        not_found_count = sum(1 for r in results if r["status"] == "not_found")
+        
+        if len(domains_to_delete) == 0:
+            overall_status = "not_found"  # 모든 도메인이 존재하지 않음
+            status_code = 404
+        elif error_count == 0:
+            overall_status = "success"  # 모든 삭제 성공
+            status_code = 200
+        elif success_count == 0:
+            overall_status = "error"  # 모든 삭제 실패
+            status_code = 500
+        else:
+            overall_status = "partial"  # 일부 성공, 일부 실패
+            status_code = 207  # Multi-Status
+            
+        return jsonify({
+            "result_code": "S000000" if overall_status == "success" else "F000005",
+            "status": overall_status,
+            "message": f"총 {len(results)}개 도메인 중 {success_count}개 삭제 성공, {error_count}개 실패, {not_found_count}개 없음",
+            "results": results
+        }), status_code
+        
+    except Exception as e:
+        logger.error(f"도메인 삭제 중 오류 발생: {str(e)}")
+        return jsonify({
+            "result_code": "F000010",
+            "message": f"도메인 삭제에 실패했습니다: {str(e)}",
+            "status": "error"
+        }), 500
+
 @app.route("/rag/", methods=["GET"])
 def index():
     print(f"hello results")

@@ -1,12 +1,12 @@
-# RAG · Reranker · Prompt API 명세서 (최종 검수판)
+# RAG · Reranker · Prompt API 명세서 (최종 검수판)
 
 > **모든 엔드포인트에 대해**
 > * **기본 정보** – Method · URL · 설명
-> * **요청 파라미터** – 필수 여부·타입·설명 (Query / Body 구분)
+> * **요청 파라미터** – 필수 여부·타입·설명 (Query / Body 구분)
 > * **요청 예시** – 완전한 `curl` 명령
 > * **응답 파라미터** – 필드·타입·설명
-> * **성공 응답 예시**
-> * **실패 응답 예시** (가능한 경우)
+> * **성공 응답 예시**
+> * **실패 응답 예시** (가능한 경우)
 
 ---
 
@@ -19,17 +19,19 @@
 | 4 | [/rag/search](#4-ragsearch) | 문서 검색 |
 | 5 | [/rag/delete](#5-ragdelete) | 문서 삭제 |
 | 6 | [/rag/document](#6-ragdocument) | 문서·패시지 조회 |
-| 7 | [/rag/data/show](#7-ragdatashow) | 컬렉션 정보 조회 |
-| 8 | [/reranker/health](#8-rerankerhealth) | Reranker 상태 |
-| 9 | [/reranker/enhanced-search](#9-rerankerenhanced-search) | 통합 검색(재랭킹) |
-| 10 | [/reranker/rerank](#10-rerankerrerank) | 단건 재랭킹 |
-| 11 | [/reranker/batch_rerank](#11-rerankerbatch_rerank) | 배치 재랭킹 |
-| 12 | [/prompt/health](#12-prompthealth) | Prompt 상태 |
-| 13 | [/prompt/summarize](#13-promptsummarize) | 문서 요약 |
-| 14 | [/prompt/chat](#14-promptchat) | 챗봇 응답 |
-| 15 | [/prompt/models](#15-promptmodels) | 모델 목록 |
-| 16 | [/vision/health](#16-visionhealth) | Vision 상태 |
-| 17 | [/vision/analyze](#17-visionanalyze) | 이미지 분석 |
+| 7 | [/rag/domains](#7-ragdomains) | 도메인 목록 조회 |
+| 8 | [/rag/domains/delete](#8-ragdomainsdelete) | 도메인 삭제 |
+| 9 | [/rag/data/show](#9-ragdatashow) | 컬렉션 정보 조회 |
+| 10 | [/reranker/health](#10-rerankerhealth) | Reranker 상태 |
+| 11 | [/reranker/enhanced-search](#11-rerankerenhanced-search) | 통합 검색(재랭킹) |
+| 12 | [/reranker/rerank](#12-rerankerrerank) | 단건 재랭킹 |
+| 13 | [/reranker/batch_rerank](#13-rerankerbatch_rerank) | 배치 재랭킹 |
+| 14 | [/prompt/health](#14-prompthealth) | Prompt 상태 |
+| 15 | [/prompt/summarize](#15-promptsummarize) | 문서 요약 |
+| 16 | [/prompt/chat](#16-promptchat) | 챗봇 응답 |
+| 17 | [/prompt/models](#17-promptmodels) | 모델 목록 |
+| 18 | [/vision/health](#18-visionhealth) | Vision 상태 |
+| 19 | [/vision/analyze](#19-visionanalyze) | 이미지 분석 |
 
 > **모든 URL** 는 `http://localhost` 기준이며, 실제 배포 시 호스트/포트를 맞춰 수정하세요.
 
@@ -545,7 +547,160 @@ curl -X POST http://localhost/rag/document \
 
 ---
 
-## 7. /rag/data/show
+## 7. /rag/domains
+### 기본 정보
+| 항목 | 내용 |
+|------|------|
+| Method | **GET** |
+| URL | `/rag/domains` |
+| 설명 | 시스템에 등록된 모든 도메인(컬렉션) 목록 조회 |
+
+### 요청 파라미터
+없음
+
+### 요청 예시
+```bash
+curl -X GET http://localhost/rag/domains
+```
+
+### 응답 파라미터
+| 필드 | Type | 설명 |
+|------|------|------|
+| result_code | String | `S000000` 성공 등 |
+| message | String | 결과 메시지 |
+| domains | Array | 도메인(컬렉션) 정보 배열 |
+
+각 도메인 정보 객체의 구조:
+| 필드 | Type | 설명 |
+|------|------|------|
+| name | String | 도메인(컬렉션) 이름 |
+| entity_count | Integer | 도메인 내 엔티티 수 |
+| error | String | (선택) 에러 발생 시 에러 메시지 |
+
+### 성공 응답 예시
+```json
+{
+  "result_code": "S000000",
+  "message": "도메인 목록을 성공적으로 조회했습니다.",
+  "domains": [
+    {
+      "name": "news",
+      "entity_count": 1250
+    },
+    {
+      "name": "test",
+      "entity_count": 42
+    }
+  ]
+}
+```
+
+### 실패 응답 예시
+```json
+{
+  "result_code": "F000010",
+  "message": "도메인 목록 조회에 실패했습니다: 연결 오류",
+  "domains": []
+}
+```
+
+---
+
+## 8. /rag/domains/delete
+### 기본 정보
+| 항목 | 내용 |
+|------|------|
+| Method | **POST** |
+| URL | `/rag/domains/delete` |
+| Content‑Type | `application/json` |
+| 설명 | 지정된 도메인(컬렉션)을 모든 엔티티와 함께 완전히 삭제 |
+
+### 요청 파라미터 (Body)
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| domains | Y | String/Array | 삭제할 도메인 이름 (단일 문자열 또는 문자열 배열) |
+
+### 요청 예시
+```bash
+curl -X POST http://localhost/rag/domains/delete \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domains": ["test_domain", "old_collection"]
+  }'
+```
+
+### 응답 파라미터
+| 필드 | Type | 설명 |
+|------|------|------|
+| result_code | String | `S000000` 성공 등 |
+| status | String | 전체 처리 상태 ("success", "error", "partial", "not_found") |
+| message | String | 처리 결과 메시지 |
+| results | Array | 각 도메인별 처리 결과 |
+
+각 도메인 처리 결과의 구조:
+| 필드 | Type | 설명 |
+|------|------|------|
+| name | String | 도메인 이름 |
+| status | String | 상태 ("success", "error", "not_found") |
+| entity_count | Integer/String | 삭제된 엔티티 수 (또는 "알 수 없음") |
+| message | String | 처리 결과 메시지 |
+
+### 성공 응답 예시
+```json
+{
+  "result_code": "S000000",
+  "status": "success",
+  "message": "총 2개 도메인 중 2개 삭제 성공, 0개 실패, 0개 없음",
+  "results": [
+    {
+      "name": "test_domain",
+      "status": "success",
+      "entity_count": 120,
+      "message": "도메인이 성공적으로 삭제되었습니다."
+    },
+    {
+      "name": "old_collection",
+      "status": "success",
+      "entity_count": 35,
+      "message": "도메인이 성공적으로 삭제되었습니다."
+    }
+  ]
+}
+```
+
+### 실패 응답 예시 (존재하지 않는 도메인)
+```json
+{
+  "result_code": "F000005",
+  "status": "not_found",
+  "message": "총 2개 도메인 중 0개 삭제 성공, 0개 실패, 2개 없음",
+  "results": [
+    {
+      "name": "unknown_domain",
+      "status": "not_found",
+      "message": "존재하지 않는 도메인입니다."
+    },
+    {
+      "name": "missing_collection",
+      "status": "not_found", 
+      "message": "존재하지 않는 도메인입니다."
+    }
+  ]
+}
+```
+
+### 실패 응답 예시 (시스템 오류)
+```json
+{
+  "result_code": "F000010",
+  "message": "도메인 삭제에 실패했습니다: 연결 오류",
+  "status": "error"
+}
+```
+
+---
+
+## 9. /rag/data/show
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -588,7 +743,7 @@ curl -G http://localhost/rag/data/show --data-urlencode "collection_name=news"
 
 ---
 
-## 8. /reranker/health
+## 10. /reranker/health
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -617,7 +772,7 @@ curl -X GET http://localhost/reranker/health
 
 ---
 
-## 9. /reranker/enhanced-search
+## 11. /reranker/enhanced-search
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -688,7 +843,7 @@ curl -G http://localhost/reranker/enhanced-search \
 
 ---
 
-## 10. /reranker/rerank
+## 12. /reranker/rerank
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -755,7 +910,7 @@ SearchResultModel + `reranked: true`
 
 ---
 
-## 11. /reranker/batch_rerank
+## 13. /reranker/batch_rerank
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -803,7 +958,7 @@ curl -X POST "http://localhost/reranker/batch_rerank?top_k=5" \
 
 ---
 
-## 12. /prompt/health
+## 14. /prompt/health
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -830,7 +985,7 @@ curl -X GET http://localhost/prompt/health
 
 ---
 
-## 13. /prompt/summarize
+## 15. /prompt/summarize
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -891,7 +1046,7 @@ curl -X POST http://localhost/prompt/summarize \
 
 ---
 
-## 14. /prompt/chat
+## 16. /prompt/chat
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -928,7 +1083,7 @@ curl -X POST http://localhost/prompt/chat \
 
 ---
 
-## 15. /prompt/models
+## 17. /prompt/models
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -960,7 +1115,7 @@ curl -X GET http://localhost/prompt/models
 
 ---
 
-## 16. /vision/health
+## 18. /vision/health
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -994,7 +1149,7 @@ curl -X GET http://localhost/vision/health
 
 ---
 
-## 17. /vision/analyze
+## 19. /vision/analyze
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
