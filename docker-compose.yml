@@ -271,6 +271,66 @@ services:
       - app-only
       - gpu-only
 
+  # 통계 수집 서비스
+  stats-service:
+    build: ./stats
+    container_name: milvus-stats-service
+    volumes:
+      - ./stats:/app
+      - ./volumes/logs/stats:/var/log/stats
+    environment:
+      - MYSQL_HOST=stats-db
+      - MYSQL_PORT=3306
+      - MYSQL_USER=stats_user
+      - MYSQL_PASSWORD=stats_password
+      - MYSQL_DATABASE=api_stats
+    depends_on:
+      - stats-db
+    networks:
+      - rag_network
+    profiles:
+      - stats
+      - all
+      - rag-only
+      - reranker-only
+      - prompt-only
+      - vision-only
+      - app-only
+      - gpu-only
+      - cpu-only
+      - ollama-only
+      - db-only
+
+  # 통계 데이터베이스 (MySQL)
+  stats-db:
+    image: mysql:8.0
+    container_name: milvus-stats-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=root_password
+      - MYSQL_DATABASE=api_stats
+      - MYSQL_USER=stats_user
+      - MYSQL_PASSWORD=stats_password
+    volumes:
+      - ./volumes/mysql:/var/lib/mysql
+      - ./stats/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3306:3306"
+    networks:
+      - rag_network
+    command: --default-authentication-plugin=mysql_native_password
+    profiles:
+      - stats
+      - all
+      - rag-only
+      - reranker-only
+      - prompt-only
+      - vision-only
+      - app-only
+      - gpu-only
+      - cpu-only
+      - ollama-only
+      - db-only
+
 networks:
   rag_network:
     name: rag_network

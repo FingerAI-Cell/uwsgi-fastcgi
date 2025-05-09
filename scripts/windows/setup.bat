@@ -143,12 +143,16 @@ echo nginx 설정 파일 설정 중 (%mode%)...
 mkdir nginx\locations-enabled 2>nul
 del /q nginx\locations-enabled\*.conf 2>nul
 
+:: 통계 수집 설정 파일 복사 (모든 모드에서 사용)
+copy /y nginx\templates\stats.conf.template nginx\locations-enabled\stats.conf >nul
+
 :: 모드에 따른 설정 파일 복사
 if "%mode%"=="all" (
     :: 모두 복사
     copy /y nginx\templates\rag.conf.template nginx\locations-enabled\rag.conf >nul
     copy /y nginx\templates\reranker.conf.template nginx\locations-enabled\reranker.conf >nul
     copy /y nginx\templates\prompt.conf.template nginx\locations-enabled\prompt.conf >nul
+    copy /y nginx\templates\vision.conf.template nginx\locations-enabled\vision.conf >nul
 ) else if "%mode%"=="rag" (
     :: rag만 복사
     copy /y nginx\templates\rag.conf.template nginx\locations-enabled\rag.conf >nul
@@ -162,6 +166,9 @@ if "%mode%"=="all" (
     :: rag와 reranker만 복사
     copy /y nginx\templates\rag.conf.template nginx\locations-enabled\rag.conf >nul
     copy /y nginx\templates\reranker.conf.template nginx\locations-enabled\reranker.conf >nul
+) else if "%mode%"=="vision" (
+    :: vision만 복사
+    copy /y nginx\templates\vision.conf.template nginx\locations-enabled\vision.conf >nul
 )
 
 :: nginx 재시작
@@ -201,28 +208,32 @@ goto :eof
 
 :: 서비스 시작
 if "%1"=="all" (
-    echo 모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(CPU) + DB)
+    echo 모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(CPU) + DB + Stats)
     call :setup_nginx all
     call :setup_reranker cpu
-    docker compose --profile all --profile cpu-only up -d
+    docker compose --profile all --profile cpu-only --profile stats up -d
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
     docker restart milvus-standalone milvus-rag
 ) else if "%1"=="all-gpu" (
-    echo 모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(GPU) + DB)
+    echo 모든 서비스 시작 중... (RAG + Reranker + Prompt + Ollama(GPU) + DB + Stats)
     call :setup_nginx all
     call :setup_reranker gpu
-    docker compose --profile all --profile gpu-only up -d
+    docker compose --profile all --profile gpu-only --profile stats up -d
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
     docker restart milvus-standalone milvus-rag
 ) else if "%1"=="rag" (
-    echo RAG 서비스 시작 중... (RAG + DB)
+    echo RAG 서비스 시작 중... (RAG + DB + Stats)
     call :setup_nginx rag
-    docker compose --profile rag-only up -d
+    docker compose --profile rag-only --profile stats up -d
     docker exec -it milvus-rag pip uninstall numpy -y
     docker exec -it milvus-rag pip install numpy==1.24.4
     docker restart milvus-standalone milvus-rag
+) else if "%1"=="stats" (
+    echo 통계 수집 서비스만 시작 중...
+    call :setup_nginx all
+    docker compose --profile stats up -d
 ) else if "%1"=="reranker" (
     echo Reranker 서비스만 시작
     call :setup_reranker cpu
@@ -353,6 +364,7 @@ if "%1"=="all" (
     echo - RAG 서비스: http://localhost/rag/
     echo - Reranker 서비스: http://localhost/reranker/
     echo - 프롬프트 서비스: http://localhost/prompt/
+    echo - 통계 대시보드: http://localhost/stats/
     echo - 요약 API: http://localhost/prompt/summarize
     echo - Ollama API (CPU 모드): http://localhost:11434
     echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
@@ -360,10 +372,14 @@ if "%1"=="all" (
     echo - RAG 서비스: http://localhost/rag/
     echo - Reranker 서비스: http://localhost/reranker/
     echo - 프롬프트 서비스: http://localhost/prompt/
+    echo - 통계 대시보드: http://localhost/stats/
     echo - 요약 API: http://localhost/prompt/summarize
     echo - Ollama API (GPU 모드): http://localhost:11434
     echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)
     echo - mistral, llama3 등 더 큰 모델을 사용할 수 있습니다.
+) else if "%1"=="stats" (
+    echo - 통계 대시보드: http://localhost/stats/
+    echo - 통계 API: http://localhost/stats/api/stats
 ) else if "%1"=="rag" (
     echo - RAG 서비스: http://localhost/rag/
     echo - Milvus UI: http://localhost:9001 (사용자: minioadmin, 비밀번호: minioadmin)

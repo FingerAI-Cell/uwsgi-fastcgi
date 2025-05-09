@@ -147,11 +147,18 @@ mkdir -p ./volumes/logs/{nginx,rag,reranker,prompt,vision}
 # nginx 설정 파일 관리
 setup_nginx() {
     local mode=$1
+    local stats_enabled=${2:-false}
     echo "nginx 설정 파일 설정 중 ($mode)..."
     
     # locations-enabled 디렉토리 확인
     mkdir -p nginx/locations-enabled
     rm -f nginx/locations-enabled/*.conf
+    
+    # 통계 수집 활성화 옵션
+    if [ "$stats_enabled" = "true" ]; then
+        echo "통계 수집 기능을 활성화합니다..."
+        cp nginx/templates/stats.conf.template nginx/locations-enabled/stats.conf
+    fi
     
     # 모드에 따른 설정 파일 복사
     case "$mode" in
@@ -417,6 +424,7 @@ start_containers() {
     local mode=$1
     local containers=$2
     local use_profile=$3
+    local stats_enabled=${4:-false}  # 통계 수집 활성화 여부
     
     echo "${service_descriptions[$mode]}"
     
@@ -425,9 +433,9 @@ start_containers() {
         download_rag_model
     fi
     
-    # nginx 설정
+    # nginx 설정 (통계 수집 옵션 전달)
     if [[ -n "${nginx_modes[$mode]}" ]]; then
-        setup_nginx "${nginx_modes[$mode]}"
+        setup_nginx "${nginx_modes[$mode]}" "$stats_enabled"
     fi
     
     # reranker 설정 (GPU 모드이면)
@@ -437,37 +445,97 @@ start_containers() {
         setup_reranker "cpu"
     fi
     
+    # 통계 서비스 추가 (활성화 된 경우)
+    local stats_containers=""
+    if [ "$stats_enabled" = "true" ]; then
+        stats_containers="stats-service stats-db"
+    fi
+    
     # 컨테이너 시작
     if [ "$use_profile" = true ]; then
         # 프로필 사용
-        if [[ "$mode" == *"-gpu" ]]; then
-            docker compose --profile gpu-only up -d
+        if [ "$mode" = "stats" ]; then
+            docker compose --profile stats up -d
+        elif [[ "$mode" == *"-gpu" ]]; then
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile gpu-only --profile stats up -d
+            else
+                docker compose --profile gpu-only up -d
+            fi
         elif [ "$mode" = "db" ]; then
-            docker compose --profile db-only up -d
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile db-only --profile stats up -d
+            else
+                docker compose --profile db-only up -d
+            fi
         elif [ "$mode" = "rag" ]; then
-            docker compose --profile rag-only up -d
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile rag-only --profile stats up -d
+            else
+                docker compose --profile rag-only up -d
+            fi
         elif [ "$mode" = "reranker" ]; then
-            docker compose --profile reranker-only up -d
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile reranker-only --profile stats up -d
+            else
+                docker compose --profile reranker-only up -d
+            fi
         elif [ "$mode" = "prompt" ]; then
-            docker compose --profile prompt-only up -d
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile prompt-only --profile stats up -d
+            else
+                docker compose --profile prompt-only up -d
+            fi
         elif [ "$mode" = "vision" ]; then
-            docker compose --profile vision-only up -d
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile vision-only --profile stats up -d
+            else
+                docker compose --profile vision-only up -d
+            fi
         elif [ "$mode" = "vision-ollama" ]; then
-            docker compose --profile vision-only --profile ollama-only --profile cpu-only up -d
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile vision-only --profile ollama-only --profile cpu-only --profile stats up -d
+            else
+                docker compose --profile vision-only --profile ollama-only --profile cpu-only up -d
+            fi
         elif [ "$mode" = "vision-ollama-gpu" ]; then
-            docker compose --profile vision-only --profile gpu-only up -d
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile vision-only --profile gpu-only --profile stats up -d
+            else
+                docker compose --profile vision-only --profile gpu-only up -d
+            fi
         elif [ "$mode" = "ollama" ]; then
-            docker compose --profile ollama-only --profile cpu-only up -d
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile ollama-only --profile cpu-only --profile stats up -d
+            else
+                docker compose --profile ollama-only --profile cpu-only up -d
+            fi
         elif [ "$mode" = "prompt_ollama" ]; then
-            docker compose --profile prompt-only --profile ollama-only --profile cpu-only up -d
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile prompt-only --profile ollama-only --profile cpu-only --profile stats up -d
+            else
+                docker compose --profile prompt-only --profile ollama-only --profile cpu-only up -d
+            fi
         elif [ "$mode" = "prompt_ollama-gpu" ]; then
-            docker compose --profile prompt-only --profile gpu-only up -d
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile prompt-only --profile gpu-only --profile stats up -d
+            else
+                docker compose --profile prompt-only --profile gpu-only up -d
+            fi
         else
-            docker compose --profile all --profile cpu-only up -d
+            if [ "$stats_enabled" = "true" ]; then
+                docker compose --profile all --profile cpu-only --profile stats up -d
+            else
+                docker compose --profile all --profile cpu-only up -d
+            fi
         fi
     else
         # 명시적 컨테이너 지정
-        docker compose up -d $containers
+        if [ "$stats_enabled" = "true" ]; then
+            docker compose up -d $containers $stats_containers
+        else
+            docker compose up -d $containers
+        fi
     fi
     
     # DB 컨테이너가 포함된 경우 재시작 처리
@@ -508,17 +576,32 @@ else
     OLLAMA_CONTAINER="milvus-ollama-cpu"
 fi
 
+# 통계 수집 항상 활성화
+STATS_ENABLED=true
+echo "[options] 통계 수집 기능이 활성화됩니다."
+
+# 서비스 모드 파싱
+SERVICE_MODE=""
+
+# 인수 파싱
+for arg in "$@"; do
+    if [[ -n "${service_descriptions[$arg]}" ]]; then
+        SERVICE_MODE="$arg"
+        break
+    fi
+done
+
 # 서비스 시작
-if [ -z "$1" ] || [ ! -n "${service_descriptions[$1]}" ]; then
+if [ -z "$SERVICE_MODE" ]; then
     print_usage
     exit 1
 fi
 
 # 컨테이너 시작
-if [ -n "${service_containers[$1]}" ]; then
+if [ -n "${service_containers[$SERVICE_MODE]}" ]; then
     # 명시적 컨테이너 목록이 있는 경우
-    start_containers "$1" "${service_containers[$1]}" false
+    start_containers "$SERVICE_MODE" "${service_containers[$SERVICE_MODE]}" false "$STATS_ENABLED"
 else
     # 프로필 사용
-    start_containers "$1" "" true
+    start_containers "$SERVICE_MODE" "" true "$STATS_ENABLED"
 fi

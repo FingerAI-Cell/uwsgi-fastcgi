@@ -17,4 +17,19 @@ location /reranker/ {
     fastcgi_param HTTP_X_REAL_IP $remote_addr;
     fastcgi_param HTTP_X_FORWARDED_FOR $proxy_add_x_forwarded_for;
     fastcgi_param HTTP_X_FORWARDED_PROTO $scheme;
+    
+    # 특정 API 경로에 대한 통계 수집
+    location ~ ^/reranker/(enhanced-search|rerank|batch_rerank)($|/) {
+        include fastcgi_params;
+        fastcgi_pass unix:/tmp/reranker.sock;
+        fastcgi_read_timeout 300;
+        fastcgi_send_timeout 300;
+        fastcgi_param SCRIPT_NAME /reranker;
+        fastcgi_param PATH_INFO $uri;
+        fastcgi_param QUERY_STRING $args;
+        
+        # 통계용 엔드포인트에 비동기 요청 보내기
+        mirror /stats-endpoint;
+        mirror_request_body on;
+    }
 } 
