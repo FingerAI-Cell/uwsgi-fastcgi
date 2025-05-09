@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS daily_stats (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 일별 통계 집계를 위한 이벤트 스케줄러
+DELIMITER //
 CREATE EVENT IF NOT EXISTS aggregate_daily_stats
     ON SCHEDULE EVERY 1 DAY
     STARTS CURRENT_DATE + INTERVAL 1 DAY
@@ -69,7 +70,7 @@ CREATE EVENT IF NOT EXISTS aggregate_daily_stats
             total_request_size = VALUES(total_request_size),
             total_response_size = VALUES(total_response_size),
             updated_at = CURRENT_TIMESTAMP;
-    END;
+    END //
 
 -- 오래된 통계 데이터 정리를 위한 이벤트 스케줄러
 CREATE EVENT IF NOT EXISTS cleanup_old_api_calls
@@ -80,4 +81,5 @@ CREATE EVENT IF NOT EXISTS cleanup_old_api_calls
         -- 30일 이상 지난 상세 로그 삭제
         DELETE FROM api_calls 
         WHERE created_at < DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY);
-    END; 
+    END //
+DELIMITER ; 
