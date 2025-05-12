@@ -12,6 +12,10 @@ numpy>=1.25.2
 huggingface_hub==0.22.2
 #flashrank==0.2.10
 
+# 성능 최적화 패키지
+flask-compress==1.13       # 응답 압축
+ujson==5.8.0              # 빠른 JSON 파싱
+
 # PyTorch (GPU version)
 --extra-index-url https://download.pytorch.org/whl/cu118
 torch==2.1.2
@@ -34,4 +38,4 @@ pytest>=7.3.1
 scikit-learn==1.2.2
 sentence-transformers==2.7.0
 python-dotenv==0.19.0
-uwsgi
+uwsgi==2.0.20

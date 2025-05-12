@@ -3,16 +3,40 @@ Service layer for reranking functionality
 """
 
 import os
-import json
 import logging
 import torch
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from flashrank import Ranker, RerankRequest
 
+# 더 빠른 JSON 처리를 위해 ujson 사용
+try:
+    import ujson as json
+    print("Using ujson for faster JSON processing")
+except ImportError:
+    import json
+    print("ujson not available, using default json")
+
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# 메모리 캐시 - 자주 사용되는 재랭킹 요청 결과 캐싱
+_RERANK_CACHE = {}
+_CACHE_SIZE_LIMIT = 1000  # 최대 캐시 항목 수
+
+def get_cache_key(query: str, passages_hash: str) -> str:
+    """캐시 키 생성"""
+    return f"{query}:{passages_hash}"
+
+def hash_passages(passages: List[Dict]) -> str:
+    """패시지 리스트의 해시 생성"""
+    try:
+        passage_texts = [p.get('text', '')[:100] for p in passages]  # 각 패시지의 앞부분만 사용
+        return str(hash(tuple(passage_texts)))
+    except Exception as e:
+        logger.warning(f"Failed to hash passages: {e}")
+        return str(hash(str(passages)))  # 폴백 해싱
 
 class PassageModel(BaseModel):
     """Single passage model"""
@@ -27,6 +51,9 @@ class PassageModel(BaseModel):
         json_encoders = {
             str: lambda v: v.encode('utf-8').decode('utf-8')
         }
+        
+    # 메모리 효율성을 위한 __slots__ 추가
+    __slots__ = ('passage_id', 'doc_id', 'text', 'score', 'position', 'metadata')
 
 
 class SearchResultModel(BaseModel):
@@ -40,6 +67,9 @@ class SearchResultModel(BaseModel):
         json_encoders = {
             str: lambda v: v.encode('utf-8').decode('utf-8')
         }
+        
+    # 메모리 효율성을 위한 __slots__ 추가
+    __slots__ = ('query', 'results', 'total', 'reranked')
 
 
 class RerankerResponseModel(BaseModel):
@@ -53,8 +83,14 @@ class RerankerResponseModel(BaseModel):
         json_encoders = {
             str: lambda v: v.encode('utf-8').decode('utf-8')
         }
+        
+    # 메모리 효율성을 위한 __slots__ 추가
+    __slots__ = ('query', 'results', 'total', 'reranked')
 
     def json(self, **kwargs):
+        # ujson 사용 가능하면 ujson으로 직렬화
+        if 'ujson' in globals():
+            return json.dumps(self.dict(), ensure_ascii=False, **kwargs)
         return json.dumps(self.dict(), ensure_ascii=False, **kwargs)
 
 
@@ -220,6 +256,10 @@ class RerankerService:
             Reranked search results
         """
         try:
+            # 성능 측정 시작
+            import time
+            start_time = time.time()
+            
             # 모델이 초기화되지 않은 경우 원본 결과를 그대로 반환
             if self.ranker is None:
                 logger.warning("Reranker not initialized, returning original results")
@@ -229,10 +269,6 @@ class RerankerService:
             if not search_result.get("results"):
                 logger.warning("No results to rerank")
                 return search_result
-            
-            # 성능 측정 시작
-            import time
-            start_time = time.time()
                 
             # Convert passages to FlashRank format
             passages = []
@@ -246,6 +282,25 @@ class RerankerService:
                     }
                 }
                 passages.append(passage)
+            
+            # 캐시 키 생성 및 캐시 조회
+            passages_hash = hash_passages(passages)
+            cache_key = get_cache_key(query, passages_hash)
+            
+            if cache_key in _RERANK_CACHE:
+                logger.info(f"Cache hit for query: '{query}'")
+                cached_result = _RERANK_CACHE[cache_key]
+                
+                # top_k가 다른 경우 조정
+                if top_k is not None:
+                    cached_result["results"] = cached_result["results"][:top_k]
+                    cached_result["total"] = len(cached_result["results"])
+                
+                # 캐시된 결과 반환, 처리 시간은 현재 시간으로 업데이트
+                elapsed_time = time.time() - start_time
+                cached_result["processing_time"] = elapsed_time
+                cached_result["cached"] = True
+                return cached_result
             
             # 대량 패시지 처리 최적화
             total_passages = len(passages)
@@ -301,13 +356,26 @@ class RerankerService:
             elapsed_time = time.time() - start_time
             logger.info(f"Reranking completed in {elapsed_time:.3f} seconds for {total_passages} passages")
             
-            return {
+            # 결과 생성
+            final_result = {
                 "query": query,
                 "results": processed_results,
                 "total": len(processed_results),
                 "reranked": True,
-                "processing_time": elapsed_time
+                "processing_time": elapsed_time,
+                "cached": False
             }
+            
+            # 캐시에 결과 저장 (top_k 적용 전의 전체 결과)
+            if len(_RERANK_CACHE) >= _CACHE_SIZE_LIMIT:
+                # 캐시가 가득 차면 무작위로 하나 제거
+                import random
+                key_to_remove = random.choice(list(_RERANK_CACHE.keys()))
+                _RERANK_CACHE.pop(key_to_remove, None)
+                
+            _RERANK_CACHE[cache_key] = final_result
+            
+            return final_result
             
         except Exception as e:
             logger.error(f"Reranking failed: {str(e)}")

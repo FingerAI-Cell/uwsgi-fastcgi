@@ -12,6 +12,10 @@ numpy==1.26.4               # 업데이트
 huggingface_hub==0.22.2     # 업데이트
 #flashrank==0.2.10           # 기존 유지
 
+# 성능 최적화 패키지
+flask-compress==1.13       # 응답 압축
+ujson==5.8.0              # 빠른 JSON 파싱
+
 # PyTorch (CPU version)
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.2                # 업데이트

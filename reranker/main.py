@@ -3,7 +3,6 @@ Reranker FastCGI application with API Gateway functionality
 """
 
 import os
-import json
 import logging
 import requests
 import requests_unixsocket
@@ -12,6 +11,14 @@ from flask import Flask, request, Response, jsonify
 from pydantic import BaseModel, Field
 from urllib.parse import quote_plus
 import time
+
+# 더 빠른 JSON 처리를 위해 ujson 사용
+try:
+    import ujson as json
+    logger.info("Using ujson for faster JSON processing")
+except ImportError:
+    import json
+    logger.info("ujson not available, using default json")
 
 # 로깅 설정
 log_dir = "/var/log/reranker"
@@ -73,9 +80,22 @@ class RerankerResponseModel(BaseModel):
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
 
-# FastCGI 응답 형식 설정
+# 성능 최적화 설정 추가
 app.config['PROPAGATE_EXCEPTIONS'] = True
 app.config['PREFERRED_URL_SCHEME'] = 'http'
+app.config['JSON_SORT_KEYS'] = False  # JSON 정렬 비활성화로 성능 향상
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB 최대 요청 크기
+app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False  # 압축 JSON 응답
+app.config['JSONIFY_MIMETYPE'] = 'application/json; charset=utf-8'  # 명시적 MIME 타입
+
+# 응답 압축 활성화 (Flask-Compress가 설치된 경우)
+try:
+    from flask_compress import Compress
+    compress = Compress()
+    compress.init_app(app)
+    logger.info("Response compression enabled")
+except ImportError:
+    logger.info("Flask-Compress not installed, response compression disabled")
 
 # 서비스 인스턴스 생성
 reranker_service = None
@@ -83,8 +103,16 @@ reranker_service = None
 # RAG 서비스 엔드포인트 설정
 RAG_ENDPOINT = os.getenv('RAG_ENDPOINT', 'http://nginx/rag')
 
-# Unix 소켓 세션 생성
+# Unix 소켓 세션 생성 및 연결 풀링 최적화
 rag_session = requests.Session()
+adapter = requests.adapters.HTTPAdapter(
+    pool_connections=100,  # 연결 풀 크기
+    pool_maxsize=100,      # 최대 연결 수
+    max_retries=3,         # 재시도 횟수
+    pool_block=False       # 논블로킹 모드
+)
+rag_session.mount('http://', adapter)
+rag_session.mount('https://', adapter)
 
 # FastCGI 응답 헤더 설정
 @app.after_request
@@ -92,6 +120,19 @@ def add_header(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'SAMEORIGIN'
     response.headers['X-XSS-Protection'] = '1; mode=block'
+    
+    # 캐시 제어 헤더 추가
+    if request.path == '/reranker/health':
+        # 헬스체크는 30초 캐싱
+        response.headers['Cache-Control'] = 'public, max-age=30'
+    else:
+        # API 응답은 캐싱하지 않음
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    
+    # 성능 최적화를 위한 헤더
+    response.headers['Connection'] = 'keep-alive'
+    response.headers['Keep-Alive'] = 'timeout=5, max=1000'
+    
     return response
 
 
