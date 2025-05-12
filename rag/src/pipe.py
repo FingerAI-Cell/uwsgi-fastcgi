@@ -51,19 +51,76 @@ class InteractManager:
         self.logger = logger
         self.document_metadata = {}  # 문서 메타데이터 저장을 위한 딕셔너리 초기화
         self.loaded_collections = {}  # 로드된 컬렉션 캐싱
+        # 캐시 상태 추적 (최대 10개 컬렉션만 캐싱)
+        self.max_cached_collections = 10
+        self.collection_access_count = {}  # 컬렉션 접근 횟수 추적
     
     def get_collection(self, collection_name):
-        """컬렉션을 가져오거나 로드합니다. 이미 로드된 컬렉션은 재사용합니다."""
+        """
+        컬렉션을 효율적으로 관리합니다.
+        - 이미 로드된 컬렉션은 캐시에서 반환
+        - 접근 횟수를 추적하여 LRU(Least Recently Used) 방식으로 캐시 관리
+        - 메모리 최적화를 위한 캐시 크기 제한
+        """
+        # 접근 카운트 증가
+        if collection_name in self.collection_access_count:
+            self.collection_access_count[collection_name] += 1
+        else:
+            self.collection_access_count[collection_name] = 1
+            
+        # 이미 로드된 컬렉션이 있는 경우 캐시에서 반환
         if collection_name in self.loaded_collections:
-            print(f"[DEBUG] Reusing cached collection: {collection_name}")
-            return self.loaded_collections[collection_name]
+            print(f"[DEBUG] Reusing cached collection: {collection_name}, access count: {self.collection_access_count[collection_name]}")
+            collection = self.loaded_collections[collection_name]
+            
+            # 컬렉션이 로드되어 있는지 확인하고, 필요시 재로드
+            try:
+                if not collection.is_ready():
+                    print(f"[DEBUG] Collection {collection_name} not ready, reloading")
+                    collection.load()
+            except Exception as e:
+                print(f"[WARNING] Error checking collection readiness: {str(e)}, will try to reload")
+                try:
+                    collection.load()
+                except Exception as load_error:
+                    print(f"[ERROR] Failed to reload collection: {str(load_error)}")
+                    # 캐시에서 제거하고 새로 로드 시도
+                    del self.loaded_collections[collection_name]
+                    return self._load_new_collection(collection_name)
+                
+            return collection
         
+        # 새 컬렉션 로드
+        return self._load_new_collection(collection_name)
+    
+    def _load_new_collection(self, collection_name):
+        """새 컬렉션을 로드하고 캐시에 추가합니다."""
         try:
-            print(f"[DEBUG] Loading collection: {collection_name}")
+            print(f"[DEBUG] Loading new collection: {collection_name}")
+            
+            # 캐시 크기 제한 확인 및 관리
+            if len(self.loaded_collections) >= self.max_cached_collections:
+                # 가장 적게 접근된 컬렉션 찾기
+                least_used = min(
+                    self.collection_access_count.items(), 
+                    key=lambda x: x[1] if x[0] in self.loaded_collections else float('inf')
+                )[0]
+                
+                if least_used in self.loaded_collections:
+                    print(f"[DEBUG] Removing least used collection from cache: {least_used} (access count: {self.collection_access_count[least_used]})")
+                    # 캐시에서 제거
+                    del self.loaded_collections[least_used]
+                    # 메모리 정리 고려 (하지만 릴리스 호출은 하지 않음)
+            
+            # 새 컬렉션 로드
             collection = Collection(collection_name)
             collection.load()
+            
+            # 캐시에 추가
             self.loaded_collections[collection_name] = collection
+            print(f"[DEBUG] Collection {collection_name} successfully loaded and cached")
             return collection
+            
         except Exception as e:
             print(f"[ERROR] Error loading collection {collection_name}: {str(e)}")
             raise
@@ -284,19 +341,26 @@ class InteractManager:
         
         print(f"[DEBUG] Using domain: {domain}")
         
-        # 컬렉션이 있는지 확인
+        # 컬렉션이 있는지 확인 (신속히 처리)
         collection_check_start = time.time()
-        collections = utility.list_collections()
-        print(f"[DEBUG] Available collections: {collections}")
+        available_collections = utility.list_collections()
         
-        if domain not in collections:
+        if domain not in available_collections:
             print(f"[DEBUG] Collection {domain} not found")
             return []
         
         collection_check_end = time.time()
         print(f"[TIMING] 컬렉션 확인 완료: {(collection_check_end - collection_check_start):.4f}초")
             
-        # 캐싱된 컬렉션 가져오기
+        # 벡터 검색 수행 - 쿼리 임베딩을 먼저 계산 (컬렉션 로드와 병렬로 처리 가능)
+        embed_start = time.time()
+        query_emb = self.emb_model.bge_embed_data(cleansed_text)
+        print(f"[DEBUG] Generated query embedding, length: {len(query_emb)}")
+        
+        embed_end = time.time()
+        print(f"[TIMING] 임베딩 생성 완료: {(embed_end - embed_start):.4f}초")
+        
+        # 캐싱된 컬렉션 가져오기 (임베딩 생성 후에 처리)
         collection_load_start = time.time()
         try:
             collection = self.get_collection(domain)
@@ -308,11 +372,13 @@ class InteractManager:
         collection_load_end = time.time()
         print(f"[TIMING] 컬렉션 로드 완료: {(collection_load_end - collection_load_start):.4f}초")
         
+        # 검색 표현식 구성
+        expr_build_start = time.time()
+        
         if domain:
             expr_parts.append(f"domain == '{domain}'")
         
         # 날짜 범위 필터 (YYYYMMDD 형식 문자열 비교)
-        expr_build_start = time.time()
         if filter_conditions and 'date_range' in filter_conditions:
             date_range = filter_conditions['date_range']
             # 날짜는 문자열 비교를 사용하되, YYYYMMDD 형식이므로 직접 비교 가능
@@ -356,14 +422,7 @@ class InteractManager:
         expr_build_end = time.time()
         print(f"[TIMING] 검색 표현식 구성 완료: {(expr_build_end - expr_build_start):.4f}초")
         
-        # 벡터 검색 수행
-        embed_start = time.time()
-        query_emb = self.emb_model.bge_embed_data(cleansed_text)
-        print(f"[DEBUG] Generated query embedding, length: {len(query_emb)}")
-        
-        embed_end = time.time()
-        print(f"[TIMING] 임베딩 생성 완료: {(embed_end - embed_start):.4f}초")
-        
+        # 검색 파라미터 설정
         search_params_start = time.time()
         self.vectordb.set_search_params(
             query_emb, 
@@ -376,6 +435,7 @@ class InteractManager:
         search_params_end = time.time()
         print(f"[TIMING] 검색 파라미터 설정 완료: {(search_params_end - search_params_start):.4f}초")
         
+        # 실제 검색 실행
         try:
             search_exec_start = time.time()
             search_result = self.vectordb.search_data(collection, self.vectordb.search_params)

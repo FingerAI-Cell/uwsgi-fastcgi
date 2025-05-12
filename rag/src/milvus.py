@@ -9,49 +9,39 @@ import os
 
 class MilVus:
     _connected = False 
-
+    _client = None
+    
     def __init__(self, db_config):
         self.db_config = db_config 
         self.ip_addr = db_config['ip_addr'] 
         self.port = db_config['port']
         self.set_env()
 
-        if not MilVus._connected:
-            self.set_env()
-            MilVus._connected = True  # 연결 상태 업데이트
-
     def set_env(self):
-        # 기존 연결이 있는지 확인
-        try:
-            conn = connections.get_connection("default")
-            if conn is not None and conn.connected():
-                print("Milvus already connected. Reusing connection.")
-                return
-        except Exception:
-            pass  # 연결이 없으면 새로운 연결 생성
-        
-        # 한 가지 방식으로만 연결 (MilvusClient 사용)
+        # 싱글톤 패턴으로 한 번만 연결하고 이후에는 같은 연결 재사용
+        if MilVus._connected and MilVus._client is not None:
+            print("Milvus connection already established. Reusing existing connection.")
+            self.client = MilVus._client
+            return
+            
         try:
             # gRPC 관련 설정을 위한 환경 변수 설정
-            # GRPC 핑 인터벌을 늘려 'too_many_pings' 오류 방지
             os.environ["GRPC_KEEPALIVE_TIME_MS"] = "120000"  # 120초
             os.environ["GRPC_KEEPALIVE_TIMEOUT_MS"] = "20000"  # 20초
             os.environ["GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS"] = "1"
             os.environ["GRPC_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS"] = "300000"  # 300초
             
+            # MilvusClient만 사용 (connections.connect 제거)
             self.client = MilvusClient(
                 uri="http://" + self.ip_addr + ":19530", 
                 port=self.port,
                 timeout=60  # 타임아웃 값을 충분히 설정
             )
             
-            # 원래 설정대로 host 이름 유지
-            self.conn = connections.connect(
-                alias="default", 
-                host='milvus-standalone',   # 원래 설정대로 호스트명 사용
-                port=self.port,
-                timeout=60.0  # 타임아웃 값 설정 (초 단위)
-            )
+            # 싱글톤 인스턴스 저장
+            MilVus._client = self.client
+            MilVus._connected = True
+            
             print(f"Successfully connected to Milvus at {self.ip_addr}:{self.port}")
         except Exception as e:
             print(f"Error connecting to Milvus: {str(e)}")

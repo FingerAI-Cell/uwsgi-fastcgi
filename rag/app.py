@@ -8,6 +8,8 @@ import os
 import time
 from flask.cli import with_appcontext
 import click
+import atexit
+import torch
 
 # 로깅 설정
 logging.basicConfig(
@@ -42,29 +44,83 @@ milvus_data, milvus_meta = env_manager.set_vectordb()
 milvus_db = env_manager.milvus_db
 interact_manager = InteractManager(data_p=env_manager.data_p, vectorenv=milvus_db, vectordb=milvus_data, emb_model=emb_model)
 
-# 자주 사용하는 컬렉션 미리 로드 (Flask 2.0 이상에서는 before_first_request 대신 다른 방법 사용)
-def load_common_collections_handler():
+# 자주 사용하는 컬렉션을 미리 로드하는 함수
+def load_common_collections():
+    """자주 사용하는 컬렉션을 미리 로드합니다."""
     logger.info("Preloading common collections...")
-    common_collections = ["news", "congress"]  # 자주 사용하는 컬렉션 목록, 필요에 따라 수정
     
-    for collection_name in common_collections:
-        try:
-            if collection_name in milvus_db.get_list_collection():
-                interact_manager.get_collection(collection_name)
-                logger.info(f"Preloaded collection: {collection_name}")
-        except Exception as e:
-            logger.error(f"Failed to preload collection {collection_name}: {str(e)}")
+    try:
+        # 사용 가능한 모든 컬렉션 얻기
+        available_collections = milvus_db.get_list_collection()
+        logger.info(f"Available collections: {available_collections}")
+        
+        # 자주 사용하는 컬렉션 목록 정의 (필요에 따라 수정)
+        common_collections = ["news", "congress"]
+        # 실제 존재하는 컬렉션만 처리
+        collections_to_load = [c for c in common_collections if c in available_collections]
+        
+        # 존재하는 컬렉션 없음 시 종료
+        if not collections_to_load:
+            logger.warning("No common collections found to preload")
+            return
+        
+        logger.info(f"Will preload these collections: {collections_to_load}")
+        
+        # 컬렉션 로드
+        for collection_name in collections_to_load:
+            try:
+                # 각 컬렉션 로드 시간 측정
+                start_time = time.time()
+                collection = interact_manager.get_collection(collection_name)
+                load_time = time.time() - start_time
+                logger.info(f"Preloaded collection '{collection_name}' in {load_time:.2f} seconds")
+            except Exception as e:
+                logger.error(f"Failed to preload collection '{collection_name}': {str(e)}")
+        
+        logger.info("Finished preloading collections")
+        
+    except Exception as e:
+        logger.error(f"Error during collection preloading: {str(e)}")
+
+# 앱 종료 시 정리 작업
+def cleanup_on_exit():
+    """애플리케이션 종료 시 정리 작업을 수행합니다."""
+    logger.info("Application shutting down, performing cleanup...")
+    try:
+        # 캐시된 컬렉션 정리
+        if hasattr(interact_manager, 'loaded_collections'):
+            logger.info(f"Clearing {len(interact_manager.loaded_collections)} cached collections")
+            interact_manager.loaded_collections.clear()
+        
+        # GPU 메모리 정리
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                logger.info("GPU memory cache cleared")
+            except Exception as e:
+                logger.error(f"Failed to clear GPU memory: {str(e)}")
+                
+    except Exception as e:
+        logger.error(f"Error during cleanup: {str(e)}")
+    
+    logger.info("Cleanup complete")
+
+# 종료 핸들러 등록
+atexit.register(cleanup_on_exit)
 
 # CLI 명령 대신 앱 시작 시점에 실행할 초기화 함수 등록
 @click.command("load-collections")
 @with_appcontext
 def load_collections_command():
-    load_common_collections_handler()
+    """CLI 명령어로 컬렉션 로드를 수행합니다."""
+    load_common_collections()
     click.echo("Collections loaded!")
 
 # 앱 시작 시 초기화 함수 실행
+# Flask 2.0 이상에서 before_first_request 대신 권장되는 방식
 with app.app_context():
-    load_common_collections_handler()
+    # 앱이 시작될 때 컬렉션 로드
+    load_common_collections()
 
 # app.cli에 명령 추가 (Flask CLI에서 실행 가능)
 app.cli.add_command(load_collections_command)
