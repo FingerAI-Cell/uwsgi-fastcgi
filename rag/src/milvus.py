@@ -31,7 +31,15 @@ class MilVus:
             os.environ["GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS"] = "1"
             os.environ["GRPC_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS"] = "300000"  # 300초
             
-            # MilvusClient만 사용 (connections.connect 제거)
+            # connections.connect 호출 유지 - 이 부분이 필수적임 (utility 함수 사용 시 필요)
+            self.conn = connections.connect(
+                alias="default", 
+                host='milvus-standalone',  # 원래 설정대로 호스트명 사용
+                port=self.port,
+                timeout=60.0  # 타임아웃 값 설정 (초 단위)
+            )
+            
+            # MilvusClient도 함께 초기화
             self.client = MilvusClient(
                 uri="http://" + self.ip_addr + ":19530", 
                 port=self.port,
