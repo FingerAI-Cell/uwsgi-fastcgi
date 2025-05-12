@@ -11,6 +11,7 @@ from typing import Dict, List, Any, Optional
 from flask import Flask, request, Response, jsonify
 from pydantic import BaseModel, Field
 from urllib.parse import quote_plus
+import time
 
 # 로깅 설정
 log_dir = "/var/log/reranker"
@@ -145,6 +146,9 @@ def enhanced_search():
     통합 검색 API: RAG 검색 결과를 Reranker로 순위를 다시 매기는 기능
     """
     try:
+        # 전체 요청 처리 시간 측정 시작
+        total_start_time = time.time()
+        
         # 파라미터 추출
         query_text = request.args.get('query_text')
         top_k = int(request.args.get('top_k', 5))
@@ -236,6 +240,10 @@ def enhanced_search():
                     "tags": metadata.get('tags')
                 }
                 final_results.append(final_result)
+            
+            # 전체 요청 처리 시간 계산
+            total_elapsed_time = time.time() - total_start_time
+            logger.info(f"Total enhanced-search endpoint processing time: {total_elapsed_time:.3f} seconds")
                 
             response_data = {
                 "result_code": "F000000",
@@ -245,7 +253,9 @@ def enhanced_search():
                     "top_k": top_k,
                     "filters": {param: search_params[param] for param in search_params if param not in ['query_text', 'top_k']}
                 },
-                "search_result": final_results
+                "search_result": final_results,
+                "total_processing_time": total_elapsed_time,
+                "reranking_time": reranked.get("processing_time", 0)
             }
             
             return Response(json.dumps(response_data, ensure_ascii=False), 
@@ -274,6 +284,9 @@ def rerank():
     Rerank passages endpoint
     """
     try:
+        # 전체 요청 처리 시간 측정 시작
+        total_start_time = time.time()
+        
         # Get top_k parameter from query string
         top_k = request.args.get('top_k', type=int)
         
@@ -299,6 +312,14 @@ def rerank():
             top_k
         )
         
+        # 전체 요청 처리 시간 계산
+        total_elapsed_time = time.time() - total_start_time
+        logger.info(f"Total rerank endpoint processing time: {total_elapsed_time:.3f} seconds")
+        
+        # 응답에 전체 처리 시간 추가
+        if isinstance(reranked, dict):
+            reranked["total_processing_time"] = total_elapsed_time
+        
         return Response(
             json.dumps(reranked, ensure_ascii=False),
             mimetype='application/json; charset=utf-8'
@@ -320,6 +341,9 @@ def batch_rerank():
         List of reranked results for each query
     """
     try:
+        # 전체 요청 처리 시간 측정 시작
+        total_start_time = time.time()
+        
         data = request.get_json()
         top_k = request.args.get("top_k", type=int)
         
@@ -334,8 +358,19 @@ def batch_rerank():
             )
             results.append(reranked)
         
+        # 전체 요청 처리 시간 계산
+        total_elapsed_time = time.time() - total_start_time
+        logger.info(f"Total batch_rerank endpoint processing time: {total_elapsed_time:.3f} seconds")
+        
+        # 배치 처리 결과에 전체 처리 시간 추가
+        batch_result = {
+            "results": results,
+            "total_processing_time": total_elapsed_time,
+            "query_count": len(results)
+        }
+        
         return Response(
-            json.dumps(results, ensure_ascii=False),
+            json.dumps(batch_result, ensure_ascii=False),
             mimetype='application/json; charset=utf-8'
         )
         
