@@ -96,20 +96,17 @@ def add_header(response):
 
 def get_reranker_service():
     """Get reranker service instance"""
-    global reranker_service
-    if reranker_service is None:
-        try:
-            config_path = os.environ.get("RERANKER_CONFIG", "/reranker/config.json")
-            logger.info(f"Initializing RerankerService with config: {config_path}")
-            logger.info(f"Current working directory: {os.getcwd()}")
-            logger.info(f"Config file exists: {os.path.exists(config_path)}")
-            reranker_service = RerankerService(config_path)
-            logger.info("RerankerService initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize RerankerService: {str(e)}", exc_info=True)
-            logger.error("Using dummy reranker for testing")
-            reranker_service = DummyReranker()
-    return reranker_service
+    try:
+        config_path = os.environ.get("RERANKER_CONFIG", "/reranker/config.json")
+        logger.info(f"Getting RerankerService with config: {config_path}")
+        
+        # 싱글톤 패턴으로 서비스 인스턴스 가져오기
+        from service import RerankerService
+        return RerankerService.get_instance(config_path)
+    except Exception as e:
+        logger.error(f"Failed to get RerankerService: {str(e)}", exc_info=True)
+        logger.error("Using dummy reranker for testing")
+        return DummyReranker()
 
 
 class DummyReranker:

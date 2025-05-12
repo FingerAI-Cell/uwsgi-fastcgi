@@ -4,6 +4,16 @@
     "max_length": 512,
     "batch_size": {
         "cpu": 32,
-        "gpu": 256
+        "gpu": 512
+    },
+    "optimization": {
+        "use_fp16": true,
+        "use_cache": true,
+        "use_threads": true,
+        "thread_count": 4
+    },
+    "logging": {
+        "performance_tracking": true,
+        "log_level": "INFO"
     }
 } 

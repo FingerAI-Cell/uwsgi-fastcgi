@@ -52,14 +52,66 @@ class CrossEncoderReranker(BaseReranker):
         """
         super().__init__(model_name_or_path, device)
         self.max_length = 512
+        self.batch_size = 64  # 배치 크기 증가
+        self._model_loaded = False  # 모델 로드 상태 추적
     
     def load(self):
         """Load model and tokenizer"""
+        if self._model_loaded:
+            return self  # 이미 로드된 경우 재사용
+            
         print(f"[INFO] Loading cross-encoder model: {self.model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
-        self.model.to(self.device)
-        print(f"[INFO] Model loaded successfully")
+        
+        # 모델 로딩 최적화
+        try:
+            # 메모리 최적화를 위한 설정
+            config_kwargs = {
+                "torchscript": True,  # 모델 최적화
+                "return_dict": False  # 메모리 사용량 감소
+            }
+            
+            self.model = AutoModelForSequenceClassification.from_pretrained(
+                self.model_name,
+                **config_kwargs
+            )
+            
+            # GPU 메모리 최적화
+            if self.device == 'cuda':
+                # 반정밀도(FP16) 사용
+                self.model = self.model.half()
+                
+            self.model.to(self.device)
+            
+            # 추론 모드 설정
+            self.model.eval()
+            
+            # 가능하면 모델을 TorchScript로 변환
+            try:
+                sample_inputs = self.tokenizer(
+                    [("query", "passage")], 
+                    padding=True, 
+                    truncation=True, 
+                    return_tensors="pt",
+                    max_length=self.max_length
+                )
+                sample_inputs = {k: v.to(self.device) for k, v in sample_inputs.items()}
+                self.model = torch.jit.trace(self.model, (sample_inputs['input_ids'], sample_inputs['attention_mask']), strict=False)
+                print(f"[INFO] Model converted to TorchScript for better performance")
+            except Exception as e:
+                print(f"[WARNING] Failed to convert model to TorchScript: {e}")
+                
+            self._model_loaded = True
+            print(f"[INFO] Model loaded successfully with optimizations")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to load model with optimizations: {e}")
+            # 기본 방식으로 로드 시도
+            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
+            self.model.to(self.device)
+            self.model.eval()
+            self._model_loaded = True
+            
         return self
     
     def rerank(self, query: str, passages: List[Dict[str, Any]], top_k: int = None) -> List[Dict[str, Any]]:
@@ -87,23 +139,33 @@ class CrossEncoderReranker(BaseReranker):
         passage_texts = [p.get('text', '') for p in passages]
         pairs = [(query, text) for text in passage_texts]
         
-        # Tokenize
-        inputs = self.tokenizer(
-            pairs, 
-            padding=True, 
-            truncation=True, 
-            return_tensors="pt", 
-            max_length=self.max_length
-        )
-        
-        # Move to device
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        
-        # Get scores
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            scores = outputs.logits.squeeze(-1).cpu().tolist()
+        # 배치 처리로 메모리 효율성 향상
+        scores = []
+        for i in range(0, len(pairs), self.batch_size):
+            batch_pairs = pairs[i:i + self.batch_size]
             
+            # Tokenize
+            inputs = self.tokenizer(
+                batch_pairs, 
+                padding=True, 
+                truncation=True, 
+                return_tensors="pt", 
+                max_length=self.max_length
+            )
+            
+            # Move to device
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            # Get scores
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                batch_scores = outputs[0].squeeze(-1).cpu().tolist() if isinstance(outputs, tuple) else outputs.logits.squeeze(-1).cpu().tolist()
+                scores.extend(batch_scores)
+            
+            # GPU 메모리 정리
+            if self.device == 'cuda':
+                torch.cuda.empty_cache()
+                
         # Add scores to passages
         for i, (passage, score) in enumerate(zip(passages, scores)):
             passage['rerank_score'] = float(score)
@@ -139,10 +201,14 @@ class FlashRankReranker(BaseReranker):
                 
         super().__init__(model_name_or_path, device)
         self.max_length = 512
-        self.batch_size = 32  # 배치 크기
+        self.batch_size = 256 if self.device == 'cuda' else 64  # GPU/CPU에 따라 배치 크기 조정
+        self._model_loaded = False  # 모델 로드 상태 추적
         
     def load(self):
         """Load FlashRank model"""
+        if self._model_loaded and hasattr(self, 'flashrank_model'):
+            return self  # 이미 로드된 경우 재사용
+            
         try:
             print(f"[INFO] Loading FlashRank model: {self.model_name}")
             
@@ -154,18 +220,38 @@ class FlashRankReranker(BaseReranker):
             try:
                 # 방법 1: 만약 Reranker가 클래스 이름인 경우
                 from flashrank import Reranker
+                
+                # 최적화 옵션 설정
+                model_kwargs = {
+                    "use_fp16": True if self.device == 'cuda' else False,  # GPU에서는 FP16 사용
+                    "cache_dir": self.model_dir if self.model_dir else None,
+                    "device": self.device,
+                    "max_length": self.max_length,
+                    "batch_size": self.batch_size
+                }
+                
                 self.flashrank_model = Reranker(
                     model_name_or_path=self.model_name,
-                    device=self.device
+                    **model_kwargs
                 )
                 print("[INFO] FlashRank Reranker class loaded successfully")
             except (ImportError, AttributeError):
                 try:
                     # 방법 2: CrossEncoder가 클래스 이름인 경우
                     from flashrank import CrossEncoder
+                    
+                    # 최적화 옵션 설정
+                    model_kwargs = {
+                        "use_fp16": True if self.device == 'cuda' else False,
+                        "cache_dir": self.model_dir if self.model_dir else None,
+                        "device": self.device,
+                        "max_length": self.max_length,
+                        "batch_size": self.batch_size
+                    }
+                    
                     self.flashrank_model = CrossEncoder(
                         model_name_or_path=self.model_name,
-                        device=self.device
+                        **model_kwargs
                     )
                     print("[INFO] FlashRank CrossEncoder class loaded successfully")
                 except (ImportError, AttributeError):
@@ -174,6 +260,7 @@ class FlashRankReranker(BaseReranker):
                     print("[INFO] FlashRank module loaded successfully")
             
             print(f"[INFO] FlashRank version: {flashrank.__version__ if hasattr(flashrank, '__version__') else 'unknown'}")
+            self._model_loaded = True
             
         except ImportError as e:
             print(f"[ERROR] FlashRank not installed. Error: {str(e)}")
@@ -197,7 +284,7 @@ class FlashRankReranker(BaseReranker):
         Returns:
             Reranked list of passages with added 'rerank_score' field
         """
-        if not hasattr(self, 'flashrank_model'):
+        if not hasattr(self, 'flashrank_model') or not self._model_loaded:
             self.load()
             
         if not passages:
@@ -210,42 +297,22 @@ class FlashRankReranker(BaseReranker):
             # 패시지 텍스트 추출
             texts = [p.get('text', '') for p in passages]
             
-            # 다양한 FlashRank API 호출 방식 시도
-            try:
-                # 방법 1: compute_score 메서드가 있는 경우
-                if hasattr(self.flashrank_model, 'compute_score'):
-                    scores = self.flashrank_model.compute_score(query=query, passages=texts)
-                    print("[INFO] Used compute_score method")
-                # 방법 2: rerank 메서드가 있는 경우
-                elif hasattr(self.flashrank_model, 'rerank'):
-                    results = self.flashrank_model.rerank(query=query, passages=texts, top_k=top_k or len(texts))
-                    # results 형식에 따라 점수 추출
-                    if isinstance(results, dict) and 'scores' in results:
-                        scores = results['scores']
-                    elif isinstance(results, list):
-                        scores = [r.get('score', 0) for r in results]
-                    else:
-                        scores = results
-                    print("[INFO] Used rerank method")
-                # 방법 3: score_passages 함수가 있는 경우
-                elif hasattr(self.flashrank_model, 'score_passages'):
-                    scores = self.flashrank_model.score_passages(query=query, passages=texts)
-                    print("[INFO] Used score_passages function")
-                # 방법 4: 모듈 함수 직접 호출
-                else:
-                    print("[WARNING] No standard scoring method found, using direct module import")
-                    import flashrank
-                    # 모듈에서 적절한 함수 찾기
-                    if hasattr(flashrank, 'rerank'):
-                        results = flashrank.rerank(query=query, passages=texts, model=self.model_name)
-                        scores = [r.get('score', 0) for r in results]
-                    elif hasattr(flashrank, 'score'):
-                        scores = flashrank.score(query=query, passages=texts, model=self.model_name)
-                    else:
-                        raise AttributeError("No compatible scoring function found in flashrank")
-            except Exception as e:
-                print(f"[ERROR] FlashRank API call failed: {str(e)}")
-                raise
+            # 성능 최적화: 배치 처리
+            scores = []
+            
+            # 대량의 패시지가 있을 경우 배치 처리
+            if len(texts) > self.batch_size:
+                for i in range(0, len(texts), self.batch_size):
+                    batch_texts = texts[i:i + self.batch_size]
+                    batch_scores = self._rerank_batch(query, batch_texts)
+                    scores.extend(batch_scores)
+                    
+                    # GPU 메모리 정리
+                    if self.device == 'cuda':
+                        torch.cuda.empty_cache()
+            else:
+                # 소량 데이터는 한 번에 처리
+                scores = self._rerank_batch(query, texts)
             
             # 점수가 리스트가 아니면 변환
             if not isinstance(scores, list):
@@ -277,6 +344,41 @@ class FlashRankReranker(BaseReranker):
                 passage['rerank_score'] = passage.get('score', 0.0)
                 passage['rerank_position'] = i
             return passages
+            
+    def _rerank_batch(self, query: str, texts: List[str]) -> List[float]:
+        """배치 단위로 리랭킹 수행"""
+        try:
+            # 다양한 FlashRank API 호출 방식 시도
+            if hasattr(self.flashrank_model, 'compute_score'):
+                scores = self.flashrank_model.compute_score(query=query, passages=texts)
+                return scores
+            # 방법 2: rerank 메서드가 있는 경우
+            elif hasattr(self.flashrank_model, 'rerank'):
+                results = self.flashrank_model.rerank(query=query, passages=texts)
+                # results 형식에 따라 점수 추출
+                if isinstance(results, dict) and 'scores' in results:
+                    return results['scores']
+                elif isinstance(results, list):
+                    return [r.get('score', 0) for r in results]
+                else:
+                    return results
+            # 방법 3: score_passages 함수가 있는 경우
+            elif hasattr(self.flashrank_model, 'score_passages'):
+                return self.flashrank_model.score_passages(query=query, passages=texts)
+            # 방법 4: 모듈 함수 직접 호출
+            else:
+                import flashrank
+                # 모듈에서 적절한 함수 찾기
+                if hasattr(flashrank, 'rerank'):
+                    results = flashrank.rerank(query=query, passages=texts, model=self.model_name)
+                    return [r.get('score', 0) for r in results]
+                elif hasattr(flashrank, 'score'):
+                    return flashrank.score(query=query, passages=texts, model=self.model_name)
+                else:
+                    raise AttributeError("No compatible scoring function found in flashrank")
+        except Exception as e:
+            print(f"[ERROR] FlashRank API call failed in batch: {str(e)}")
+            raise
 
 
 class CohereCrossEncoder(BaseReranker):

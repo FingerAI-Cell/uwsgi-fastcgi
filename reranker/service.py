@@ -61,6 +61,15 @@ class RerankerResponseModel(BaseModel):
 class RerankerService:
     """Service for reranking passages"""
     
+    _instance = None  # 싱글톤 인스턴스
+    
+    @classmethod
+    def get_instance(cls, config_path=None):
+        """싱글톤 패턴으로 인스턴스 반환"""
+        if cls._instance is None:
+            cls._instance = cls(config_path)
+        return cls._instance
+    
     def __init__(self, config_path: str = None):
         """
         Initialize the reranker service
@@ -75,9 +84,13 @@ class RerankerService:
             self.cache_dir = os.getenv("FLASHRANK_CACHE_DIR", self.config.get("cache_dir", "/reranker/models"))
             self.max_length = int(os.getenv("FLASHRANK_MAX_LENGTH", self.config.get("max_length", 512)))
             
+            # 배치 크기 설정
+            self.batch_size = self._get_batch_size()
+            
             logger.info(f"Initializing FlashRank reranker with model: {self.model_name}")
             logger.debug(f"Cache directory: {self.cache_dir}")
             logger.debug(f"Max length: {self.max_length}")
+            logger.debug(f"Batch size: {self.batch_size}")
             
             # 모델 초기화를 try-except로 감싸서 실패해도 서비스는 계속 실행되도록 함
             try:
@@ -89,11 +102,29 @@ class RerankerService:
                     logger.info(f"Creating cache directory: {self.cache_dir}")
                     os.makedirs(self.cache_dir, exist_ok=True)
                 
+                # GPU 사용 가능 여부 확인
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+                logger.info(f"Using device: {self.device}")
+                
+                # 최적화된 설정으로 Ranker 초기화
                 self.ranker = Ranker(
                     model_name=self.model_name,
                     cache_dir=self.cache_dir,
-                    max_length=self.max_length
+                    max_length=self.max_length,
+                    batch_size=self.batch_size,
+                    device=self.device,
+                    use_fp16=True if self.device == "cuda" else False  # GPU에서는 FP16 사용
                 )
+                
+                # 모델 미리 로드 (첫 요청 지연 방지)
+                logger.info("Pre-warming model...")
+                dummy_request = RerankRequest(
+                    query="warm up query",
+                    passages=[{"id": "0", "text": "warm up passage", "meta": {}}]
+                )
+                self.ranker.rerank(dummy_request)
+                logger.info("Model pre-warming complete")
+                
                 logger.info("FlashRank reranker initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize FlashRank reranker: {str(e)}")
@@ -105,6 +136,25 @@ class RerankerService:
         except Exception as e:
             logger.error(f"Failed to initialize RerankerService: {str(e)}")
             raise
+    
+    def _get_batch_size(self) -> int:
+        """환경에 맞는 배치 크기 결정"""
+        # 기본 배치 크기
+        default_batch_size = {
+            "cpu": 32,
+            "gpu": 256
+        }
+        
+        # GPU 여부에 따라 배치 크기 선택
+        mode = "gpu" if torch.cuda.is_available() else "cpu"
+        
+        # 설정된 배치 크기 가져오기
+        if isinstance(self.config.get("batch_size"), dict):
+            return self.config["batch_size"].get(mode, default_batch_size[mode])
+        elif isinstance(self.config.get("batch_size"), (int, str)):
+            return int(self.config["batch_size"])
+        else:
+            return default_batch_size[mode]
     
     def _load_config(self, config_path: str = None) -> Dict[str, Any]:
         """
@@ -167,6 +217,15 @@ class RerankerService:
                 logger.warning("Reranker not initialized, returning original results")
                 return search_result
                 
+            # 결과가 없으면 빈 결과 반환
+            if not search_result.get("results"):
+                logger.warning("No results to rerank")
+                return search_result
+            
+            # 성능 측정 시작
+            import time
+            start_time = time.time()
+                
             # Convert passages to FlashRank format
             passages = []
             for result in search_result["results"]:
@@ -180,12 +239,33 @@ class RerankerService:
                 }
                 passages.append(passage)
             
-            # Create rerank request
-            rerank_request = RerankRequest(query=query, passages=passages)
+            # 대량 패시지 처리 최적화
+            total_passages = len(passages)
+            logger.info(f"Reranking {total_passages} passages for query: '{query}'")
             
-            # Rerank passages
-            logger.info(f"Reranking {len(passages)} passages for query: '{query}'")
-            reranked_results = self.ranker.rerank(rerank_request)
+            # 배치 처리를 위한 최적 크기 계산
+            batch_size = min(self.batch_size, total_passages)
+            
+            # 배치 처리
+            reranked_results = []
+            if total_passages > batch_size:
+                for i in range(0, total_passages, batch_size):
+                    batch_passages = passages[i:i + batch_size]
+                    
+                    # Create rerank request
+                    rerank_request = RerankRequest(query=query, passages=batch_passages)
+                    
+                    # Rerank passages
+                    batch_results = self.ranker.rerank(rerank_request)
+                    reranked_results.extend(batch_results)
+                    
+                    # GPU 메모리 정리
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+            else:
+                # 소량 데이터는 한 번에 처리
+                rerank_request = RerankRequest(query=query, passages=passages)
+                reranked_results = self.ranker.rerank(rerank_request)
             
             # Convert back to original format
             processed_results = []
@@ -203,11 +283,16 @@ class RerankerService:
             if top_k is not None:
                 processed_results = processed_results[:top_k]
             
+            # 성능 측정 종료
+            elapsed_time = time.time() - start_time
+            logger.info(f"Reranking completed in {elapsed_time:.3f} seconds for {total_passages} passages")
+            
             return {
                 "query": query,
                 "results": processed_results,
                 "total": len(processed_results),
-                "reranked": True
+                "reranked": True,
+                "processing_time": elapsed_time
             }
             
         except Exception as e:
