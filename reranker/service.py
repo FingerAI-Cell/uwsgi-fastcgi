@@ -106,21 +106,24 @@ class RerankerService:
                 self.device = "cuda" if torch.cuda.is_available() else "cpu"
                 logger.info(f"Using device: {self.device}")
                 
-                # 기본 설정으로 Ranker 초기화 (호환성을 위해 최소한의 매개변수만 사용)
+                # FlashRank 0.2.10 버전에 맞게 Ranker 초기화
                 try:
+                    # FlashRank 0.2.10 버전에서는 batch_size, max_length 등의 매개변수를 지원하지 않음
+                    # 기본 매개변수만 사용
                     self.ranker = Ranker(
-                        model_name=self.model_name,
-                        cache_dir=self.cache_dir
+                        model_name=self.model_name
                     )
                     logger.info("FlashRank reranker initialized with basic parameters")
-                except TypeError as e:
-                    logger.warning(f"Failed with basic parameters: {e}, trying minimal initialization")
-                    self.ranker = Ranker(model_name=self.model_name)
-                    logger.info("FlashRank reranker initialized with minimal parameters")
+                except Exception as e:
+                    logger.warning(f"Failed with basic parameters: {e}, trying without parameters")
+                    # 매개변수 없이 초기화 시도
+                    self.ranker = Ranker()
+                    logger.info("FlashRank reranker initialized without parameters")
                 
                 # 모델 미리 로드 (첫 요청 지연 방지)
                 logger.info("Pre-warming model...")
                 try:
+                    # FlashRank 0.2.10 API에 맞게 예열 요청 구성
                     dummy_request = RerankRequest(
                         query="warm up query",
                         passages=[{"id": "0", "text": "warm up passage", "meta": {}}]
