@@ -23,7 +23,7 @@ ENV PYTHONPATH=/usr/local/lib/python3.10/site-packages:$PYTHONPATH
 
 # Python 버전은 기본 제공되므로 conda로 다시 설치하지 않음
 RUN mkdir -p /var/log/reranker
-COPY requirements.gpu.txt /reranker/requirements.txt
+COPY requirements.txt /reranker/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # flashrank 기본 패키지 설치
