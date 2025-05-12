@@ -6,6 +6,8 @@ import logging
 import json 
 import os 
 import time
+from flask.cli import with_appcontext
+import click
 
 # 로깅 설정
 logging.basicConfig(
@@ -40,9 +42,8 @@ milvus_data, milvus_meta = env_manager.set_vectordb()
 milvus_db = env_manager.milvus_db
 interact_manager = InteractManager(data_p=env_manager.data_p, vectorenv=milvus_db, vectordb=milvus_data, emb_model=emb_model)
 
-# 자주 사용하는 컬렉션 미리 로드
-@app.before_first_request
-def load_common_collections():
+# 자주 사용하는 컬렉션 미리 로드 (Flask 2.0 이상에서는 before_first_request 대신 다른 방법 사용)
+def load_common_collections_handler():
     logger.info("Preloading common collections...")
     common_collections = ["news", "congress"]  # 자주 사용하는 컬렉션 목록, 필요에 따라 수정
     
@@ -53,6 +54,20 @@ def load_common_collections():
                 logger.info(f"Preloaded collection: {collection_name}")
         except Exception as e:
             logger.error(f"Failed to preload collection {collection_name}: {str(e)}")
+
+# CLI 명령 대신 앱 시작 시점에 실행할 초기화 함수 등록
+@click.command("load-collections")
+@with_appcontext
+def load_collections_command():
+    load_common_collections_handler()
+    click.echo("Collections loaded!")
+
+# 앱 시작 시 초기화 함수 실행
+with app.app_context():
+    load_common_collections_handler()
+
+# app.cli에 명령 추가 (Flask CLI에서 실행 가능)
+app.cli.add_command(load_collections_command)
 
 # FastCGI 응답 헤더 설정
 @app.after_request

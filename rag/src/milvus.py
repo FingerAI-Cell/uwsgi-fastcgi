@@ -5,6 +5,7 @@ import logging
 import ast
 import re
 import json
+import os
 
 class MilVus:
     _connected = False 
@@ -30,17 +31,31 @@ class MilVus:
             pass  # 연결이 없으면 새로운 연결 생성
         
         # 한 가지 방식으로만 연결 (MilvusClient 사용)
-        self.client = MilvusClient(
-            uri="http://" + self.ip_addr + ":19530", 
-            port=self.port
-        )
-        
-        # 원래 설정대로 host 이름 유지
-        self.conn = connections.connect(
-            alias="default", 
-            host='milvus-standalone',   # 원래 설정대로 호스트명 사용
-            port=self.port
-        )
+        try:
+            # gRPC 관련 설정을 위한 환경 변수 설정
+            # GRPC 핑 인터벌을 늘려 'too_many_pings' 오류 방지
+            os.environ["GRPC_KEEPALIVE_TIME_MS"] = "120000"  # 120초
+            os.environ["GRPC_KEEPALIVE_TIMEOUT_MS"] = "20000"  # 20초
+            os.environ["GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS"] = "1"
+            os.environ["GRPC_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS"] = "300000"  # 300초
+            
+            self.client = MilvusClient(
+                uri="http://" + self.ip_addr + ":19530", 
+                port=self.port,
+                timeout=60  # 타임아웃 값을 충분히 설정
+            )
+            
+            # 원래 설정대로 host 이름 유지
+            self.conn = connections.connect(
+                alias="default", 
+                host='milvus-standalone',   # 원래 설정대로 호스트명 사용
+                port=self.port,
+                timeout=60.0  # 타임아웃 값 설정 (초 단위)
+            )
+            print(f"Successfully connected to Milvus at {self.ip_addr}:{self.port}")
+        except Exception as e:
+            print(f"Error connecting to Milvus: {str(e)}")
+            raise
 
     def _get_data_type(self, dtype):
         if dtype == "FLOAT_VECTOR":

@@ -17,6 +17,16 @@ ENV HF_HOME=/rag/models
 ENV TOKENIZERS_PARALLELISM=false
 ENV TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 
+# gRPC 설정 - 연결 안정성 개선
+ENV GRPC_KEEPALIVE_TIME_MS=120000
+ENV GRPC_KEEPALIVE_TIMEOUT_MS=20000 
+ENV GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1
+ENV GRPC_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS=300000
+
+# 메모리 관련 설정
+ENV MALLOC_ARENA_MAX=2
+ENV PYTHONMALLOC=malloc
+
 # 패키지 설치 및 캐시 정리 (한 번의 RUN 명령으로 레이어 수 감소)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends locales build-essential curl && \
