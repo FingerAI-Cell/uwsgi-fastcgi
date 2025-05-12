@@ -106,24 +106,29 @@ class RerankerService:
                 self.device = "cuda" if torch.cuda.is_available() else "cpu"
                 logger.info(f"Using device: {self.device}")
                 
-                # 최적화된 설정으로 Ranker 초기화
-                self.ranker = Ranker(
-                    model_name=self.model_name,
-                    cache_dir=self.cache_dir,
-                    max_length=self.max_length,
-                    batch_size=self.batch_size,
-                    device=self.device,
-                    use_fp16=True if self.device == "cuda" else False  # GPU에서는 FP16 사용
-                )
+                # 기본 설정으로 Ranker 초기화 (호환성을 위해 최소한의 매개변수만 사용)
+                try:
+                    self.ranker = Ranker(
+                        model_name=self.model_name,
+                        cache_dir=self.cache_dir
+                    )
+                    logger.info("FlashRank reranker initialized with basic parameters")
+                except TypeError as e:
+                    logger.warning(f"Failed with basic parameters: {e}, trying minimal initialization")
+                    self.ranker = Ranker(model_name=self.model_name)
+                    logger.info("FlashRank reranker initialized with minimal parameters")
                 
                 # 모델 미리 로드 (첫 요청 지연 방지)
                 logger.info("Pre-warming model...")
-                dummy_request = RerankRequest(
-                    query="warm up query",
-                    passages=[{"id": "0", "text": "warm up passage", "meta": {}}]
-                )
-                self.ranker.rerank(dummy_request)
-                logger.info("Model pre-warming complete")
+                try:
+                    dummy_request = RerankRequest(
+                        query="warm up query",
+                        passages=[{"id": "0", "text": "warm up passage", "meta": {}}]
+                    )
+                    self.ranker.rerank(dummy_request)
+                    logger.info("Model pre-warming complete")
+                except Exception as e:
+                    logger.warning(f"Model pre-warming failed: {e}, this is not critical")
                 
                 logger.info("FlashRank reranker initialized successfully")
             except Exception as e:
@@ -248,24 +253,30 @@ class RerankerService:
             
             # 배치 처리
             reranked_results = []
-            if total_passages > batch_size:
-                for i in range(0, total_passages, batch_size):
-                    batch_passages = passages[i:i + batch_size]
-                    
-                    # Create rerank request
-                    rerank_request = RerankRequest(query=query, passages=batch_passages)
-                    
-                    # Rerank passages
-                    batch_results = self.ranker.rerank(rerank_request)
-                    reranked_results.extend(batch_results)
-                    
-                    # GPU 메모리 정리
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-            else:
-                # 소량 데이터는 한 번에 처리
-                rerank_request = RerankRequest(query=query, passages=passages)
-                reranked_results = self.ranker.rerank(rerank_request)
+            try:
+                if total_passages > batch_size:
+                    for i in range(0, total_passages, batch_size):
+                        batch_passages = passages[i:i + batch_size]
+                        
+                        # Create rerank request
+                        rerank_request = RerankRequest(query=query, passages=batch_passages)
+                        
+                        # Rerank passages
+                        batch_results = self.ranker.rerank(rerank_request)
+                        reranked_results.extend(batch_results)
+                        
+                        # GPU 메모리 정리
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                else:
+                    # 소량 데이터는 한 번에 처리
+                    rerank_request = RerankRequest(query=query, passages=passages)
+                    reranked_results = self.ranker.rerank(rerank_request)
+            except Exception as e:
+                logger.error(f"Error during reranking: {e}")
+                logger.warning("Falling back to original results")
+                # 오류 발생 시 원본 결과 반환
+                return search_result
             
             # Convert back to original format
             processed_results = []

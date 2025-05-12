@@ -876,6 +876,15 @@ curl -G http://localhost/reranker/enhanced-search \
 | position | N | Integer | 원본 위치 |
 | metadata | N | Object | 메타데이터 객체 |
 
+metadata 객체의 구조:
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| title | N | String | 문서 제목 |
+| author | N | String | 작성자 |
+| tags | N | Object | 태그 정보 (예: date) |
+| doc_id | N | String | 문서 ID (중복 가능) |
+| original_score | N | Float | 원본 점수 |
+
 ### 요청 예시
 ```bash
 curl -X POST "http://localhost/reranker/rerank?top_k=3" \
@@ -914,8 +923,8 @@ curl -X POST "http://localhost/reranker/rerank?top_k=3" \
 |------|------|------|
 | query | String | 요청한 검색 쿼리 |
 | results | Array | 재랭킹된 결과 배열 |
-| total | Integer | 결과 총 개수 |
-| reranked | Boolean | 재랭킹 완료 여부 (항상 true) |
+| total | Integer/null | 결과 총 개수 (재랭킹 실패 시 null 가능) |
+| reranked | Boolean | 재랭킹 완료 여부 (true: 재랭킹 성공, false: 재랭킹 실패/미수행) |
 | processing_time | Float | 처리 소요 시간(초) |
 
 각 결과 객체의 구조:
@@ -1018,6 +1027,15 @@ curl -X POST "http://localhost/reranker/rerank?top_k=3" \
 | position | N | Integer | 원본 위치 |
 | metadata | N | Object | 메타데이터 객체 |
 
+metadata 객체의 구조:
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| title | N | String | 문서 제목 |
+| author | N | String | 작성자 |
+| tags | N | Object | 태그 정보 (예: date) |
+| doc_id | N | String | 문서 ID (중복 가능) |
+| original_score | N | Float | 원본 점수 |
+
 ### 요청 예시
 ```bash
 curl -X POST "http://localhost/reranker/batch_rerank?top_k=5" \
@@ -1076,8 +1094,8 @@ curl -X POST "http://localhost/reranker/batch_rerank?top_k=5" \
 |------|------|------|
 | query | String | 요청한 검색 쿼리 |
 | results | Array | 재랭킹된 결과 배열 |
-| total | Integer | 결과 총 개수 |
-| reranked | Boolean | 재랭킹 완료 여부 (항상 true) |
+| total | Integer/null | 결과 총 개수 (재랭킹 실패 시 null 가능) |
+| reranked | Boolean | 재랭킹 완료 여부 (true: 재랭킹 성공, false: 재랭킹 실패/미수행) |
 | processing_time | Float | 처리 소요 시간(초) |
 
 ### 성공 응답 예시
