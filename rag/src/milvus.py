@@ -20,20 +20,25 @@ class MilVus:
             MilVus._connected = True  # 연결 상태 업데이트
 
     def set_env(self):
-        self.client = MilvusClient(
-            uri="http://" + self.ip_addr + ":19530", port=self.port
-        )
+        # 기존 연결이 있는지 확인
         try:
             conn = connections.get_connection("default")
             if conn is not None and conn.connected():
-                print("Milvus already connected. Skipping reconnection.")
+                print("Milvus already connected. Reusing connection.")
                 return
         except Exception:
             pass  # 연결이 없으면 새로운 연결 생성
-
+        
+        # 한 가지 방식으로만 연결 (MilvusClient 사용)
+        self.client = MilvusClient(
+            uri="http://" + self.ip_addr + ":19530", 
+            port=self.port
+        )
+        
+        # 원래 설정대로 host 이름 유지
         self.conn = connections.connect(
             alias="default", 
-            host='milvus-standalone',   # self.ip_addr 
+            host='milvus-standalone',   # 원래 설정대로 호스트명 사용
             port=self.port
         )
 

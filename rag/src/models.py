@@ -8,6 +8,7 @@ import warnings
 import torch
 import os
 import logging
+import time
 
 # 특정 경고 메시지 무시
 # warnings.filterwarnings("ignore", category=UserWarning, message="TypedStorage is deprecated")
@@ -76,6 +77,12 @@ class EmbModel(Model):
         
              
     def bge_embed_data(self, text):
+        """
+        BGE 모델을 사용하여 텍스트를 임베딩합니다.
+        """
+        start_time = time.time()
+        print(f"[TIMING] 임베딩 시작 - 텍스트 길이: {len(text)}")
+        
         if torch.cuda.is_available():
             logging.info(f"GPU Memory before embedding: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
             
@@ -102,6 +109,10 @@ class EmbModel(Model):
                         
                 logging.info(f"Completed embedding {total_samples} texts in {total_samples//batch_size + (1 if total_samples%batch_size else 0)} batches")
                 
+            end_time = time.time()
+            print(f"[TIMING] 임베딩 완료: {(end_time - start_time):.4f}초")
+            return embeddings
+            
         except RuntimeError as e:
             if "out of memory" in str(e):
                 # OOM 발생 시 배치 사이즈 감소
@@ -110,6 +121,8 @@ class EmbModel(Model):
                 logging.warning(f"GPU OOM detected. Reducing batch size from {original_batch_size} to {batch_size}")
                 
                 # 재시도
+                retry_start = time.time()
+                print(f"[TIMING] 임베딩 재시도 (배치 크기 감소)")
                 if isinstance(text, str):
                     embeddings = self.bge_emb.encode(text, batch_size=batch_size, max_length=self.emb_config['max_length'])['dense_vecs']
                 else:
@@ -119,7 +132,14 @@ class EmbModel(Model):
                         batch_embeddings = self.bge_emb.encode(batch_texts, batch_size=batch_size, max_length=self.emb_config['max_length'])['dense_vecs']
                         embeddings.extend(batch_embeddings)
                         torch.cuda.empty_cache()
+                
+                retry_end = time.time()
+                print(f"[TIMING] 임베딩 재시도 완료: {(retry_end - retry_start):.4f}초")
+                print(f"[TIMING] 총 임베딩 시간 (재시도 포함): {(retry_end - start_time):.4f}초")
+                return embeddings
             else:
+                error_time = time.time()
+                print(f"[TIMING] 임베딩 오류: {(error_time - start_time):.4f}초, 오류: {str(e)}")
                 raise e
             
         if torch.cuda.is_available():

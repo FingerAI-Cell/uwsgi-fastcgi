@@ -5,6 +5,7 @@ from src import EnvManager, InteractManager
 import logging
 import json 
 import os 
+import time
 
 # 로깅 설정
 logging.basicConfig(
@@ -38,6 +39,20 @@ emb_model = env_manager.set_emb_model()
 milvus_data, milvus_meta = env_manager.set_vectordb()
 milvus_db = env_manager.milvus_db
 interact_manager = InteractManager(data_p=env_manager.data_p, vectorenv=milvus_db, vectordb=milvus_data, emb_model=emb_model)
+
+# 자주 사용하는 컬렉션 미리 로드
+@app.before_first_request
+def load_common_collections():
+    logger.info("Preloading common collections...")
+    common_collections = ["news", "congress"]  # 자주 사용하는 컬렉션 목록, 필요에 따라 수정
+    
+    for collection_name in common_collections:
+        try:
+            if collection_name in milvus_db.get_list_collection():
+                interact_manager.get_collection(collection_name)
+                logger.info(f"Preloaded collection: {collection_name}")
+        except Exception as e:
+            logger.error(f"Failed to preload collection {collection_name}: {str(e)}")
 
 # FastCGI 응답 헤더 설정
 @app.after_request
@@ -73,6 +88,9 @@ def show_data():
 
 @app.route('/rag/search', methods=['POST'])
 def search_data():
+    # 전체 API 실행 시간 측정 시작
+    start_time = time.time()
+    
     # JSON 데이터 받기
     request_data = request.get_json()
     if not request_data:
@@ -94,6 +112,8 @@ def search_data():
     title_query = request_data.get('title')      # 제목 검색
     info_filter = request_data.get('info_filter') # info 필터 조건
     tags_filter = request_data.get('tags_filter') # tags 필터 조건
+
+    logger.info(f"[TIMING] 검색 요청 시작: query='{query_text}', top_k={top_k}, domains={domains}")
 
     if not query_text:
         return jsonify({
@@ -136,6 +156,9 @@ def search_data():
                 "search_result": None
             }), 400
     
+    validation_time = time.time()
+    logger.info(f"[TIMING] 파라미터 검증 완료: {(validation_time - start_time):.4f}초")
+    
     # 도메인 유효성 검증
     available_collections = milvus_db.get_list_collection()
     if domains:
@@ -165,30 +188,65 @@ def search_data():
         # JSON 파싱이 필요 없음 (이미 JSON 객체로 받음)
         filter_conditions['tags'] = tags_filter
     
+    filter_time = time.time()
+    logger.info(f"[TIMING] 필터 조건 준비 완료: {(filter_time - validation_time):.4f}초")
+    
     try:
         # 각 도메인별 검색 결과 수집
         all_results = []
+        search_time_details = {}
         searched_domains = domains if domains else [available_collections[0]]  # 도메인이 지정되지 않으면 첫 번째 도메인만 사용
         
+        domain_start_time = time.time()
+        logger.info(f"[TIMING] 도메인 검색 시작: {searched_domains}")
+        
         for domain in searched_domains:
+            domain_timer = time.time()
+            logger.info(f"[TIMING] 도메인 '{domain}' 검색 시작")
+            
             domain_filter_conditions = dict(filter_conditions)
             domain_filter_conditions['domain'] = domain
             
+            # 검색 실행 시간 측정
+            search_start = time.time()
             results = interact_manager.retrieve_data(
                 query_text, 
                 top_k, 
                 filter_conditions=domain_filter_conditions
             )
+            search_end = time.time()
+            
+            search_time = search_end - search_start
+            search_time_details[domain] = {
+                "time": search_time,
+                "results_count": len(results)
+            }
+            logger.info(f"[TIMING] 도메인 '{domain}' 검색 완료: {search_time:.4f}초, 결과 {len(results)}개")
             
             # 도메인 정보 추가
             for result in results:
                 result['domain'] = domain
             
             all_results.extend(results)
+            
+            domain_end_timer = time.time()
+            logger.info(f"[TIMING] 도메인 '{domain}' 전체 처리: {(domain_end_timer - domain_timer):.4f}초")
+        
+        domain_end_time = time.time()
+        logger.info(f"[TIMING] 모든 도메인 검색 완료: {(domain_end_time - domain_start_time):.4f}초, 총 결과 {len(all_results)}개")
+        
+        # 결과 정렬 시작
+        sort_start = time.time()
         
         # 전체 결과를 score 기준으로 재정렬하고 top_k개만 선택
         all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
         final_results = all_results[:top_k]
+        
+        sort_end = time.time()
+        logger.info(f"[TIMING] 결과 정렬 완료: {(sort_end - sort_start):.4f}초")
+        
+        # 응답 포맷팅 시작
+        format_start = time.time()
         
         # 각 결과에서 불필요한 필드 제거 및 정리
         cleaned_results = []
@@ -207,6 +265,10 @@ def search_data():
             }
             cleaned_results.append(cleaned_result)
         
+        format_end = time.time()
+        logger.info(f"[TIMING] 응답 포맷팅 완료: {(format_end - format_start):.4f}초")
+        
+        # 응답 생성
         response_data = {
             "result_code": "F000000",
             "message": "검색이 성공적으로 완료되었습니다.",
@@ -218,18 +280,31 @@ def search_data():
             },
             "total_results": len(all_results),
             "returned_results": len(cleaned_results),
-            "search_result": cleaned_results
+            "search_result": cleaned_results,
+            "performance": {
+                "total_time": time.time() - start_time,
+                "domain_details": search_time_details
+            }
         }
+        
+        end_time = time.time()
+        total_time = end_time - start_time
+        logger.info(f"[TIMING] 검색 API 완료: 총 {total_time:.4f}초 소요")
         
         return Response(json.dumps(response_data, ensure_ascii=False), 
                       content_type="application/json; charset=utf-8")
                       
     except Exception as e:
-        logger.error(f"Search error: {str(e)}")
+        error_time = time.time()
+        total_time = error_time - start_time
+        logger.error(f"[TIMING] 검색 오류 발생: {total_time:.4f}초 소요, 오류: {str(e)}")
         return jsonify({
             "result_code": "F000005",
             "message": f"검색 중 오류가 발생했습니다: {str(e)}",
-            "search_result": None
+            "search_result": None,
+            "performance": {
+                "total_time": total_time
+            }
         }), 500
 
 @app.route('/rag/insert', methods=['POST'])

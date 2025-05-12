@@ -7,6 +7,7 @@ import os
 from pymilvus import utility
 import re
 import ast
+import time
 
 class EnvManager():
     def __init__(self, args):
@@ -49,6 +50,32 @@ class InteractManager:
         self.response_model = response_model 
         self.logger = logger
         self.document_metadata = {}  # 문서 메타데이터 저장을 위한 딕셔너리 초기화
+        self.loaded_collections = {}  # 로드된 컬렉션 캐싱
+    
+    def get_collection(self, collection_name):
+        """컬렉션을 가져오거나 로드합니다. 이미 로드된 컬렉션은 재사용합니다."""
+        if collection_name in self.loaded_collections:
+            print(f"[DEBUG] Reusing cached collection: {collection_name}")
+            return self.loaded_collections[collection_name]
+        
+        try:
+            print(f"[DEBUG] Loading collection: {collection_name}")
+            collection = Collection(collection_name)
+            collection.load()
+            self.loaded_collections[collection_name] = collection
+            return collection
+        except Exception as e:
+            print(f"[ERROR] Error loading collection {collection_name}: {str(e)}")
+            raise
+
+    def parse_json_field(self, field_value):
+        """JSON 문자열을 객체로 변환하는 유틸리티 함수"""
+        if isinstance(field_value, str):
+            try:
+                return json.loads(field_value)
+            except:
+                return field_value
+        return field_value
     
     def create_domain(self, domain_name):
         '''
@@ -227,9 +254,14 @@ class InteractManager:
                 - info: info 필드 내 검색 조건
                 - tags: tags 필드 내 검색 조건
         """
+        start_time = time.time()
+        
         print(f"[DEBUG] retrieve_data: query={query}, top_k={top_k}, filter_conditions={filter_conditions}")
         cleansed_text = self.data_p.cleanse_text(query)
         print(f"[DEBUG] cleansed_text={cleansed_text}")
+        
+        cleanse_time = time.time()
+        print(f"[TIMING] 텍스트 전처리 완료: {(cleanse_time - start_time):.4f}초")
         
         # 기본 출력 필드 설정
         output_fields = ["doc_id", "raw_doc_id", "passage_id", "domain", "title", "author", "text", "info", "tags"]
@@ -253,22 +285,34 @@ class InteractManager:
         print(f"[DEBUG] Using domain: {domain}")
         
         # 컬렉션이 있는지 확인
+        collection_check_start = time.time()
         collections = utility.list_collections()
         print(f"[DEBUG] Available collections: {collections}")
         
         if domain not in collections:
             print(f"[DEBUG] Collection {domain} not found")
             return []
+        
+        collection_check_end = time.time()
+        print(f"[TIMING] 컬렉션 확인 완료: {(collection_check_end - collection_check_start):.4f}초")
             
-        # 컬렉션을 로드하고 사용
-        collection = Collection(domain)
-        collection.load()
-        print(f"[DEBUG] Collection {domain} loaded, num_entities: {collection.num_entities}")
+        # 캐싱된 컬렉션 가져오기
+        collection_load_start = time.time()
+        try:
+            collection = self.get_collection(domain)
+            print(f"[DEBUG] Collection {domain} loaded, num_entities: {collection.num_entities}")
+        except Exception as e:
+            print(f"[ERROR] Failed to load collection {domain}: {str(e)}")
+            return []
+        
+        collection_load_end = time.time()
+        print(f"[TIMING] 컬렉션 로드 완료: {(collection_load_end - collection_load_start):.4f}초")
         
         if domain:
             expr_parts.append(f"domain == '{domain}'")
         
         # 날짜 범위 필터 (YYYYMMDD 형식 문자열 비교)
+        expr_build_start = time.time()
         if filter_conditions and 'date_range' in filter_conditions:
             date_range = filter_conditions['date_range']
             # 날짜는 문자열 비교를 사용하되, YYYYMMDD 형식이므로 직접 비교 가능
@@ -309,10 +353,18 @@ class InteractManager:
         expr = " && ".join(expr_parts) if expr_parts else None
         print(f"[DEBUG] Final search expression: {expr}")
         
+        expr_build_end = time.time()
+        print(f"[TIMING] 검색 표현식 구성 완료: {(expr_build_end - expr_build_start):.4f}초")
+        
         # 벡터 검색 수행
+        embed_start = time.time()
         query_emb = self.emb_model.bge_embed_data(cleansed_text)
         print(f"[DEBUG] Generated query embedding, length: {len(query_emb)}")
         
+        embed_end = time.time()
+        print(f"[TIMING] 임베딩 생성 완료: {(embed_end - embed_start):.4f}초")
+        
+        search_params_start = time.time()
         self.vectordb.set_search_params(
             query_emb, 
             limit=top_k, 
@@ -321,29 +373,40 @@ class InteractManager:
         )
         print(f"[DEBUG] Search params: {self.vectordb.search_params}")
         
+        search_params_end = time.time()
+        print(f"[TIMING] 검색 파라미터 설정 완료: {(search_params_end - search_params_start):.4f}초")
+        
         try:
+            search_exec_start = time.time()
             search_result = self.vectordb.search_data(collection, self.vectordb.search_params)
             print(f"[DEBUG] Search result: {search_result}")
+            
+            search_exec_end = time.time()
+            print(f"[TIMING] 검색 실행 완료: {(search_exec_end - search_exec_start):.4f}초")
+            
+            decode_start = time.time()
             results = self.vectordb.decode_search_result(search_result, include_metadata=True)
             
-            # info와 tags JSON 문자열을 객체로 변환
+            # info와 tags JSON 문자열을 객체로 변환 (개선된 방식)
             for result in results:
-                if isinstance(result.get('info'), str):
-                    try:
-                        result['info'] = json.loads(result['info'])
-                    except:
-                        pass  # 파싱 실패 시 원본 유지
-                        
-                if isinstance(result.get('tags'), str):
-                    try:
-                        result['tags'] = json.loads(result['tags'])
-                    except:
-                        pass  # 파싱 실패 시 원본 유지
+                result['info'] = self.parse_json_field(result.get('info'))
+                result['tags'] = self.parse_json_field(result.get('tags'))
+            
+            decode_end = time.time()
+            print(f"[TIMING] 결과 디코딩 완료: {(decode_end - decode_start):.4f}초")
             
             print(f"[DEBUG] Decoded results: {results}")
+            
+            end_time = time.time()
+            total_time = end_time - start_time
+            print(f"[TIMING] 전체 검색 처리 완료: 총 {total_time:.4f}초 소요")
+            
             return results
             
         except Exception as e:
+            error_time = time.time()
+            total_time = error_time - start_time
+            print(f"[TIMING] 검색 오류 발생: {total_time:.4f}초 소요, 오류: {str(e)}")
             print(f"[DEBUG] Search error: {str(e)}")
             return []
 
