@@ -853,13 +853,28 @@ curl -G http://localhost/reranker/enhanced-search \
 | 설명 | 단일 쿼리와 결과 목록을 재랭킹 |
 
 ### 요청 파라미터
-*Query*: `top_k`(N)
+*Query*:
+| 이름 | 필수 | Type | 기본값 | 설명 |
+|------|------|------|------|------|
+| top_k | N | Integer | - | 반환할 최대 결과 수 |
 
-*Body* (SearchResultModel)
+*Body*:
 | 필드 | 필수 | Type | 설명 |
 |------|------|------|------|
-| query | Y | String | 쿼리 |
-| results | Y | Array | 문서 배열 |
+| query | Y | String | 검색 쿼리 |
+| results | Y | Array | 재랭킹할 문서 배열 |
+| total | N | Integer | 전체 결과 수 |
+| reranked | N | Boolean | 이미 재랭킹 되었는지 여부 |
+
+각 결과 객체의 구조:
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| passage_id | N | Any | 패시지 ID |
+| doc_id | N | String | 문서 ID |
+| text | Y | String | 패시지 텍스트 내용 |
+| score | N | Float | 원본 점수 |
+| position | N | Integer | 원본 위치 |
+| metadata | N | Object | 메타데이터 객체 |
 
 ### 요청 예시
 ```bash
@@ -878,13 +893,41 @@ curl -X POST "http://localhost/reranker/rerank?top_k=3" \
           "author": "삼성전자",
           "tags": { "date": "20240315" }
         }
+      },
+      {
+        "passage_id": 1,
+        "doc_id": "20240310-가상현실-동향",
+        "text": "가상현실 기술은 게임뿐 아니라 교육, 의료 등 다양한 분야로 확장되고 있다...",
+        "score": 0.85,
+        "metadata": {
+          "title": "가상현실 동향",
+          "author": "LG전자",
+          "tags": { "date": "20240310" }
+        }
       }
     ]
   }'
 ```
 
 ### 응답 파라미터
-SearchResultModel + `reranked: true`
+| 필드 | Type | 설명 |
+|------|------|------|
+| query | String | 요청한 검색 쿼리 |
+| results | Array | 재랭킹된 결과 배열 |
+| total | Integer | 결과 총 개수 |
+| reranked | Boolean | 재랭킹 완료 여부 (항상 true) |
+| processing_time | Float | 처리 소요 시간(초) |
+
+각 결과 객체의 구조:
+| 필드 | Type | 설명 |
+|------|------|------|
+| passage_id | Any | 패시지 ID |
+| doc_id | String | 문서 ID |
+| text | String | 패시지 텍스트 내용 |
+| score | Float | 재랭킹 점수 (높을수록 관련성 높음) |
+| rerank_score | Float | 재랭킹 점수 (score와 동일) |
+| rerank_position | Integer | 재랭킹 후 위치 |
+| metadata | Object | 원본 메타데이터 |
 
 ### 성공 응답 예시
 ```json
@@ -892,20 +935,50 @@ SearchResultModel + `reranked: true`
   "query": "메타버스 최신 동향",
   "results": [
     {
+      "passage_id": 1,
+      "doc_id": "20240310-가상현실-동향",
+      "text": "가상현실 기술은 게임뿐 아니라 교육, 의료 등 다양한 분야로 확장되고 있다...",
+      "score": 0.98,
+      "rerank_score": 0.98,
+      "rerank_position": 0,
+      "metadata": {
+        "title": "가상현실 동향",
+        "author": "LG전자",
+        "tags": { "date": "20240310" }
+      }
+    },
+    {
       "passage_id": 0,
       "doc_id": "20240315-메타버스-뉴스",
-      "text": "메타버스는...",
-      "score": 0.98
+      "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
+      "score": 0.92,
+      "rerank_score": 0.92,
+      "rerank_position": 1,
+      "metadata": {
+        "title": "메타버스 뉴스",
+        "author": "삼성전자",
+        "tags": { "date": "20240315" }
+      }
     }
   ],
-  "total": 1,
-  "reranked": true
+  "total": 2,
+  "reranked": true,
+  "processing_time": 0.153
 }
 ```
 
-### 실패 응답 예시 (Body 누락)
+### 실패 응답 예시 (요청 본문 누락)
 ```json
-{ "error": "No JSON data provided" }
+{
+  "error": "No JSON data provided"
+}
+```
+
+### 실패 응답 예시 (잘못된 형식)
+```json
+{
+  "error": "Invalid input format: 1 validation error for SearchResultModel\nquery\n  field required (type=value_error.missing)"
+}
 ```
 
 ---
@@ -920,9 +993,30 @@ SearchResultModel + `reranked: true`
 | 설명 | 여러 쿼리를 한 번에 재랭킹 |
 
 ### 요청 파라미터
-*Query*: `top_k`(N)
+*Query*:
+| 이름 | 필수 | Type | 기본값 | 설명 |
+|------|------|------|------|------|
+| top_k | N | Integer | - | 각 쿼리별 반환할 최대 결과 수 |
 
-*Body*: `[ SearchResultModel, ... ]`
+*Body*:
+요청 본문은 `SearchResultModel` 객체의 배열입니다. 각 객체는 다음 구조를 가집니다:
+
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| query | Y | String | 검색 쿼리 |
+| results | Y | Array | 재랭킹할 문서 배열 |
+| total | N | Integer | 전체 결과 수 |
+| reranked | N | Boolean | 이미 재랭킹 되었는지 여부 |
+
+각 결과 객체의 구조:
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| passage_id | N | Any | 패시지 ID |
+| doc_id | N | String | 문서 ID |
+| text | Y | String | 패시지 텍스트 내용 |
+| score | N | Float | 원본 점수 |
+| position | N | Integer | 원본 위치 |
+| metadata | N | Object | 메타데이터 객체 |
 
 ### 요청 예시
 ```bash
@@ -931,29 +1025,127 @@ curl -X POST "http://localhost/reranker/batch_rerank?top_k=5" \
   -d '[
     {
       "query": "메타버스 최신 동향",
-      "results": [ { "doc_id": "20240315-메타버스-뉴스", "text": "..." } ]
+      "results": [
+        {
+          "passage_id": 0,
+          "doc_id": "20240315-메타버스-뉴스",
+          "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
+          "score": 0.95,
+          "metadata": {
+            "title": "메타버스 뉴스",
+            "author": "삼성전자",
+            "tags": { "date": "20240315" }
+          }
+        },
+        {
+          "passage_id": 1,
+          "doc_id": "20240310-메타버스-기술",
+          "text": "메타버스 기술은 AR, VR 등의 발전과 함께 급속도로 성장하고 있다...",
+          "score": 0.85,
+          "metadata": {
+            "title": "메타버스 기술",
+            "author": "LG전자",
+            "tags": { "date": "20240310" }
+          }
+        }
+      ]
     },
     {
       "query": "가상현실 시장 전망",
-      "results": [ { "doc_id": "20240312-VR-뉴스", "text": "..." } ]
+      "results": [
+        {
+          "passage_id": 0,
+          "doc_id": "20240312-VR-뉴스",
+          "text": "가상현실 시장은 2024년 급격한 성장이 예상된다...",
+          "score": 0.92,
+          "metadata": {
+            "title": "VR 시장 전망",
+            "author": "현대전자",
+            "tags": { "date": "20240312" }
+          }
+        }
+      ]
     }
   ]'
 ```
 
 ### 응답 파라미터
-배열 – 각 결과에 `total`, `reranked`
+응답은 각 쿼리에 대한 재랭킹 결과 배열입니다. 각 항목은 다음 구조를 가집니다:
+
+| 필드 | Type | 설명 |
+|------|------|------|
+| query | String | 요청한 검색 쿼리 |
+| results | Array | 재랭킹된 결과 배열 |
+| total | Integer | 결과 총 개수 |
+| reranked | Boolean | 재랭킹 완료 여부 (항상 true) |
+| processing_time | Float | 처리 소요 시간(초) |
 
 ### 성공 응답 예시
 ```json
 [
-  { "query": "메타버스 최신 동향", "total": 1, "reranked": true },
-  { "query": "가상현실 시장 전망", "total": 1, "reranked": true }
+  {
+    "query": "메타버스 최신 동향",
+    "results": [
+      {
+        "passage_id": 0,
+        "doc_id": "20240315-메타버스-뉴스",
+        "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
+        "score": 0.97,
+        "rerank_score": 0.97,
+        "rerank_position": 0,
+        "metadata": {
+          "title": "메타버스 뉴스",
+          "author": "삼성전자",
+          "tags": { "date": "20240315" }
+        }
+      },
+      {
+        "passage_id": 1,
+        "doc_id": "20240310-메타버스-기술",
+        "text": "메타버스 기술은 AR, VR 등의 발전과 함께 급속도로 성장하고 있다...",
+        "score": 0.89,
+        "rerank_score": 0.89,
+        "rerank_position": 1,
+        "metadata": {
+          "title": "메타버스 기술",
+          "author": "LG전자",
+          "tags": { "date": "20240310" }
+        }
+      }
+    ],
+    "total": 2,
+    "reranked": true,
+    "processing_time": 0.145
+  },
+  {
+    "query": "가상현실 시장 전망",
+    "results": [
+      {
+        "passage_id": 0,
+        "doc_id": "20240312-VR-뉴스",
+        "text": "가상현실 시장은 2024년 급격한 성장이 예상된다...",
+        "score": 0.92,
+        "rerank_score": 0.92,
+        "rerank_position": 0,
+        "metadata": {
+          "title": "VR 시장 전망",
+          "author": "현대전자",
+          "tags": { "date": "20240312" }
+        }
+      }
+    ],
+    "total": 1,
+    "reranked": true,
+    "processing_time": 0.098
+  }
 ]
 ```
 
 ### 실패 응답 예시
 ```json
-{ "error": "Batch reranking failed: ..." }
+{
+  "error": "Batch reranking failed: Invalid input format"
+}
 ```
 
 ---
