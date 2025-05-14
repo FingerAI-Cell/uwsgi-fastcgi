@@ -1,6 +1,8 @@
 import os
 import time
 import json
+import fcntl  # 파일 잠금을 위한 모듈 추가
+import signal
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
@@ -11,8 +13,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from dotenv import load_dotenv
 import threading
 import json
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 
 # 환경 변수 로드
 load_dotenv()
@@ -34,7 +34,8 @@ DB_NAME = os.environ.get('MYSQL_DATABASE', 'api_stats')
 
 # 로그 파일 설정
 NGINX_LOG_PATH = os.environ.get('NGINX_LOG_PATH', '/var/log/nginx/api-stats.log')
-LOG_CHECK_INTERVAL = int(os.environ.get('LOG_CHECK_INTERVAL', 10))  # 초 단위
+LOCK_FILE_PATH = os.environ.get('LOCK_FILE_PATH', '/tmp/stats_log_processor.lock')
+LOG_CHECK_INTERVAL = int(os.environ.get('LOG_CHECK_INTERVAL', 5))  # 5초 간격으로 변경
 
 # 데이터베이스 연결 문자열
 DATABASE_URI = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
@@ -43,10 +44,11 @@ DATABASE_URI = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB
 app = Flask(__name__)
 CORS(app)
 
-# 파일 시스템 감시 설정
-observer = None
+# 파일 시스템 감시 설정 변경
 log_processor = None
 log_thread = None
+lock_file = None
+has_lock = False
 
 # 애플리케이션 초기화 함수
 def init_app(app):
@@ -64,11 +66,27 @@ def init_app(app):
 
 # 애플리케이션 종료 시 리소스 정리
 def cleanup():
-    if observer and observer.is_alive():
-        observer.stop()
-        observer.join()
+    global lock_file, has_lock
     if log_processor:
         log_processor.stop()
+    # 파일 잠금 해제
+    if lock_file and has_lock:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            lock_file.close()
+            logger.info("파일 잠금 해제 완료")
+        except Exception as e:
+            logger.error(f"파일 잠금 해제 중 오류: {e}")
+
+# 종료 시그널 핸들러
+def signal_handler(sig, frame):
+    logger.info("종료 시그널 수신, 리소스 정리 중...")
+    cleanup()
+    os._exit(0)
+
+# 종료 시그널 처리
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
 
 # SQLAlchemy 엔진 생성
 engine = None
@@ -276,23 +294,51 @@ class LogProcessor:
         """처리 중지"""
         self.should_run = False
 
-# 파일 시스템 이벤트 핸들러
-class LogFileHandler(FileSystemEventHandler):
-    def __init__(self, log_processor):
-        self.log_processor = log_processor
-        super().__init__()
+def acquire_lock():
+    """
+    파일 잠금을 획득하여 여러 워커가 동시에 로그를 처리하지 않도록 합니다.
+    잠금을 획득하면 True, 그렇지 않으면 False를 반환합니다.
+    """
+    global lock_file, has_lock
     
-    def on_modified(self, event):
-        if event.src_path == self.log_processor.log_file_path:
-            self.log_processor.process_new_logs()
+    try:
+        # 잠금 파일 생성 또는 열기
+        lock_file = open(LOCK_FILE_PATH, 'w')
+        
+        # 비차단 잠금 시도
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        
+        # 잠금 획득 성공
+        has_lock = True
+        logger.info("로그 처리기 잠금 획득 성공")
+        return True
+        
+    except IOError:
+        # 이미 다른 프로세스가 잠금을 보유하고 있음
+        if lock_file:
+            lock_file.close()
+            lock_file = None
+        logger.info("다른 프로세스가 이미 로그 처리 중입니다.")
+        return False
+    except Exception as e:
+        logger.error(f"파일 잠금 획득 중 오류: {e}")
+        if lock_file:
+            lock_file.close()
+            lock_file = None
+        return False
 
 def start_log_monitoring():
     """로그 모니터링 시작"""
-    global log_processor, log_thread, observer
+    global log_processor, log_thread
     
     # 이미 실행 중인 경우 중복 실행 방지
     if log_thread and log_thread.is_alive():
         logger.info("로그 모니터링이 이미 실행 중입니다.")
+        return
+    
+    # 잠금 획득 시도
+    if not acquire_lock():
+        logger.info("이 워커는 로그 처리를 건너뜁니다.")
         return
     
     # 로그 디렉토리가 존재하는지 확인
@@ -308,14 +354,7 @@ def start_log_monitoring():
         # 로그 처리 스레드 시작
         log_thread = threading.Thread(target=log_processor.run, daemon=True)
         log_thread.start()
-        logger.info("로그 처리 스레드 시작")
-        
-        # 파일 시스템 감시 시작
-        event_handler = LogFileHandler(log_processor)
-        observer = Observer()
-        observer.schedule(event_handler, log_dir, recursive=False)
-        observer.start()
-        logger.info(f"로그 파일 감시 시작: {NGINX_LOG_PATH}")
+        logger.info("로그 처리 스레드 시작, 주기적 확인 간격: {}초".format(LOG_CHECK_INTERVAL))
     
     except Exception as e:
         logger.error(f"로그 모니터링 시작 중 오류: {e}")
@@ -330,30 +369,6 @@ def health_check():
         "database": db_status,
         "timestamp": datetime.now().isoformat()
     })
-
-# API 통계 로깅 엔드포인트 - Nginx에서 mirror 지시문을 통해 요청됨
-@app.route('/api/log', methods=['GET', 'POST'])
-def log_api():
-    try:
-        # 요청 정보 추출 (Nginx의 proxy_set_header에서 전달된 헤더 사용)
-        endpoint = request.headers.get('X-Original-URI', '').split('?')[0]
-        method = request.headers.get('X-Original-Method', request.method)
-        status_code = int(request.headers.get('X-Response-Status', 200))
-        response_time = float(request.headers.get('X-Response-Time', 0))
-        user_agent = request.headers.get('User-Agent', '')
-        ip_address = request.headers.get('X-Real-IP', request.remote_addr)
-        
-        # 요청 크기 계산
-        request_size = len(request.get_data()) if request.get_data() else None
-        
-        # 비동기로 로깅 (실제로는 백그라운드 작업으로 처리하는 것이 좋음)
-        log_api_call(endpoint, method, status_code, response_time, request_size, None, user_agent, ip_address)
-        
-        # 로깅 요청에는 204 No Content로 응답
-        return "", 204
-    except Exception as e:
-        logger.error(f"로깅 중 오류 발생: {e}")
-        return "", 204  # 오류가 발생해도 원래 요청에 영향을 주지 않도록 204 반환
 
 # 통계 조회 API
 @app.route('/api/stats', methods=['GET'])

@@ -279,12 +279,16 @@ services:
       - ./stats:/app
       - ./volumes/logs/stats:/var/log/stats
       - ./volumes/logs/nginx:/var/log/nginx  # nginx 로그 디렉토리 공유
+    ports:
+      - "9033:5000"  # 외부 9033 포트에서 내부 5000 포트로 매핑
     environment:
       - MYSQL_HOST=stats-db
       - MYSQL_PORT=3306
       - MYSQL_USER=stats_user
       - MYSQL_PASSWORD=stats_password
       - MYSQL_DATABASE=api_stats
+      - UWSGI_PROCESSES=1  # 워커 수를 1로 설정
+      - LOG_CHECK_INTERVAL=5  # 로그 확인 주기 설정 (5초)
     depends_on:
       - stats-db
     networks:
