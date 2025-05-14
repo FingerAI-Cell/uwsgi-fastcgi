@@ -110,14 +110,22 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB 최대 요청 크기
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False  # 압축 JSON 응답
 app.config['JSONIFY_MIMETYPE'] = 'application/json; charset=utf-8'  # 명시적 MIME 타입
 
-# 응답 압축 활성화 (Flask-Compress가 설치된 경우)
-try:
-    from flask_compress import Compress
-    compress = Compress()
-    compress.init_app(app)
-    logger.info("Response compression enabled")
-except ImportError:
-    logger.info("Flask-Compress not installed, response compression disabled")
+# 응답 압축 비활성화 - 대용량 응답 처리 시 압축으로 인한 지연 방지
+# Flask-Compress 사용하지 않음
+logger.info("Response compression disabled for better performance")
+
+# WSGI 응답 버퍼링 비활성화
+os.environ['PYTHONUNBUFFERED'] = '1'
+os.environ['wsgi.response_buffering'] = 'false'
+
+# 스레드 최적화
+import threading
+threading.stack_size(128 * 1024)  # 스레드 스택 크기 감소
+
+# 응답 속도 최적화를 위한 설정
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+app.config['TRAP_HTTP_EXCEPTIONS'] = False
+app.config['PRESERVE_CONTEXT_ON_EXCEPTION'] = False
 
 # 서비스 인스턴스 생성
 reranker_service = None
@@ -139,21 +147,33 @@ rag_session.mount('https://', adapter)
 # FastCGI 응답 헤더 설정
 @app.after_request
 def add_header(response):
+    """응답 헤더 최적화"""
+    # 필수 보안 헤더만 유지
     response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
     
-    # 캐시 제어 헤더 추가
+    # FastCGI 응답 최적화 헤더
+    response.headers['X-Accel-Buffering'] = 'no'  # nginx 버퍼링 비활성화
+    
+    # 캐시 제어 헤더 최적화
     if request.path == '/reranker/health':
         # 헬스체크는 30초 캐싱
         response.headers['Cache-Control'] = 'public, max-age=30'
     else:
         # API 응답은 캐싱하지 않음
-        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Cache-Control'] = 'private, no-cache, no-store, must-revalidate'
     
-    # 성능 최적화를 위한 헤더
-    response.headers['Connection'] = 'keep-alive'
-    response.headers['Keep-Alive'] = 'timeout=5, max=1000'
+    # 응답 성능 최적화 헤더
+    response.headers['Connection'] = 'close'  # 연결 즉시 종료
+    
+    # 응답 압축 비활성화
+    response.headers.pop('Content-Encoding', None)
+    
+    # Transfer-Encoding 최적화
+    response.headers.pop('Transfer-Encoding', None)
+    
+    # 콘텐츠 길이 명시 (chunked 인코딩 방지)
+    if response.data and 'Content-Length' not in response.headers:
+        response.headers['Content-Length'] = str(len(response.data))
     
     return response
 
@@ -353,46 +373,121 @@ def rerank():
         # Get top_k parameter from query string
         top_k = request.args.get('top_k', type=int)
         
-        # Get request body
-        data = request.get_json()
-        if not data:
-            return jsonify({
-                "error": "No JSON data provided"
-            }), 400
-            
-        # Validate input
+        # Get request body - 최적화: 데이터를 한 번만 로드
         try:
-            search_result = SearchResultModel(**data)
+            if request.is_json:
+                data = request.get_json(force=False, silent=True)
+            else:
+                data = json.loads(request.data.decode('utf-8'))
         except Exception as e:
-            return jsonify({
-                "error": f"Invalid input format: {str(e)}"
-            }), 400
+            logger.error(f"JSON 파싱 오류: {str(e)}")
+            return Response(
+                json.dumps({"error": "Invalid JSON data"}, ensure_ascii=False),
+                status=400,
+                mimetype='application/json; charset=utf-8'
+            )
             
-        # Process reranking
-        reranked = get_reranker_service().process_search_results(
-            search_result.query,
-            search_result.dict(),
+        if not data:
+            return Response(
+                json.dumps({"error": "No data provided"}, ensure_ascii=False),
+                status=400,
+                mimetype='application/json; charset=utf-8'
+            )
+            
+        # Validate input - 최적화: 간소화된 검증
+        try:
+            if not isinstance(data, dict) or 'query' not in data or 'results' not in data:
+                raise ValueError("Missing required fields: query, results")
+                
+            query = data['query']
+            results = data['results']
+            
+            if not isinstance(results, list):
+                raise ValueError("Results must be a list")
+                
+            # 데이터 모델 변환 없이 직접 처리
+            search_result = {
+                "query": query,
+                "results": results,
+                "total": len(results),
+                "reranked": False
+            }
+        except Exception as e:
+            return Response(
+                json.dumps({"error": f"Invalid input format: {str(e)}"}, ensure_ascii=False),
+                status=400,
+                mimetype='application/json; charset=utf-8'
+            )
+            
+        # Process reranking - 서비스 인스턴스 가져오기
+        reranker_service = get_reranker_service()
+        
+        # 재랭킹 처리 시간 측정
+        rerank_start_time = time.time()
+        reranked = reranker_service.process_search_results(
+            search_result["query"],
+            search_result,
             top_k
         )
+        rerank_time = time.time() - rerank_start_time
+        logger.info(f"Reranking processing time: {rerank_time:.3f} seconds")
         
         # 전체 요청 처리 시간 계산
         total_elapsed_time = time.time() - total_start_time
         logger.info(f"Total rerank endpoint processing time: {total_elapsed_time:.3f} seconds")
         
-        # 응답에 전체 처리 시간 추가
+        # 응답에 전체 처리 시간 추가 - 최적화: 필요한 정보만 포함
         if isinstance(reranked, dict):
             reranked["total_processing_time"] = total_elapsed_time
+            
+            # 불필요한 큰 데이터 제거
+            if "performance" in reranked and "steps" in reranked["performance"]:
+                reranked["performance"]["steps"] = None
+            if "profiler_summary" in reranked:
+                del reranked["profiler_summary"]
         
-        return Response(
-            json.dumps(reranked, ensure_ascii=False),
+        # 응답 직렬화 시간 측정
+        serialize_start = time.time()
+        
+        # 최적화된 JSON 직렬화
+        try:
+            # ujson 사용 가능하면 ujson으로 직렬화
+            response_data = json.dumps(reranked, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"JSON 직렬화 오류: {str(e)}")
+            # 폴백: 기본 json 사용
+            import json as stdlib_json
+            response_data = stdlib_json.dumps(reranked, ensure_ascii=False)
+        
+        serialize_time = time.time() - serialize_start
+        logger.info(f"JSON serialization time: {serialize_time:.3f} seconds")
+        
+        # 응답 생성 및 반환 - 최적화: 압축 비활성화
+        response = Response(
+            response_data,
             mimetype='application/json; charset=utf-8'
         )
         
+        # 응답 헤더 최적화
+        response.headers['X-Processing-Time'] = str(total_elapsed_time)
+        response.headers['X-Reranking-Time'] = str(rerank_time)
+        response.headers['X-Serialization-Time'] = str(serialize_time)
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Content-Length'] = str(len(response_data))
+        
+        # 응답 생성 완료 시간 로깅
+        response_time = time.time() - total_start_time
+        logger.info(f"Total response generation time: {response_time:.3f} seconds")
+        
+        return response
+        
     except Exception as e:
-        logger.error(f"Reranking failed: {str(e)}")
-        return jsonify({
-            "error": f"Reranking failed: {str(e)}"
-        }), 500
+        logger.error(f"Reranking failed: {str(e)}", exc_info=True)
+        return Response(
+            json.dumps({"error": f"Reranking failed: {str(e)}"}, ensure_ascii=False),
+            status=500,
+            mimetype='application/json; charset=utf-8'
+        )
 
 
 @app.route("/reranker/batch_rerank", methods=["POST"])

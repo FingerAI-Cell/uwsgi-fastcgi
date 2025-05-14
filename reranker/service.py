@@ -588,13 +588,21 @@ class RerankerService:
             # Convert back to original format
             processed_results = []
             for result in reranked_results:
+                # 필수 필드만 포함하여 처리 (메모리 및 직렬화 시간 절약)
                 processed_result = {
                     "passage_id": result["id"],
-                    "doc_id": result["meta"]["doc_id"],
+                    "doc_id": result["meta"].get("doc_id"),
                     "text": result["text"],
-                    "score": float(result["score"]),
-                    "metadata": result["meta"]
+                    "score": float(result["score"])
                 }
+                
+                # 메타데이터는 필요한 경우에만 추가
+                if len(result["meta"]) > 1:  # doc_id 외에 메타데이터가 있는 경우
+                    processed_result["metadata"] = {}
+                    for k, v in result["meta"].items():
+                        if k != "doc_id" and v is not None:
+                            processed_result["metadata"][k] = v
+                
                 processed_results.append(processed_result)
             
             log_step("결과 포맷 변환")
@@ -603,33 +611,21 @@ class RerankerService:
             if top_k is not None:
                 processed_results = processed_results[:top_k]
             
-            # 결과 준비
+            # 결과 준비 - 최적화: 필수 필드만 포함
             result = {
                 "query": query,
                 "results": processed_results,
                 "total": len(processed_results),
-                "reranked": True
+                "reranked": True,
+                "processing_time": time.time() - start_time,
+                "cached": False
             }
-            
-            # 최종 성능 측정
-            elapsed_time = time.time() - start_time
-            result["processing_time"] = elapsed_time
-            result["cached"] = False
-            result["sync_time"] = sync_time
-            result["performance"] = {
-                "total_time": elapsed_time,
-                "passages_per_second": total_passages / (elapsed_time - sync_time) if elapsed_time > sync_time else 0,
-                "steps": timestamps["steps"]
-            }
-            
-            # 프로파일링 결과가 있으면 추가
-            if profiler_output:
-                result["profiler_summary"] = str(profiler_output)
             
             # CUDA 최종 동기화
             sync_cuda()
             
             # 성능 로그 기록
+            elapsed_time = time.time() - start_time
             logger.info(f"Reranking completed in {elapsed_time:.3f} seconds for {total_passages} passages")
             logger.info(f"CUDA synchronization overhead: {sync_time:.3f} seconds")
             logger.info(f"Effective throughput: {total_passages / (elapsed_time - sync_time):.1f} passages/second")
