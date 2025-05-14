@@ -120,9 +120,31 @@ class LogProcessor:
         self.log_file_path = log_file_path
         self.last_position = 0
         self.should_run = True
+        self.initialized = False
+        # 최근 처리한 로그 ID를 저장하기 위한 세트
+        self.processed_logs = set()
         
+    def initialize(self):
+        """
+        로그 파일이 존재하면 파일의 끝으로 이동하여 새로운 로그만 처리하도록 초기화합니다.
+        이미 처리된 기존 로그를 다시 처리하지 않도록 합니다.
+        """
+        if os.path.exists(self.log_file_path):
+            try:
+                with open(self.log_file_path, 'r') as f:
+                    # 파일의 끝으로 이동
+                    f.seek(0, 2)  # 2는 파일의 끝에서부터의 오프셋을 의미
+                    self.last_position = f.tell()
+                self.initialized = True
+                logger.info(f"로그 파일 초기화 완료: {self.log_file_path}, 위치: {self.last_position}")
+            except Exception as e:
+                logger.error(f"로그 파일 초기화 중 오류: {e}")
+    
     def process_new_logs(self):
         """로그 파일에서 새로운 라인을 읽고 처리합니다."""
+        if not self.initialized:
+            self.initialize()
+            
         if not os.path.exists(self.log_file_path):
             logger.warning(f"로그 파일이 없습니다: {self.log_file_path}")
             return
@@ -141,7 +163,23 @@ class LogProcessor:
                 # 새 라인 처리
                 for line in new_lines:
                     try:
-                        self.process_log_line(line.strip())
+                        line = line.strip()
+                        # 빈 라인 무시
+                        if not line:
+                            continue
+                            
+                        # 중복 로그 방지를 위해 해시값 계산
+                        log_hash = hash(line)
+                        if log_hash in self.processed_logs:
+                            logger.debug(f"이미 처리된 로그 무시: {line[:50]}...")
+                            continue
+                            
+                        self.process_log_line(line)
+                        
+                        # 처리된 로그 해시 저장 (최대 1000개까지만 유지)
+                        self.processed_logs.add(log_hash)
+                        if len(self.processed_logs) > 1000:
+                            self.processed_logs.pop()
                     except Exception as e:
                         logger.error(f"로그 라인 처리 중 오류: {e}")
         
@@ -157,9 +195,17 @@ class LogProcessor:
             # JSON 파싱
             log_data = json.loads(line)
             
-            # 필요한 데이터 추출
+            # 로그 중복 방지를 위한 검사
             endpoint = log_data.get('endpoint', '')
             method = log_data.get('method', 'GET')
+            time_str = log_data.get('time', '')
+            
+            # 이미 DB에 저장된 로그인지 확인
+            if self.is_log_already_saved(endpoint, method, time_str):
+                logger.debug(f"이미 저장된 로그 무시: {endpoint} {method} {time_str}")
+                return
+            
+            # 필요한 데이터 추출
             status = int(log_data.get('status', 200))
             response_time = float(log_data.get('response_time', 0))
             body_bytes_sent = int(log_data.get('body_bytes_sent', 0))
@@ -183,8 +229,45 @@ class LogProcessor:
         except Exception as e:
             logger.error(f"로그 처리 중 오류: {e}")
     
+    def is_log_already_saved(self, endpoint, method, time_str):
+        """이미 데이터베이스에 저장된 로그인지 확인합니다."""
+        if engine is None or not time_str:
+            return False
+            
+        try:
+            # ISO 8601 형식의 시간문자열을 MySQL datetime 형식으로 변환
+            log_time = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+            log_time_start = log_time - timedelta(seconds=1)
+            log_time_end = log_time + timedelta(seconds=1)
+            
+            query = text("""
+                SELECT COUNT(*) as count FROM api_calls 
+                WHERE endpoint = :endpoint 
+                AND method = :method 
+                AND created_at BETWEEN :start_time AND :end_time
+            """)
+            
+            with engine.connect() as conn:
+                result = conn.execute(query, {
+                    'endpoint': endpoint,
+                    'method': method,
+                    'start_time': log_time_start,
+                    'end_time': log_time_end
+                }).fetchone()
+                
+                # 이미 저장된 로그가 있으면 True 반환
+                return result and result[0] > 0
+                
+        except Exception as e:
+            logger.error(f"로그 중복 확인 중 오류: {e}")
+            return False
+        
     def run(self):
         """일정 간격으로 로그 파일 확인"""
+        # 시작할 때 초기화
+        if not self.initialized:
+            self.initialize()
+            
         while self.should_run:
             self.process_new_logs()
             time.sleep(LOG_CHECK_INTERVAL)
