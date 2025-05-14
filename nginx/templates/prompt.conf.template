@@ -16,6 +16,9 @@ location /prompt/ {
     access_log /var/log/nginx/prompt_access.log;
     error_log /var/log/nginx/prompt_error.log error;
     
+    # 통계 로깅 - 모든 API 요청에 대해 JSON 형식으로 로깅
+    access_log /var/log/nginx/api-stats.log stats_json;
+    
     # 특정 API 경로에 대한 통계 수집
     location ~ ^/prompt/(health|summarize|chat)($|/) {
         include fastcgi_params;
@@ -29,6 +32,9 @@ location /prompt/ {
         fastcgi_pass_request_body on;
         fastcgi_intercept_errors on;
         fastcgi_read_timeout 300s;
+        
+        # 통계 로깅
+        access_log /var/log/nginx/api-stats.log stats_json;
         
         # 통계용 엔드포인트에 비동기 요청 보내기
         mirror /stats-endpoint;

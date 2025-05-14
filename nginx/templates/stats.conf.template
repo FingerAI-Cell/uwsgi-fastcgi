@@ -1,21 +1,6 @@
 # 통계 수집 내부 엔드포인트 설정
 location = /stats-endpoint {
     internal;
-    fastcgi_pass unix:/tmp/stats.sock;
-    include fastcgi_params;
-    
-    # 원본 요청 정보 헤더 설정
-    fastcgi_param X-Original-URI $request_uri;
-    fastcgi_param X-Original-Method $request_method;
-    fastcgi_param X-Response-Status $status;
-    fastcgi_param X-Response-Time $request_time;
-    fastcgi_param X-Real-IP $remote_addr;
-    
-    # 처리 시간 측정을 위한 설정
-    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-    fastcgi_param PATH_INFO "/api/log";
-    
-    # 비동기 처리를 위한 설정
-    fastcgi_ignore_client_abort on;
-    fastcgi_read_timeout 1s;
+    # 로깅만 하고 즉시 반환 (로그는 이미 access_log 지시문으로 처리됨)
+    return 200;
 } 

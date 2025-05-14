@@ -9,6 +9,10 @@ import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from dotenv import load_dotenv
+import threading
+import json
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 # 환경 변수 로드
 load_dotenv()
@@ -28,6 +32,10 @@ DB_USER = os.environ.get('MYSQL_USER', 'stats_user')
 DB_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'stats_password')
 DB_NAME = os.environ.get('MYSQL_DATABASE', 'api_stats')
 
+# 로그 파일 설정
+NGINX_LOG_PATH = os.environ.get('NGINX_LOG_PATH', '/var/log/nginx/api-stats.log')
+LOG_CHECK_INTERVAL = int(os.environ.get('LOG_CHECK_INTERVAL', 10))  # 초 단위
+
 # 데이터베이스 연결 문자열
 DATABASE_URI = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
@@ -35,13 +43,35 @@ DATABASE_URI = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB
 app = Flask(__name__)
 CORS(app)
 
+# 파일 시스템 감시 설정
+observer = None
+log_processor = None
+log_thread = None
+
+# 애플리케이션 초기화 함수
+def init_app(app):
+    # SQLAlchemy 엔진 생성
+    global engine
+    try:
+        engine = create_engine(DATABASE_URI)
+        logger.info("데이터베이스 연결 성공")
+    except Exception as e:
+        logger.error(f"데이터베이스 연결 실패: {e}")
+        engine = None
+    
+    # 로그 모니터링 시작
+    start_log_monitoring()
+
+# 애플리케이션 종료 시 리소스 정리
+def cleanup():
+    if observer and observer.is_alive():
+        observer.stop()
+        observer.join()
+    if log_processor:
+        log_processor.stop()
+
 # SQLAlchemy 엔진 생성
-try:
-    engine = create_engine(DATABASE_URI)
-    logger.info("데이터베이스 연결 성공")
-except Exception as e:
-    logger.error(f"데이터베이스 연결 실패: {e}")
-    engine = None
+engine = None
 
 # 데이터베이스 연결 확인
 def check_db_connection():
@@ -83,6 +113,129 @@ def log_api_call(endpoint, method, status_code, response_time, request_size=None
         logger.info(f"API 호출 로깅 성공: {endpoint} - {status_code}")
     except SQLAlchemyError as e:
         logger.error(f"API 호출 로깅 실패: {e}")
+
+# 로그 처리 클래스
+class LogProcessor:
+    def __init__(self, log_file_path):
+        self.log_file_path = log_file_path
+        self.last_position = 0
+        self.should_run = True
+        
+    def process_new_logs(self):
+        """로그 파일에서 새로운 라인을 읽고 처리합니다."""
+        if not os.path.exists(self.log_file_path):
+            logger.warning(f"로그 파일이 없습니다: {self.log_file_path}")
+            return
+        
+        try:
+            with open(self.log_file_path, 'r') as f:
+                # 마지막으로 읽은 위치로 이동
+                f.seek(self.last_position)
+                
+                # 새 라인 읽기
+                new_lines = f.readlines()
+                
+                # 현재 위치 저장
+                self.last_position = f.tell()
+                
+                # 새 라인 처리
+                for line in new_lines:
+                    try:
+                        self.process_log_line(line.strip())
+                    except Exception as e:
+                        logger.error(f"로그 라인 처리 중 오류: {e}")
+        
+        except Exception as e:
+            logger.error(f"로그 파일 처리 중 오류: {e}")
+    
+    def process_log_line(self, line):
+        """JSON 형식의 로그 라인을 파싱하고 데이터베이스에 저장합니다."""
+        if not line:
+            return
+            
+        try:
+            # JSON 파싱
+            log_data = json.loads(line)
+            
+            # 필요한 데이터 추출
+            endpoint = log_data.get('endpoint', '')
+            method = log_data.get('method', 'GET')
+            status = int(log_data.get('status', 200))
+            response_time = float(log_data.get('response_time', 0))
+            body_bytes_sent = int(log_data.get('body_bytes_sent', 0))
+            remote_addr = log_data.get('remote_addr', '')
+            user_agent = log_data.get('user_agent', '')
+            
+            # 데이터베이스에 저장
+            log_api_call(
+                endpoint=endpoint,
+                method=method,
+                status_code=status,
+                response_time=response_time,
+                request_size=None,  # 로그에서는 요청 크기를 알 수 없음
+                response_size=body_bytes_sent,
+                user_agent=user_agent,
+                ip_address=remote_addr
+            )
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON 파싱 오류: {e}, 라인: {line[:100]}")
+        except Exception as e:
+            logger.error(f"로그 처리 중 오류: {e}")
+    
+    def run(self):
+        """일정 간격으로 로그 파일 확인"""
+        while self.should_run:
+            self.process_new_logs()
+            time.sleep(LOG_CHECK_INTERVAL)
+    
+    def stop(self):
+        """처리 중지"""
+        self.should_run = False
+
+# 파일 시스템 이벤트 핸들러
+class LogFileHandler(FileSystemEventHandler):
+    def __init__(self, log_processor):
+        self.log_processor = log_processor
+        super().__init__()
+    
+    def on_modified(self, event):
+        if event.src_path == self.log_processor.log_file_path:
+            self.log_processor.process_new_logs()
+
+def start_log_monitoring():
+    """로그 모니터링 시작"""
+    global log_processor, log_thread, observer
+    
+    # 이미 실행 중인 경우 중복 실행 방지
+    if log_thread and log_thread.is_alive():
+        logger.info("로그 모니터링이 이미 실행 중입니다.")
+        return
+    
+    # 로그 디렉토리가 존재하는지 확인
+    log_dir = os.path.dirname(NGINX_LOG_PATH)
+    if not os.path.exists(log_dir):
+        logger.warning(f"로그 디렉토리가 없습니다: {log_dir}")
+        return
+    
+    try:
+        # 로그 처리기 초기화
+        log_processor = LogProcessor(NGINX_LOG_PATH)
+        
+        # 로그 처리 스레드 시작
+        log_thread = threading.Thread(target=log_processor.run, daemon=True)
+        log_thread.start()
+        logger.info("로그 처리 스레드 시작")
+        
+        # 파일 시스템 감시 시작
+        event_handler = LogFileHandler(log_processor)
+        observer = Observer()
+        observer.schedule(event_handler, log_dir, recursive=False)
+        observer.start()
+        logger.info(f"로그 파일 감시 시작: {NGINX_LOG_PATH}")
+    
+    except Exception as e:
+        logger.error(f"로그 모니터링 시작 중 오류: {e}")
 
 # 상태 확인 엔드포인트
 @app.route('/health', methods=['GET'])
@@ -520,5 +673,12 @@ def dashboard():
     </html>
     """
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000) 
+# 앱 초기화
+init_app(app)
+
+# 메인 실행 코드
+if __name__ == "__main__":
+    try:
+        app.run(host='0.0.0.0', port=5000)
+    finally:
+        cleanup()
