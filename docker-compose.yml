@@ -278,6 +278,7 @@ services:
     volumes:
       - ./stats:/app
       - ./volumes/logs/stats:/var/log/stats
+      - ./volumes/logs/nginx:/var/log/nginx  # nginx 로그 디렉토리 공유
     environment:
       - MYSQL_HOST=stats-db
       - MYSQL_PORT=3306
