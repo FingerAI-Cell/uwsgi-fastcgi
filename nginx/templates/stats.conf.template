@@ -1,6 +1,0 @@
-# 통계 수집 내부 엔드포인트 설정
-location = /stats-endpoint {
-    internal;
-    # 로깅만 하고 즉시 반환 (로그는 이미 access_log 지시문으로 처리됨)
-    return 200;
-} 

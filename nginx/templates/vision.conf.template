@@ -31,9 +31,5 @@ location /vision/ {
         fastcgi_pass_request_body on;
         fastcgi_intercept_errors on;
         fastcgi_read_timeout 300s;
-        
-        # 통계용 엔드포인트에 비동기 요청 보내기
-        mirror /stats-endpoint;
-        mirror_request_body on;
     }
 } 

@@ -30,9 +30,5 @@ location /reranker/ {
         fastcgi_param SCRIPT_NAME /reranker;
         fastcgi_param PATH_INFO $uri;
         fastcgi_param QUERY_STRING $args;
-        
-        # 통계용 엔드포인트에 비동기 요청 보내기
-        mirror /stats-endpoint;
-        mirror_request_body on;
     }
 } 
