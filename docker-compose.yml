@@ -287,7 +287,7 @@ services:
       - MYSQL_USER=stats_user
       - MYSQL_PASSWORD=stats_password
       - MYSQL_DATABASE=api_stats
-      - UWSGI_PROCESSES=1  # 워커 수를 1로 설정
+      - UWSGI_PROCESSES=3  # 워커 수를 3으로 설정 (1개는 로그 처리, 나머지는 API 처리)
       - LOG_CHECK_INTERVAL=5  # 로그 확인 주기 설정 (5초)
     depends_on:
       - stats-db
