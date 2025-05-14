@@ -430,19 +430,28 @@ class RerankerService:
             # 동기화 시간 측정을 위한 변수 초기화
             sync_time = 0
             
-            # CUDA 스트림 동기화 함수
+            # CUDA 동기화 함수
             def sync_cuda():
                 if torch.cuda.is_available():
                     sync_start = time.time()
+                    # 모든 CUDA 스트림 동기화 (완전한 동기화 보장)
                     torch.cuda.synchronize()
+                    # 메모리 캐시 클리어 (메모리 누수 방지)
+                    torch.cuda.empty_cache()
                     nonlocal sync_time
                     sync_time += time.time() - sync_start
             
-            # 배치 처리 전 GPU 상태 확인
+            # 배치 처리 전 GPU 상태 확인 및 초기화
             log_gpu_memory("배치 처리 전")
             
-            # CUDA 초기 동기화
+            # CUDA 완전 초기화 및 동기화
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()  # 시작 전 캐시 클리어
             sync_cuda()
+            
+            # 배치 크기 최적화 - 더 작은 배치로 분할 처리
+            batch_size = min(16, batch_size)  # 배치 크기 제한
+            logger.debug(f"Using optimized batch size: {batch_size} for {total_passages} passages")
             
             # 프로파일링 결과를 저장할 변수
             profiler_output = None
@@ -588,20 +597,18 @@ class RerankerService:
             # Convert back to original format
             processed_results = []
             for result in reranked_results:
-                # 필수 필드만 포함하여 처리 (메모리 및 직렬화 시간 절약)
+                # 기본 필드만 포함 (중요한 데이터 유지)
                 processed_result = {
                     "passage_id": result["id"],
-                    "doc_id": result["meta"].get("doc_id"),
+                    "doc_id": result["meta"].get("doc_id", ""),
                     "text": result["text"],
                     "score": float(result["score"])
                 }
                 
-                # 메타데이터는 필요한 경우에만 추가
-                if len(result["meta"]) > 1:  # doc_id 외에 메타데이터가 있는 경우
-                    processed_result["metadata"] = {}
-                    for k, v in result["meta"].items():
-                        if k != "doc_id" and v is not None:
-                            processed_result["metadata"][k] = v
+                # 메타데이터에서 original_score만 보존
+                if "original_score" in result["meta"]:
+                    metadata = {"original_score": result["meta"]["original_score"]}
+                    processed_result["metadata"] = metadata
                 
                 processed_results.append(processed_result)
             
@@ -611,7 +618,7 @@ class RerankerService:
             if top_k is not None:
                 processed_results = processed_results[:top_k]
             
-            # 결과 준비 - 최적화: 필수 필드만 포함
+            # 결과 준비 - 핵심 필드만 포함
             result = {
                 "query": query,
                 "results": processed_results,
