@@ -15,17 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     wget \
     curl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# jemalloc 설치
-RUN apt-get update && apt-get install -y --no-install-recommends \
     libjemalloc2 \
     libjemalloc-dev \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
-    && ldconfig \
-    && find /usr -name "libjemalloc.so*" || echo "찾은 jemalloc 라이브러리 확인"
+    && rm -rf /var/lib/apt/lists/*
 
 # Python 환경 설정
 ENV PYTHONPATH=/usr/local/lib/python3.10/site-packages:$PYTHONPATH
@@ -64,5 +57,19 @@ ENV OMP_NUM_THREADS=1 \
     MALLOC_CONF="background_thread:true,metadata_thp:auto" \
     PYTHONUNBUFFERED=1
 
-# 애플리케이션 실행 (jemalloc이 있으면 사용)
+# 프로파일링 디렉토리 생성
+RUN mkdir -p /reranker/profiles && chmod 777 /reranker/profiles
+
+# jemalloc 라이브러리 찾기 및 LD_PRELOAD 설정
+RUN ldconfig && \
+    jemalloc_path=$(find /usr -name "libjemalloc.so*" | head -n 1 || echo "") && \
+    if [ -n "$jemalloc_path" ]; then \
+        echo "✅ jemalloc found at $jemalloc_path" && \
+        echo "export LD_PRELOAD=$jemalloc_path" >> /etc/profile.d/jemalloc.sh && \
+        chmod +x /etc/profile.d/jemalloc.sh; \
+    else \
+        echo "⚠️ jemalloc not found"; \
+    fi
+
+# 애플리케이션 실행
 CMD ["uwsgi", "--ini", "/reranker/uwsgi.ini"]

@@ -3,17 +3,18 @@
     "cache_dir": "/reranker/models",
     "max_length": 512,
     "batch_size": {
-        "cpu": 32,
+        "cpu": 16,
         "gpu": 512
     },
-    "optimization": {
+    "profile_enabled": false,
+    "memory_optimize": {
         "use_fp16": true,
-        "use_cache": true,
-        "use_threads": true,
-        "thread_count": 4
+        "empty_cache_interval": 3,
+        "reserve_memory": true
     },
-    "logging": {
-        "performance_tracking": true,
-        "log_level": "INFO"
+    "perf_logging": {
+        "detailed_timings": true,
+        "log_gpu_memory": true,
+        "log_intervals": [50, 100, 500]
     }
 } 
