@@ -121,8 +121,31 @@ if [ -f "$DOCKER_CONFIG_FILE" ]; then
             if [ "$RESTART_DOCKER" = "y" ] || [ "$RESTART_DOCKER" = "Y" ]; then
                 echo "기존 도커 리소스를 새 위치로 복사합니다. 이 작업은 시간이 걸릴 수 있습니다..."
                 
-                # 기존 데이터 복사 (볼륨, 이미지, 컨테이너 등)
+                # 새 위치에 이미 파일이 있는지 확인
                 sudo mkdir -p "$NEW_DOCKER_ROOT"
+                if [ "$(ls -A "$NEW_DOCKER_ROOT" 2>/dev/null)" ]; then
+                    echo "경고: 새 도커 루트 디렉토리($NEW_DOCKER_ROOT)에 이미 파일이 존재합니다."
+                    echo "계속 진행하면 기존 파일이 덮어쓰여질 수 있습니다."
+                    echo "계속 진행하시겠습니까? (y/n/b - y:진행, n:취소, b:기존 파일 백업 후 진행): "
+                    read OVERWRITE_CHOICE
+                    
+                    if [ "$OVERWRITE_CHOICE" = "n" ] || [ "$OVERWRITE_CHOICE" = "N" ]; then
+                        echo "작업을 취소합니다. 도커 설정은 변경되었지만 데이터는 복사되지 않았습니다."
+                        echo "변경사항을 적용하려면 Docker 서비스를 수동으로 재시작해 주세요."
+                        return
+                    elif [ "$OVERWRITE_CHOICE" = "b" ] || [ "$OVERWRITE_CHOICE" = "B" ]; then
+                        BACKUP_TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+                        BACKUP_DIR="${NEW_DOCKER_ROOT}_backup_${BACKUP_TIMESTAMP}"
+                        echo "기존 파일을 $BACKUP_DIR 로 백업합니다..."
+                        sudo mv "$NEW_DOCKER_ROOT" "$BACKUP_DIR"
+                        sudo mkdir -p "$NEW_DOCKER_ROOT"
+                        echo "백업 완료. 계속 진행합니다."
+                    fi
+                    # else (OVERWRITE_CHOICE = y): 그냥 진행
+                fi
+                
+                # 기존 데이터 복사 (볼륨, 이미지, 컨테이너 등)
+                echo "도커 데이터를 복사합니다. 이 작업은 데이터 양에 따라 시간이 오래 걸릴 수 있습니다..."
                 sudo rsync -av --progress "$DOCKER_ROOT/" "$NEW_DOCKER_ROOT/"
                 
                 echo "Docker 서비스를 재시작합니다..."
