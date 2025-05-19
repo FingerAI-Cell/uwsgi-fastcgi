@@ -27,6 +27,173 @@ if ! $DOCKER_CMD ps > /dev/null 2>&1; then
     fi
 fi
 
+# Docker 데몬 설정 확인 및 리소스 위치 출력
+echo "============= Docker 데몬 설정 확인 ============="
+DOCKER_INFO=$($DOCKER_CMD info --format '{{json .}}')
+DOCKER_ROOT=$(echo "$DOCKER_INFO" | grep -o '"DockerRootDir":"[^"]*"' | sed 's/"DockerRootDir":"//;s/"//')
+DOCKER_CONFIG_FILE="/etc/docker/daemon.json"
+
+echo "현재 Docker 루트 디렉토리: $DOCKER_ROOT"
+echo "Docker 데몬 설정 파일: $DOCKER_CONFIG_FILE"
+
+# 도커 볼륨 위치 확인
+VOLUME_PATH="${DOCKER_ROOT}/volumes"
+if [ -d "$VOLUME_PATH" ]; then
+    echo "Docker 볼륨 저장 위치: $VOLUME_PATH"
+else
+    echo "Docker 볼륨 저장 위치를 확인할 수 없습니다."
+fi
+
+# 도커 이미지 위치 확인
+IMAGE_PATH="${DOCKER_ROOT}/image"
+if [ -d "$IMAGE_PATH" ]; then
+    echo "Docker 이미지 저장 위치: $IMAGE_PATH"
+else
+    echo "Docker 이미지 저장 위치를 확인할 수 없습니다."
+fi
+
+# 도커 컨테이너 위치 확인
+CONTAINER_PATH="${DOCKER_ROOT}/containers"
+if [ -d "$CONTAINER_PATH" ]; then
+    echo "Docker 컨테이너 저장 위치: $CONTAINER_PATH"
+else
+    echo "Docker 컨테이너 저장 위치를 확인할 수 없습니다."
+fi
+
+# 도커 네트워크 위치 확인
+NETWORK_PATH="${DOCKER_ROOT}/network"
+if [ -d "$NETWORK_PATH" ]; then
+    echo "Docker 네트워크 저장 위치: $NETWORK_PATH"
+else
+    echo "Docker 네트워크 저장 위치를 확인할 수 없습니다."
+fi
+
+# 도커 데몬 설정 파일 존재 확인
+if [ -f "$DOCKER_CONFIG_FILE" ]; then
+    echo "현재 Docker 데몬 설정 내용:"
+    cat "$DOCKER_CONFIG_FILE"
+    
+    # 데이터 저장 위치 변경 여부 질문
+    echo ""
+    echo "Docker 리소스 저장 위치를 변경하시겠습니까? (y/n): "
+    read CHANGE_DOCKER_PATH
+    
+    if [ "$CHANGE_DOCKER_PATH" = "y" ] || [ "$CHANGE_DOCKER_PATH" = "Y" ]; then
+        echo "새로운 Docker 루트 디렉토리 경로를 입력하세요 (절대 경로): "
+        read NEW_DOCKER_ROOT
+        
+        if [ -n "$NEW_DOCKER_ROOT" ]; then
+            echo "Docker 루트 디렉토리를 '$NEW_DOCKER_ROOT'로 변경합니다."
+            
+            # 현재 설정 백업
+            if [ -f "$DOCKER_CONFIG_FILE" ]; then
+                TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+                BACKUP_FILE="${DOCKER_CONFIG_FILE}.${TIMESTAMP}.bak"
+                sudo cp "$DOCKER_CONFIG_FILE" "$BACKUP_FILE"
+                echo "기존 설정 파일을 $BACKUP_FILE 로 백업했습니다."
+            fi
+            
+            # 새 설정 파일 생성
+            if [ -f "$DOCKER_CONFIG_FILE" ]; then
+                # 기존 파일에 data-root 추가/변경
+                TMP_FILE=$(mktemp)
+                if grep -q '"data-root"' "$DOCKER_CONFIG_FILE"; then
+                    # data-root가 이미 있는 경우, 값 변경
+                    sudo jq --arg path "$NEW_DOCKER_ROOT" '.["data-root"]=$path' "$DOCKER_CONFIG_FILE" > "$TMP_FILE"
+                else
+                    # data-root가 없는 경우, 새로 추가
+                    sudo jq --arg path "$NEW_DOCKER_ROOT" '. + {"data-root": $path}' "$DOCKER_CONFIG_FILE" > "$TMP_FILE"
+                fi
+                sudo mv "$TMP_FILE" "$DOCKER_CONFIG_FILE"
+            else
+                # 새 설정 파일 생성
+                sudo mkdir -p /etc/docker
+                echo '{
+  "data-root": "'$NEW_DOCKER_ROOT'"
+}' | sudo tee "$DOCKER_CONFIG_FILE" > /dev/null
+            fi
+            
+            echo "Docker 데몬 설정 파일이 업데이트되었습니다."
+            echo "변경사항을 적용하려면 Docker 서비스를 재시작해야 합니다."
+            echo "Docker 서비스를 재시작하시겠습니까? (이 작업은 실행 중인 모든 컨테이너를 중지합니다) (y/n): "
+            read RESTART_DOCKER
+            
+            if [ "$RESTART_DOCKER" = "y" ] || [ "$RESTART_DOCKER" = "Y" ]; then
+                echo "기존 도커 리소스를 새 위치로 복사합니다. 이 작업은 시간이 걸릴 수 있습니다..."
+                
+                # 기존 데이터 복사 (볼륨, 이미지, 컨테이너 등)
+                sudo mkdir -p "$NEW_DOCKER_ROOT"
+                sudo rsync -av --progress "$DOCKER_ROOT/" "$NEW_DOCKER_ROOT/"
+                
+                echo "Docker 서비스를 재시작합니다..."
+                if command -v systemctl > /dev/null 2>&1; then
+                    sudo systemctl restart docker
+                elif command -v service > /dev/null 2>&1; then
+                    sudo service docker restart
+                else
+                    echo "Docker 서비스를 자동으로 재시작할 수 없습니다. 수동으로 재시작해 주세요."
+                fi
+                
+                echo "Docker 서비스가 재시작되었습니다."
+                echo "새 Docker 루트 디렉토리: $NEW_DOCKER_ROOT"
+            else
+                echo "Docker 설정이 변경되었지만 아직 적용되지 않았습니다."
+                echo "변경사항을 적용하려면 Docker 서비스를 수동으로 재시작해 주세요."
+            fi
+        else
+            echo "유효한 경로가 입력되지 않았습니다. 기존 설정을 유지합니다."
+        fi
+    else
+        echo "Docker 리소스 저장 위치 변경을 건너뜁니다."
+    fi
+else
+    echo "Docker 데몬 설정 파일($DOCKER_CONFIG_FILE)이 존재하지 않습니다."
+    echo "새로운 Docker 데몬 설정 파일을 생성하고 리소스 저장 위치를 변경하시겠습니까? (y/n): "
+    read CREATE_CONFIG
+    
+    if [ "$CREATE_CONFIG" = "y" ] || [ "$CREATE_CONFIG" = "Y" ]; then
+        echo "새로운 Docker 루트 디렉토리 경로를 입력하세요 (절대 경로): "
+        read NEW_DOCKER_ROOT
+        
+        if [ -n "$NEW_DOCKER_ROOT" ]; then
+            echo "Docker 루트 디렉토리를 '$NEW_DOCKER_ROOT'로 설정합니다."
+            
+            # 새 설정 파일 생성
+            sudo mkdir -p /etc/docker
+            echo '{
+  "data-root": "'$NEW_DOCKER_ROOT'"
+}' | sudo tee "$DOCKER_CONFIG_FILE" > /dev/null
+            
+            echo "Docker 데몬 설정 파일이 생성되었습니다."
+            echo "변경사항을 적용하려면 Docker 서비스를 재시작해야 합니다."
+            echo "Docker 서비스를 재시작하시겠습니까? (이 작업은 실행 중인 모든 컨테이너를 중지합니다) (y/n): "
+            read RESTART_DOCKER
+            
+            if [ "$RESTART_DOCKER" = "y" ] || [ "$RESTART_DOCKER" = "Y" ]; then
+                echo "Docker 서비스를 재시작합니다..."
+                if command -v systemctl > /dev/null 2>&1; then
+                    sudo systemctl restart docker
+                elif command -v service > /dev/null 2>&1; then
+                    sudo service docker restart
+                else
+                    echo "Docker 서비스를 자동으로 재시작할 수 없습니다. 수동으로 재시작해 주세요."
+                fi
+                
+                echo "Docker 서비스가 재시작되었습니다."
+                echo "새 Docker 루트 디렉토리: $NEW_DOCKER_ROOT"
+            else
+                echo "Docker 설정이 변경되었지만 아직 적용되지 않았습니다."
+                echo "변경사항을 적용하려면 Docker 서비스를 수동으로 재시작해 주세요."
+            fi
+        else
+            echo "유효한 경로가 입력되지 않았습니다. 기본 설정을 유지합니다."
+        fi
+    else
+        echo "Docker 리소스 저장 위치 변경을 건너뜁니다."
+    fi
+fi
+echo "=================================================="
+
 # 필요한 Docker 네트워크 생성 (이미 존재하는 경우 무시)
 echo "Docker 네트워크 생성 중..."
 $DOCKER_CMD network create rag_network 2>/dev/null || echo "rag_network가 이미 존재합니다."
