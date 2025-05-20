@@ -268,6 +268,114 @@ def summarize():
         logger.error(f"처리 중 예외 발생: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+# 향상된 검색 API (RAG+Reranker)
+@app.route("/prompt/enhanced_search", methods=["POST"])
+def enhanced_search():
+    try:
+        data = request.json
+        logger.info(f"향상된 검색 요청 받음: {json.dumps(data, ensure_ascii=False)}")
+        
+        # 필수 파라미터 확인
+        query = data.get("query")
+        if not query:
+            logger.error("쿼리 누락")
+            return jsonify({"error": "쿼리가 필요합니다"}), 400
+        
+        summaryAgent = AgentService(config_path)
+        
+        # 사용자 지정 파라미터 또는 기본값 사용
+        top_m = data.get("top_m", summaryAgent.search_top)  # RAG 검색 결과 수
+        top_n = data.get("top_n", summaryAgent.rerank_top)  # Reranker 결과 수
+        
+        # 파라미터 유효성 검사
+        if top_m < top_n:
+            logger.warning(f"파라미터 오류: top_m({top_m}) < top_n({top_n}), top_m으로 조정합니다")
+            top_n = top_m
+            
+        logger.info(f"검색 파라미터: query='{query}', top_m={top_m}, top_n={top_n}")
+            
+        # 1. RAG 서비스 호출하여 문서 검색
+        logger.info(f"RAG 서비스 호출 준비: endpoint={RAG_ENDPOINT}/search")
+        search_params = {
+            "query_text": query,
+            "top_k": top_m,
+            "domains": []  # 기본 빈 도메인 리스트
+        }
+        
+        # 추가 검색 매개변수
+        if "domain" in data:  # 단일 도메인 지원
+            search_params["domains"] = [data["domain"]]
+        elif "domains" in data:  # 복수 도메인 지원
+            search_params["domains"] = data["domains"]
+            
+        for param in ["author", "start_date", "end_date", "title", "info_filter", "tags_filter"]:
+            if param in data:
+                search_params[param] = data[param]
+                logger.info(f"추가 검색 파라미터: {param}={data[param]}")
+        
+        logger.info(f"RAG 검색 요청: params={json.dumps(search_params, ensure_ascii=False)}")
+        search_response = requests.post(f"{RAG_ENDPOINT}/search", json=search_params)
+        
+        logger.info(f"RAG 응답 코드: {search_response.status_code}")
+        if search_response.status_code != 200:
+            logger.error(f"RAG 검색 오류 응답: {search_response.text}")
+            return jsonify({"error": "문서 검색 중 오류가 발생했습니다"}), 500
+            
+        search_results = search_response.json()
+        logger.info(f"RAG 검색 결과 수: {len(search_results.get('search_result', []))}")
+        
+        # 검색 결과가 없는 경우
+        if not search_results.get("search_result"):
+            logger.warning("검색 결과가 없습니다")
+            return jsonify({
+                "query": query,
+                "top_m": top_m,
+                "top_n": top_n,
+                "search_count": 0,
+                "reranked_count": 0,
+                "results": []
+            })
+        
+        # 2. Reranker 서비스 호출
+        logger.info(f"Reranker 서비스 호출 준비: endpoint={RERANKER_ENDPOINT}/rerank")
+        rerank_data = {
+            "query": query,
+            "results": search_results.get("search_result", [])
+        }
+        
+        logger.info(f"Reranker 요청: top_k={top_n}")
+        rerank_response = requests.post(
+            f"{RERANKER_ENDPOINT}/rerank",
+            params={"top_k": top_n},
+            json=rerank_data
+        )
+        
+        logger.info(f"Reranker 응답 코드: {rerank_response.status_code}")
+        if rerank_response.status_code != 200:
+            logger.error(f"Reranker 오류 응답: {rerank_response.text}")
+            return jsonify({"error": "문서 재순위화 중 오류가 발생했습니다"}), 500
+            
+        reranked_results = rerank_response.json()
+        logger.info(f"재순위화된 문서 수: {len(reranked_results.get('results', []))}")
+        
+        # 3. 최종 결과 반환
+        response = {
+            "query": query,
+            "top_m": top_m,
+            "top_n": top_n,
+            "search_count": len(search_results.get("search_result", [])),
+            "reranked_count": len(reranked_results.get("results", [])),
+            "results": reranked_results.get("results", []),
+            "processing_time": reranked_results.get("processing_time", 0)
+        }
+        
+        logger.info(f"향상된 검색 완료: 검색={response['search_count']}, 재랭킹={response['reranked_count']}")
+        return jsonify(response)
+        
+    except Exception as e:
+        logger.error(f"향상된 검색 중 예외 발생: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
 # 챗봇 API - 단순 질의응답용
 @app.route("/prompt/chat", methods=["POST"])
 def chat():
@@ -280,25 +388,15 @@ def chat():
         if not query:
             return jsonify({"error": "질문이 필요합니다"}), 400
         
-        # 프롬프트 템플릿 로드
-        logger.info("챗봇 프롬프트 템플릿 준비")
-        template = summaryAgent.load_prompt_template("chat")
+        # 프롬프트 템플릿 없이 사용자 쿼리 직접 사용
+        logger.info(f"Ollama API 챗봇 호출 시작: {model}, 쿼리 직접 전달")
         
-        if not template:
-            # 템플릿이 없으면 기본 프롬프트 사용
-            template = "당신은 도움이 되는 AI 어시스턴트입니다. 다음 질문에 정확하고 유용하게 답변해주세요: {query}"
-        
-        # 템플릿에 변수 채우기
-        final_prompt = template.format(query=query)
-        
-        # Ollama API 호출
-        logger.info(f"Ollama API 챗봇 호출 시작: {model}")
         try:
             ollama_response = requests.post(
                 f"{OLLAMA_ENDPOINT}/api/generate",
                 json={
                     "model": model,
-                    "prompt": final_prompt,
+                    "prompt": query,  # 사용자 쿼리를 직접 전달
                     "stream": False
                 },
                 timeout=60

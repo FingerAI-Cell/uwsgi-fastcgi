@@ -27,11 +27,12 @@
 | 12 | [/reranker/rerank](#12-rerankerrerank) | 단건 재랭킹 |
 | 13 | [/reranker/batch_rerank](#13-rerankerbatch_rerank) | 배치 재랭킹 |
 | 14 | [/prompt/health](#14-prompthealth) | Prompt 상태 |
-| 15 | [/prompt/summarize](#15-promptsummarize) | 문서 요약 |
-| 16 | [/prompt/chat](#16-promptchat) | 챗봇 응답 |
-| 17 | [/prompt/models](#17-promptmodels) | 모델 목록 |
-| 18 | [/vision/health](#18-visionhealth) | Vision 상태 |
-| 19 | [/vision/analyze](#19-visionanalyze) | 이미지 분석 |
+| 15 | [/prompt/enhanced_search](#15-promptenhanced_search) | RAG 검색 결과를 Reranker로 재랭킹 (LLM 요약 없음) |
+| 16 | [/prompt/summarize](#16-promptsummarize) | 문서 요약 |
+| 17 | [/prompt/chat](#17-promptchat) | 챗봇 응답 |
+| 18 | [/prompt/models](#18-promptmodels) | 모델 목록 |
+| 19 | [/vision/health](#19-visionhealth) | Vision 상태 |
+| 20 | [/vision/analyze](#20-visionanalyze) | 이미지 분석 |
 
 > **모든 URL** 는 `http://localhost` 기준이며, 실제 배포 시 호스트/포트를 맞춰 수정하세요.
 
@@ -255,7 +256,7 @@ curl -X POST http://localhost/rag/insert/raw \
 |------|------|------|------|------|
 | query_text | Y | String | – | 검색어 |
 | top_k | N | Integer | 5 | 검색 결과 수 |
-| domains | N | Array | [] | 도메인 필터 (복수 지정 가능) |
+| domains | N | Array | [] | 도메인 필터 (복수 지정 가능, 빈 배열이거나 없는 경우 모든 도메인에서 검색) |
 | author | N | String | – | 작성자 필터 |
 | start_date | N | String | – | 시작일 `YYYYMMDD` |
 | end_date | N | String | – | 종료일 `YYYYMMDD` |
@@ -1195,7 +1196,93 @@ curl -X GET http://localhost/prompt/health
 
 ---
 
-## 15. /prompt/summarize
+## 15. /prompt/enhanced_search
+### 기본 정보
+| 항목 | 내용 |
+|------|------|
+| Method | **POST** |
+| URL | `/prompt/enhanced_search` |
+| Content‑Type | `application/json` |
+| 설명 | RAG 검색 결과를 Reranker로 재랭킹 (LLM 요약 없음) |
+
+### 요청 파라미터 (Body)
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| query | Y | String | 검색 쿼리 |
+| top_m | N | Integer | RAG 검색 결과 최대 수 (기본값: config의 search_top) |
+| top_n | N | Integer | Reranker 결과 최대 수 (기본값: config의 rerank_top) |
+| domain | N | String | 단일 도메인 필터 (지정하지 않으면 모든 도메인에서 검색) |
+| domains | N | Array | 복수 도메인 필터 (빈 배열이거나 없는 경우 모든 도메인에서 검색) |
+| author | N | String | 작성자 필터 |
+| start_date | N | String | 시작일 `YYYYMMDD` |
+| end_date | N | String | 종료일 `YYYYMMDD` |
+| title | N | String | 제목 검색 |
+| info_filter | N | Object | `info` 필드 필터링 |
+| tags_filter | N | Object | `tags` 필드 필터링 |
+
+### 요청 예시
+```bash
+curl -X POST http://localhost/prompt/enhanced_search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "메타버스 최신 동향",
+    "top_m": 50,
+    "top_n": 10,
+    "domain": "news",
+    "start_date": "20240301",
+    "end_date": "20240331"
+  }'
+```
+
+### 응답 파라미터
+| 필드 | Type | 설명 |
+|------|------|------|
+| query | String | 요청한 쿼리 |
+| top_m | Integer | 요청한 RAG 검색 결과 최대 수 |
+| top_n | Integer | 요청한 Reranker 결과 최대 수 |
+| search_count | Integer | 실제 검색된 문서 수 |
+| reranked_count | Integer | 실제 재랭킹된 문서 수 |
+| results | Array | 재랭킹된 결과 배열 (메타데이터 포함) |
+| processing_time | Float | 처리 소요 시간(초) |
+
+### 성공 응답 예시
+```json
+{
+  "query": "메타버스 최신 동향",
+  "top_m": 50,
+  "top_n": 10,
+  "search_count": 35,
+  "reranked_count": 10,
+  "results": [
+    {
+      "passage_id": 1,
+      "doc_id": "20240310-가상현실-동향",
+      "text": "가상현실 기술은 게임뿐 아니라 교육, 의료 등 다양한 분야로 확장되고 있다...",
+      "score": 0.98,
+      "rerank_score": 0.98,
+      "rerank_position": 0,
+      "metadata": {
+        "title": "가상현실 동향",
+        "author": "LG전자",
+        "tags": { "date": "20240310" }
+      }
+    },
+    // ... 추가 결과
+  ],
+  "processing_time": 0.153
+}
+```
+
+### 실패 응답 예시
+```json
+{
+  "error": "쿼리가 필요합니다"
+}
+```
+
+---
+
+## 16. /prompt/summarize
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -1208,8 +1295,8 @@ curl -X GET http://localhost/prompt/health
 | 필드 | 필수 | Type | 설명 |
 |------|------|------|------|
 | query | Y | String | 요약할 쿼리 |
-| domain | N | String | 단일 도메인 필터 |
-| domains | N | Array | 복수 도메인 필터 |
+| domain | N | String | 단일 도메인 필터 (지정하지 않으면 모든 도메인에서 검색) |
+| domains | N | Array | 복수 도메인 필터 (빈 배열이거나 없는 경우 모든 도메인에서 검색) |
 | author | N | String | 작성자 필터 |
 | start_date | N | String | 시작일 `YYYYMMDD` |
 | end_date | N | String | 종료일 `YYYYMMDD` |
@@ -1256,7 +1343,7 @@ curl -X POST http://localhost/prompt/summarize \
 
 ---
 
-## 16. /prompt/chat
+## 17. /prompt/chat
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -1293,7 +1380,7 @@ curl -X POST http://localhost/prompt/chat \
 
 ---
 
-## 17. /prompt/models
+## 18. /prompt/models
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -1325,7 +1412,7 @@ curl -X GET http://localhost/prompt/models
 
 ---
 
-## 18. /vision/health
+## 19. /vision/health
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -1359,7 +1446,7 @@ curl -X GET http://localhost/vision/health
 
 ---
 
-## 19. /vision/analyze
+## 20. /vision/analyze
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
