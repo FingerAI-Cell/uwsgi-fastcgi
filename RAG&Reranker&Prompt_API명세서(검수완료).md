@@ -1211,6 +1211,7 @@ curl -X GET http://localhost/prompt/health
 | query | Y | String | 검색 쿼리 |
 | top_m | N | Integer | RAG 검색 결과 최대 수 (기본값: config의 search_top) |
 | top_n | N | Integer | Reranker 결과 최대 수 (기본값: config의 rerank_top) |
+| threshold | N | Float | 재랭킹 점수 임계치 (기본값: 0.1) - 이 값보다 낮은 점수의 결과는 필터링됨 |
 | domain | N | String | 단일 도메인 필터 (지정하지 않으면 모든 도메인에서 검색) |
 | domains | N | Array | 복수 도메인 필터 (빈 배열이거나 없는 경우 모든 도메인에서 검색) |
 | author | N | String | 작성자 필터 |
@@ -1228,6 +1229,7 @@ curl -X POST http://localhost/prompt/enhanced_search \
     "query": "메타버스 최신 동향",
     "top_m": 50,
     "top_n": 10,
+    "threshold": 0.2,
     "domain": "news",
     "start_date": "20240301",
     "end_date": "20240331"
@@ -1240,8 +1242,10 @@ curl -X POST http://localhost/prompt/enhanced_search \
 | query | String | 요청한 쿼리 |
 | top_m | Integer | 요청한 RAG 검색 결과 최대 수 |
 | top_n | Integer | 요청한 Reranker 결과 최대 수 |
+| threshold | Float | 적용된 임계치 값 |
 | search_count | Integer | 실제 검색된 문서 수 |
 | reranked_count | Integer | 실제 재랭킹된 문서 수 |
+| filtered_count | Integer | 임계치 필터링 후 남은 문서 수 |
 | results | Array | 재랭킹된 결과 배열 |
 | processing_time | Float | 처리 소요 시간(초) |
 
@@ -1266,8 +1270,10 @@ curl -X POST http://localhost/prompt/enhanced_search \
   "query": "메타버스 최신 동향",
   "top_m": 50,
   "top_n": 10,
+  "threshold": 0.2,
   "search_count": 35,
   "reranked_count": 10,
+  "filtered_count": 8,
   "results": [
     {
       "passage_id": 1,

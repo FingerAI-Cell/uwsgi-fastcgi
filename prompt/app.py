@@ -43,10 +43,12 @@ class AgentService:
             self.default_model = self.config.get("default_model")
             self.search_top = self.config.get("search_top")
             self.rerank_top = self.config.get("rerank_top")
+            self.rerank_threshold = self.config.get("rerank_threshold")
         
             logger.info(f"Initializing Agent LLM with model: {self.default_model}")
             logger.debug(f"RAG Search Top {self.search_top}")
             logger.debug(f"Reranking Top {self.rerank_top}")
+            logger.debug(f"Reranking Threshold {self.rerank_threshold}")
         except Exception as e:
             logger.error(f"Failed to initialize AgentService: {str(e)}")
             raise
@@ -64,7 +66,8 @@ class AgentService:
         default_config = {
             "search_top": int(os.getenv("RAG_SEARCH_TOP_K", "100")),
             "rerank_top": int(os.getenv("RERANKER_TOP_K", "20")),
-            "default_model": os.getenv("DEFAULT_MODEL", "mistral")
+            "default_model": os.getenv("DEFAULT_MODEL", "mistral"),
+            "rerank_threshold": float(os.getenv("RERANK_THRESHOLD", "0.1"))
         }
         
         if not config_path:
@@ -286,13 +289,14 @@ def enhanced_search():
         # 사용자 지정 파라미터 또는 기본값 사용
         top_m = data.get("top_m", summaryAgent.search_top)  # RAG 검색 결과 수
         top_n = data.get("top_n", summaryAgent.rerank_top)  # Reranker 결과 수
+        threshold = data.get("threshold", summaryAgent.rerank_threshold)  # Reranker 점수 임계치
         
         # 파라미터 유효성 검사
         if top_m < top_n:
             logger.warning(f"파라미터 오류: top_m({top_m}) < top_n({top_n}), top_m으로 조정합니다")
             top_n = top_m
             
-        logger.info(f"검색 파라미터: query='{query}', top_m={top_m}, top_n={top_n}")
+        logger.info(f"검색 파라미터: query='{query}', top_m={top_m}, top_n={top_n}, threshold={threshold}")
             
         # 1. RAG 서비스 호출하여 문서 검색
         logger.info(f"RAG 서비스 호출 준비: endpoint={RAG_ENDPOINT}/search")
@@ -408,9 +412,16 @@ def enhanced_search():
         logger.info(f"ID 매핑 생성 완료: {len(search_result_by_id)} 항목")
         
         # Reranker 결과 처리
-        for item in reranked_results.get("results", []):
+        for idx, item in enumerate(reranked_results.get("results", [])):
             doc_id = item.get("doc_id", "")
-            logger.info(f"결과 처리 중: doc_id={doc_id}")
+            rerank_score = item.get("score", 0)
+            
+            # 임계치 필터링
+            if rerank_score < threshold:
+                logger.info(f"임계치({threshold}) 미만 결과 필터링: doc_id={doc_id}, score={rerank_score}")
+                continue
+                
+            logger.info(f"결과 처리 중: doc_id={doc_id}, idx={idx}, score={rerank_score}")
             
             # 원래 RAG 점수와 메타데이터 추출
             original_score = None
@@ -418,16 +429,16 @@ def enhanced_search():
             if doc_id in search_result_by_id:
                 original_doc = search_result_by_id[doc_id]
                 original_score = original_doc.get("score")
-                logger.info(f"원본 RAG 점수: {original_score}, Reranker 점수: {item.get('score')}")
+                logger.info(f"원본 RAG 점수: {original_score}, Reranker 점수: {rerank_score}")
             
             # 기본 필드 유지
             result_item = {
                 "passage_id": item.get("passage_id"),
                 "doc_id": doc_id,
                 "text": item.get("text"),
-                "score": original_score or item.get("score"),  # 원본 RAG 점수 사용
-                "rerank_score": item.get("score"),  # Reranker 점수 사용
-                "rerank_position": item.get("rerank_position") 
+                "score": original_score or rerank_score,  # 원본 RAG 점수 사용
+                "rerank_score": rerank_score,  # Reranker 점수 사용
+                "rerank_position": idx  # 배열 인덱스를 rerank_position으로 사용
             }
             
             # RAG 결과의 메타데이터를 우선적으로 사용
@@ -473,13 +484,15 @@ def enhanced_search():
             "query": query,
             "top_m": top_m,
             "top_n": top_n,
+            "threshold": threshold,
             "search_count": len(search_results.get("search_result", [])),
             "reranked_count": len(reranked_results.get("results", [])),
+            "filtered_count": len(processed_results),
             "results": processed_results,
             "processing_time": reranked_results.get("processing_time", 0)
         }
         
-        logger.info(f"향상된 검색 완료: 검색={response['search_count']}, 재랭킹={response['reranked_count']}")
+        logger.info(f"향상된 검색 완료: 검색={response['search_count']}, 재랭킹={response['reranked_count']}, 필터링 후={response['filtered_count']}")
         logger.info(f"결과 첫 항목 샘플: {json.dumps(processed_results[0] if processed_results else {}, ensure_ascii=False)}")
         return jsonify(response)
         
