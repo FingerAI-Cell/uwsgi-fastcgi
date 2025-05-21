@@ -412,10 +412,12 @@ def enhanced_search():
             doc_id = item.get("doc_id", "")
             logger.info(f"결과 처리 중: doc_id={doc_id}")
             
-            # 원래 RAG 점수 추출
+            # 원래 RAG 점수와 메타데이터 추출
             original_score = None
+            original_doc = None
             if doc_id in search_result_by_id:
-                original_score = search_result_by_id[doc_id].get("score")
+                original_doc = search_result_by_id[doc_id]
+                original_score = original_doc.get("score")
                 logger.info(f"원본 RAG 점수: {original_score}, Reranker 점수: {item.get('score')}")
             
             # 기본 필드 유지
@@ -428,21 +430,41 @@ def enhanced_search():
                 "rerank_position": item.get("rerank_position") 
             }
             
-            # 메타데이터 필드를 최상위로 이동
-            metadata = item.get("metadata", {})
-            if metadata:
-                result_item["title"] = metadata.get("title")
-                result_item["author"] = metadata.get("author")
-                result_item["tags"] = metadata.get("tags")
-                result_item["info"] = metadata.get("info")
-            
-            # domain 정보 추가
-            if doc_id in search_result_by_id and "domain" in search_result_by_id[doc_id]:
-                result_item["domain"] = search_result_by_id[doc_id]["domain"]
-                logger.info(f"도메인 정보 추가: {result_item['domain']}")
+            # RAG 결과의 메타데이터를 우선적으로 사용
+            if original_doc:
+                # RAG 결과에서 직접 가져온 메타데이터 사용
+                result_item["title"] = original_doc.get("title")
+                result_item["author"] = original_doc.get("author")
+                result_item["tags"] = original_doc.get("tags")
+                result_item["info"] = original_doc.get("info")
+                
+                # RAG 결과에 도메인 정보가 있으면 사용
+                if "domain" in original_doc:
+                    result_item["domain"] = original_doc["domain"]
+                    logger.info(f"RAG 결과에서 도메인 정보 추가: {result_item['domain']}")
+                else:
+                    result_item["domain"] = "unknown"
+                    logger.warning(f"RAG 결과에 도메인 정보 없음: doc_id={doc_id}")
+                
+                # 메타데이터 로깅
+                logger.info(f"RAG 메타데이터 사용: title={result_item.get('title')}, author={result_item.get('author')}")
             else:
+                # RAG 결과가 없는 경우 Reranker의 metadata 사용
+                logger.warning(f"RAG 결과에서 doc_id={doc_id}를 찾을 수 없음. Reranker metadata 사용 시도")
+                
+                # Reranker의 metadata 필드 사용
+                metadata = item.get("metadata", {})
+                if metadata:
+                    result_item["title"] = metadata.get("title")
+                    result_item["author"] = metadata.get("author")
+                    result_item["tags"] = metadata.get("tags")
+                    result_item["info"] = metadata.get("info")
+                    logger.info(f"Reranker 메타데이터 사용: title={result_item.get('title')}, author={result_item.get('author')}")
+                else:
+                    logger.warning(f"Reranker에도 metadata 없음: doc_id={doc_id}")
+                
+                # 기본 도메인 unknown 설정
                 result_item["domain"] = "unknown"
-                logger.warning(f"도메인 정보를 찾을 수 없음: doc_id={doc_id}")
             
             processed_results.append(result_item)
         
