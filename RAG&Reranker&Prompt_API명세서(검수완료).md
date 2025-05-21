@@ -1242,8 +1242,23 @@ curl -X POST http://localhost/prompt/enhanced_search \
 | top_n | Integer | 요청한 Reranker 결과 최대 수 |
 | search_count | Integer | 실제 검색된 문서 수 |
 | reranked_count | Integer | 실제 재랭킹된 문서 수 |
-| results | Array | 재랭킹된 결과 배열 (메타데이터 포함) |
+| results | Array | 재랭킹된 결과 배열 |
 | processing_time | Float | 처리 소요 시간(초) |
+
+각 결과 항목의 구조:
+| 필드 | Type | 설명 |
+|------|------|------|
+| passage_id | Any | 패시지 ID |
+| doc_id | String | 문서 ID |
+| text | String | 패시지 텍스트 내용 |
+| score | Float | 점수 |
+| rerank_score | Float | 재랭킹 점수 |
+| rerank_position | Integer | 재랭킹 후 위치 |
+| title | String | 문서 제목 |
+| author | String | 작성자 |
+| domain | String | 문서 도메인 |
+| tags | Object | 태그 정보 (date 등) |
+| info | Object | 추가 정보 (press_num, url 등) |
 
 ### 성공 응답 예시
 ```json
@@ -1261,13 +1276,35 @@ curl -X POST http://localhost/prompt/enhanced_search \
       "score": 0.98,
       "rerank_score": 0.98,
       "rerank_position": 0,
-      "metadata": {
-        "title": "가상현실 동향",
-        "author": "LG전자",
-        "tags": { "date": "20240310" }
+      "title": "가상현실 동향",
+      "author": "LG전자",
+      "domain": "news",
+      "tags": { 
+        "date": "20240310" 
+      },
+      "info": {
+        "press_num": "IT뉴스",
+        "url": "http://example.com/vr-news"
       }
     },
-    // ... 추가 결과
+    {
+      "passage_id": 0,
+      "doc_id": "20240315-메타버스-뉴스",
+      "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
+      "score": 0.95,
+      "rerank_score": 0.95,
+      "rerank_position": 1,
+      "title": "메타버스 뉴스",
+      "author": "삼성전자",
+      "domain": "tech",
+      "tags": {
+        "date": "20240315"
+      },
+      "info": {
+        "press_num": "비즈니스 워치",
+        "url": "http://example.com/metaverse-news"
+      }
+    }
   ],
   "processing_time": 0.153
 }

@@ -358,6 +358,45 @@ def enhanced_search():
         reranked_results = rerank_response.json()
         logger.info(f"재순위화된 문서 수: {len(reranked_results.get('results', []))}")
         
+        # 결과 형식 변환 - metadata를 최상위로 이동 및 domain 추가
+        processed_results = []
+        search_result_by_id = {}
+        
+        # RAG 결과에서 domain 정보 추출
+        for domain, domain_data in search_results.get("domain_results", {}).items():
+            for item in domain_data.get("results", []):
+                search_result_by_id[item.get("doc_id")] = {
+                    "domain": domain,
+                    **item
+                }
+        
+        # Reranker 결과 처리
+        for item in reranked_results.get("results", []):
+            # 기본 필드 유지
+            result_item = {
+                "passage_id": item.get("passage_id"),
+                "doc_id": item.get("doc_id"),
+                "text": item.get("text"),
+                "score": item.get("score"),
+                "rerank_score": item.get("rerank_score", item.get("score")),
+                "rerank_position": item.get("rerank_position")
+            }
+            
+            # 메타데이터 필드를 최상위로 이동
+            metadata = item.get("metadata", {})
+            if metadata:
+                result_item["title"] = metadata.get("title")
+                result_item["author"] = metadata.get("author")
+                result_item["tags"] = metadata.get("tags")
+                result_item["info"] = metadata.get("info")
+            
+            # domain 정보 추가
+            original_doc = search_result_by_id.get(item.get("doc_id", ""))
+            if original_doc and "domain" in original_doc:
+                result_item["domain"] = original_doc["domain"]
+            
+            processed_results.append(result_item)
+        
         # 3. 최종 결과 반환
         response = {
             "query": query,
@@ -365,7 +404,7 @@ def enhanced_search():
             "top_n": top_n,
             "search_count": len(search_results.get("search_result", [])),
             "reranked_count": len(reranked_results.get("results", [])),
-            "results": reranked_results.get("results", []),
+            "results": processed_results,
             "processing_time": reranked_results.get("processing_time", 0)
         }
         
