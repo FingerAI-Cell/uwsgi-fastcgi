@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 import os
 import json
 import requests
@@ -508,44 +508,79 @@ def chat():
         data = request.json
         query = data.get("query")
         model = data.get("model", summaryAgent.default_model)
+        stream = data.get("stream", False)  # 스트리밍 모드 기본값 False
         
         if not query:
             return jsonify({"error": "질문이 필요합니다"}), 400
         
         # 프롬프트 템플릿 없이 사용자 쿼리 직접 사용
-        logger.info(f"Ollama API 챗봇 호출 시작: {model}, 쿼리 직접 전달")
+        logger.info(f"Ollama API 챗봇 호출 시작: {model}, 스트리밍 모드: {stream}, 쿼리 직접 전달")
         
         try:
-            ollama_response = requests.post(
-                f"{OLLAMA_ENDPOINT}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": query,  # 사용자 쿼리를 직접 전달
-                    "stream": False
-                },
-                timeout=60
-            )
-            
-            if ollama_response.status_code != 200:
-                logger.error(f"Ollama API 오류: {ollama_response.text}")
-                return jsonify({
-                    "error": "LLM 요청 중 오류가 발생했습니다",
-                    "details": ollama_response.text
-                }), 500
+            # 스트리밍 모드에 따라 다른 처리
+            if stream:
+                # 스트리밍 모드로 처리
+                def generate():
+                    with requests.post(
+                        f"{OLLAMA_ENDPOINT}/api/generate",
+                        json={
+                            "model": model,
+                            "prompt": query,
+                            "stream": True
+                        },
+                        timeout=60,
+                        stream=True
+                    ) as ollama_response:
+                        if ollama_response.status_code != 200:
+                            logger.error(f"Ollama API 오류: {ollama_response.text}")
+                            yield json.dumps({
+                                "error": "LLM 요청 중 오류가 발생했습니다",
+                                "details": ollama_response.text
+                            })
+                            return
+                        
+                        for line in ollama_response.iter_lines():
+                            if line:
+                                response_chunk = json.loads(line)
+                                chunk_text = response_chunk.get("response", "")
+                                if chunk_text:
+                                    yield chunk_text
                 
-            response_text = ollama_response.json().get("response", "")
+                # 스트리밍 응답 반환
+                return Response(stream_with_context(generate()), mimetype='text/event-stream')
+            else:
+                # 기존 방식대로 처리 (스트리밍 없음)
+                ollama_response = requests.post(
+                    f"{OLLAMA_ENDPOINT}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": query,  # 사용자 쿼리를 직접 전달
+                        "stream": False
+                    },
+                    timeout=60
+                )
+                
+                if ollama_response.status_code != 200:
+                    logger.error(f"Ollama API 오류: {ollama_response.text}")
+                    return jsonify({
+                        "error": "LLM 요청 중 오류가 발생했습니다",
+                        "details": ollama_response.text
+                    }), 500
+                    
+                response_text = ollama_response.json().get("response", "")
+                
+                return jsonify({
+                    "query": query,
+                    "model": model,
+                    "response": response_text
+                })
+                
         except requests.exceptions.RequestException as e:
             logger.error(f"Ollama 서비스 연결 오류: {str(e)}")
             return jsonify({
                 "error": "Ollama 서비스에 연결할 수 없습니다",
                 "details": str(e)
             }), 503
-        
-        return jsonify({
-            "query": query,
-            "model": model,
-            "response": response_text
-        })
         
     except Exception as e:
         logger.error(f"챗봇 처리 중 오류 발생: {str(e)}", exc_info=True)
