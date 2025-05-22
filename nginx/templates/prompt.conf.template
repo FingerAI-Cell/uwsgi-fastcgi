@@ -52,10 +52,32 @@ location /prompt/ {
         fastcgi_buffering off;          # 버퍼링 비활성화
         fastcgi_keep_conn on;           # 연결 유지
         
+        # FastCGI에서 SSE 응답 처리를 위한 추가 설정
+        chunked_transfer_encoding on;   # 청크 인코딩 활성화
+        proxy_set_header Connection '';  # HTTP 1.1에서 keep-alive 활성화
+        proxy_http_version 1.1;         # HTTP 1.1 사용
+        
+        # 클라이언트 연결 타임아웃 설정
+        client_body_timeout 300s;       # 클라이언트 요청 본문 타임아웃
+        proxy_connect_timeout 300s;     # 프록시 연결 타임아웃
+        proxy_send_timeout 300s;        # 프록시 전송 타임아웃
+        proxy_read_timeout 300s;        # 프록시 읽기 타임아웃
+        
         # CORS 설정 (필요한 경우)
         add_header 'Access-Control-Allow-Origin' '*' always;
         add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
         add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
         add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+        
+        # OPTIONS 요청 처리 (CORS preflight)
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' '*';
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
+            add_header 'Access-Control-Max-Age' 1728000;
+            add_header 'Content-Type' 'text/plain charset=UTF-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
     }
 } 

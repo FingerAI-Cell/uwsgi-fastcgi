@@ -521,6 +521,15 @@ def chat():
             if stream:
                 # 스트리밍 모드로 처리
                 def generate():
+                    # heartbeat 카운터 초기화
+                    heartbeat_counter = 0
+                    
+                    # heartbeat 메시지 전송 (15초마다)
+                    def should_send_heartbeat():
+                        nonlocal heartbeat_counter
+                        heartbeat_counter += 1
+                        return heartbeat_counter % 15 == 0
+                    
                     with requests.post(
                         f"{OLLAMA_ENDPOINT}/api/generate",
                         json={
@@ -538,6 +547,10 @@ def chat():
                         
                         # SSE 형식으로 응답 전송
                         for line in ollama_response.iter_lines():
+                            # heartbeat 전송
+                            if should_send_heartbeat():
+                                yield ":\n\n"  # SSE 주석 형식의 heartbeat
+                            
                             if line:
                                 try:
                                     response_chunk = json.loads(line)
@@ -554,8 +567,9 @@ def chat():
                 
                 # 스트리밍 응답 헤더 설정 및 반환
                 response = Response(stream_with_context(generate()), mimetype='text/event-stream')
-                response.headers['Cache-Control'] = 'no-cache'
+                response.headers['Cache-Control'] = 'no-cache, no-transform'
                 response.headers['X-Accel-Buffering'] = 'no'  # nginx에서 버퍼링 방지
+                response.headers['Connection'] = 'keep-alive'  # 연결 유지
                 return response
             else:
                 # 기존 방식대로 처리 (스트리밍 없음)
