@@ -521,6 +521,9 @@ def chat():
             if stream:
                 # 스트리밍 모드로 처리
                 def generate():
+                    # 응답 누적을 위한 변수
+                    accumulated_response = ""
+                    
                     # heartbeat 카운터 초기화
                     heartbeat_counter = 0
                     
@@ -542,7 +545,13 @@ def chat():
                     ) as ollama_response:
                         if ollama_response.status_code != 200:
                             logger.error(f"Ollama API 오류: {ollama_response.text}")
-                            yield f"data: {json.dumps({'error': 'LLM 요청 중 오류가 발생했습니다', 'details': ollama_response.text})}\n\n"
+                            error_response = {
+                                "query": query,
+                                "model": model,
+                                "error": "LLM 요청 중 오류가 발생했습니다",
+                                "details": ollama_response.text
+                            }
+                            yield f"data: {json.dumps(error_response, ensure_ascii=False)}\n\n"
                             return
                         
                         # SSE 형식으로 응답 전송
@@ -556,14 +565,32 @@ def chat():
                                     response_chunk = json.loads(line)
                                     chunk_text = response_chunk.get("response", "")
                                     if chunk_text:
-                                        # SSE 형식 (data: 텍스트\n\n)으로 전송
-                                        yield f"data: {chunk_text}\n\n"
+                                        # 응답 누적
+                                        accumulated_response += chunk_text
+                                        
+                                        # 기존 API 응답 형식으로 구성
+                                        stream_response = {
+                                            "query": query,
+                                            "model": model,
+                                            "response": accumulated_response,
+                                            "streaming": True
+                                        }
+                                        
+                                        # SSE 형식으로 전송
+                                        yield f"data: {json.dumps(stream_response, ensure_ascii=False)}\n\n"
                                 except json.JSONDecodeError:
                                     logger.error(f"JSON 디코딩 오류: {line}")
                                     continue
                         
-                        # 스트림 종료 알림
-                        yield "data: [DONE]\n\n"
+                        # 스트림 종료 응답
+                        final_response = {
+                            "query": query,
+                            "model": model,
+                            "response": accumulated_response,
+                            "streaming": False,
+                            "done": True
+                        }
+                        yield f"data: {json.dumps(final_response, ensure_ascii=False)}\n\n"
                 
                 # 스트리밍 응답 헤더 설정 및 반환
                 response = Response(stream_with_context(generate()), mimetype='text/event-stream')
