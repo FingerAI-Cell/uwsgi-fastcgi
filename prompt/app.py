@@ -533,21 +533,30 @@ def chat():
                     ) as ollama_response:
                         if ollama_response.status_code != 200:
                             logger.error(f"Ollama API 오류: {ollama_response.text}")
-                            yield json.dumps({
-                                "error": "LLM 요청 중 오류가 발생했습니다",
-                                "details": ollama_response.text
-                            })
+                            yield f"data: {json.dumps({'error': 'LLM 요청 중 오류가 발생했습니다', 'details': ollama_response.text})}\n\n"
                             return
                         
+                        # SSE 형식으로 응답 전송
                         for line in ollama_response.iter_lines():
                             if line:
-                                response_chunk = json.loads(line)
-                                chunk_text = response_chunk.get("response", "")
-                                if chunk_text:
-                                    yield chunk_text
+                                try:
+                                    response_chunk = json.loads(line)
+                                    chunk_text = response_chunk.get("response", "")
+                                    if chunk_text:
+                                        # SSE 형식 (data: 텍스트\n\n)으로 전송
+                                        yield f"data: {chunk_text}\n\n"
+                                except json.JSONDecodeError:
+                                    logger.error(f"JSON 디코딩 오류: {line}")
+                                    continue
+                        
+                        # 스트림 종료 알림
+                        yield "data: [DONE]\n\n"
                 
-                # 스트리밍 응답 반환
-                return Response(stream_with_context(generate()), mimetype='text/event-stream')
+                # 스트리밍 응답 헤더 설정 및 반환
+                response = Response(stream_with_context(generate()), mimetype='text/event-stream')
+                response.headers['Cache-Control'] = 'no-cache'
+                response.headers['X-Accel-Buffering'] = 'no'  # nginx에서 버퍼링 방지
+                return response
             else:
                 # 기존 방식대로 처리 (스트리밍 없음)
                 ollama_response = requests.post(
