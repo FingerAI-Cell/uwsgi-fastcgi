@@ -1400,15 +1400,24 @@ curl -X POST http://localhost/prompt/summarize \
 |------|------|------|------|
 | query | Y | String | 질문 내용 |
 | model | N | String | 사용할 모델 (기본값: 서버 설정) |
+| stream | N | Boolean | 스트리밍 모드 활성화 여부 (기본값: false) |
 
-### 요청 예시
+### 요청 예시 (일반 모드)
 ```bash
 curl -X POST http://localhost/prompt/chat \
   -H "Content-Type: application/json" \
-  -d '{ "query": "메타버스란 무엇인가요?", "model": "llama2" }'
+  -d '{ "query": "메타버스란 무엇인가요?", "model": "llama2", "stream": false }'
 ```
 
-### 성공 응답 예시
+### 요청 예시 (스트리밍 모드)
+```bash
+curl -X POST http://localhost/prompt/chat \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{ "query": "메타버스란 무엇인가요?", "model": "llama2", "stream": true }'
+```
+
+### 성공 응답 예시 (일반 모드)
 ```json
 {
   "query": "메타버스란 무엇인가요?",
@@ -1416,6 +1425,13 @@ curl -X POST http://localhost/prompt/chat \
   "response": "메타버스는 가상과 현실이 융합된 디지털 공간입니다..."
 }
 ```
+
+### 스트리밍 모드 응답
+스트리밍 모드 활성화(`stream=true`) 시:
+- 응답은 `text/event-stream` 형식으로 반환됩니다
+- 응답은 생성되는 텍스트 조각들이 실시간으로 전송됩니다
+- 클라이언트는 이를 순차적으로 수신하여 사용자에게 표시할 수 있습니다
+
 ### 실패 응답 예시
 ```json
 { "error": "질문이 필요합니다" }
