@@ -56,6 +56,7 @@ class InteractManager:
         # 캐시 상태 추적 (최대 10개 컬렉션만 캐싱)
         self.max_cached_collections = 10
         self.collection_access_count = {}  # 컬렉션 접근 횟수 추적
+        self._collection_cache_lock = threading.Lock()  # 컬렉션 캐시 동시성 제어
     
     def get_collection(self, collection_name):
         """
@@ -63,40 +64,42 @@ class InteractManager:
         - 이미 로드된 컬렉션은 캐시에서 반환
         - 접근 횟수를 추적하여 LRU(Least Recently Used) 방식으로 캐시 관리
         - 메모리 최적화를 위한 캐시 크기 제한
+        - 스레드 안전성 보장
         """
-        # 접근 카운트 증가
-        if collection_name in self.collection_access_count:
-            self.collection_access_count[collection_name] += 1
-        else:
-            self.collection_access_count[collection_name] = 1
-            
-        # 이미 로드된 컬렉션이 있는 경우 캐시에서 반환
-        if collection_name in self.loaded_collections:
-            print(f"[DEBUG] Reusing cached collection: {collection_name}, access count: {self.collection_access_count[collection_name]}")
-            collection = self.loaded_collections[collection_name]
-            
-            # 컬렉션이 로드되어 있는지 확인하고, 필요시 재로드
-            try:
-                if not collection.is_ready():
-                    print(f"[DEBUG] Collection {collection_name} not ready, reloading")
-                    collection.load()
-            except Exception as e:
-                print(f"[WARNING] Error checking collection readiness: {str(e)}, will try to reload")
-                try:
-                    collection.load()
-                except Exception as load_error:
-                    print(f"[ERROR] Failed to reload collection: {str(load_error)}")
-                    # 캐시에서 제거하고 새로 로드 시도
-                    del self.loaded_collections[collection_name]
-                    return self._load_new_collection(collection_name)
+        with self._collection_cache_lock:  # 캐시 접근 동기화
+            # 접근 카운트 증가
+            if collection_name in self.collection_access_count:
+                self.collection_access_count[collection_name] += 1
+            else:
+                self.collection_access_count[collection_name] = 1
                 
-            return collection
-        
-        # 새 컬렉션 로드
-        return self._load_new_collection(collection_name)
+            # 이미 로드된 컬렉션이 있는 경우 캐시에서 반환
+            if collection_name in self.loaded_collections:
+                print(f"[DEBUG] Reusing cached collection: {collection_name}, access count: {self.collection_access_count[collection_name]}")
+                collection = self.loaded_collections[collection_name]
+                
+                # 컬렉션이 로드되어 있는지 확인하고, 필요시 재로드
+                try:
+                    if not collection.is_ready():
+                        print(f"[DEBUG] Collection {collection_name} not ready, reloading")
+                        collection.load()
+                except Exception as e:
+                    print(f"[WARNING] Error checking collection readiness: {str(e)}, will try to reload")
+                    try:
+                        collection.load()
+                    except Exception as load_error:
+                        print(f"[ERROR] Failed to reload collection: {str(load_error)}")
+                        # 캐시에서 제거하고 새로 로드 시도
+                        del self.loaded_collections[collection_name]
+                        return self._load_new_collection(collection_name)
+                    
+                return collection
+            
+            # 새 컬렉션 로드
+            return self._load_new_collection(collection_name)
     
     def _load_new_collection(self, collection_name):
-        """새 컬렉션을 로드하고 캐시에 추가합니다."""
+        """새 컬렉션을 로드하고 캐시에 추가합니다. (이미 락 내부에서 호출됨)"""
         try:
             print(f"[DEBUG] Loading new collection: {collection_name}")
             
@@ -258,39 +261,52 @@ class InteractManager:
             
             # 청크 처리를 위한 병렬 처리 함수
             def process_chunk(chunk_data):
-                i, (chunk, passage_id) = chunk_data
-                print(f"[DEBUG] Processing chunk {i+1}/{len(chunked_texts)} in thread")
-                
-                # 텍스트 길이 체크 - 새 알고리즘에서는 청크 크기가 최대 약 512바이트로 제한됨
-                chunk_bytes = len(chunk.encode('utf-8'))
-                if chunk_bytes > 512:  # 스키마 제약에 맞게 정확히 512바이트로 제한
-                    print(f"[ERROR] Text chunk too large: {chunk_bytes} bytes exceeds maximum 512 bytes")
-                    raise ValueError(f"Text chunk too large: {chunk_bytes} bytes exceeds maximum 512 bytes")
-                
-                # passage의 고유 식별자 생성
-                passage_uid = f"{hashed_doc_id}_{passage_id}"
-                
-                # 임베딩 생성 (GPU 제한 적용됨)
-                chunk_emb = self.emb_model.bge_embed_data(chunk)
-                data = [
-                    {
-                        "passage_uid": passage_uid,  # 고유 식별자
-                        "doc_id": hashed_doc_id, 
-                        "raw_doc_id": raw_doc_id,  # 원본 doc_id 추가
-                        "passage_id": passage_id, 
-                        "domain": domain, 
-                        "title": title, 
-                        "author": author,
-                        "text": chunk, 
-                        "text_emb": chunk_emb, 
-                        "info": info, 
-                        "tags": tags
-                    }
-                ]        
-                print(f"[DEBUG] Inserting chunk {i+1} with passage_uid: {passage_uid}")
-                self.vectordb.insert_data(data, collection_name=domain)
-                print(f"[DEBUG] Successfully inserted chunk {i+1}")
-                return f"chunk_{i+1}_success"
+                try:
+                    i, (chunk, passage_id) = chunk_data
+                    total_chunks = len(chunked_texts)
+                    print(f"[DEBUG] Processing chunk {i+1}/{total_chunks} in thread")
+                    
+                    # 텍스트 길이 체크 - 새 알고리즘에서는 청크 크기가 최대 약 512바이트로 제한됨
+                    chunk_bytes = len(chunk.encode('utf-8'))
+                    if chunk_bytes > 512:  # 스키마 제약에 맞게 정확히 512바이트로 제한
+                        error_msg = f"Text chunk too large: {chunk_bytes} bytes exceeds maximum 512 bytes"
+                        print(f"[ERROR] {error_msg}")
+                        raise ValueError(error_msg)
+                    
+                    # passage의 고유 식별자 생성
+                    passage_uid = f"{hashed_doc_id}_{passage_id}"
+                    
+                    # 임베딩 생성 (GPU 제한 적용됨)
+                    chunk_emb = self.emb_model.bge_embed_data(chunk)
+                    
+                    # 임베딩 결과 검증
+                    if not chunk_emb or len(chunk_emb) == 0:
+                        raise ValueError(f"Empty embedding generated for chunk {i+1}")
+                    
+                    data = [
+                        {
+                            "passage_uid": passage_uid,  # 고유 식별자
+                            "doc_id": hashed_doc_id, 
+                            "raw_doc_id": raw_doc_id,  # 원본 doc_id 추가
+                            "passage_id": passage_id, 
+                            "domain": domain, 
+                            "title": title, 
+                            "author": author,
+                            "text": chunk, 
+                            "text_emb": chunk_emb, 
+                            "info": info, 
+                            "tags": tags
+                        }
+                    ]        
+                    print(f"[DEBUG] Inserting chunk {i+1} with passage_uid: {passage_uid}")
+                    self.vectordb.insert_data(data, collection_name=domain)
+                    print(f"[DEBUG] Successfully inserted chunk {i+1}")
+                    return f"chunk_{i+1}_success"
+                    
+                except Exception as e:
+                    error_msg = f"Error processing chunk {i+1}: {str(e)}"
+                    print(f"[ERROR] {error_msg}")
+                    raise Exception(error_msg)
             
             # 청크별 임베딩 생성을 병렬 처리 (기본 3개 스레드)
             max_workers = int(os.getenv('INSERT_CHUNK_THREADS', '3'))
@@ -304,15 +320,25 @@ class InteractManager:
                 # 모든 청크를 병렬로 처리
                 future_to_chunk = {executor.submit(process_chunk, chunk_data): chunk_data for chunk_data in chunk_data_list}
                 
-                # 결과 수집
+                # 결과 수집 및 오류 처리
+                successful_chunks = 0
+                failed_chunks = 0
+                
                 for future in concurrent.futures.as_completed(future_to_chunk):
                     chunk_data = future_to_chunk[future]
+                    chunk_index = chunk_data[0]
                     try:
                         result = future.result()
                         print(f"[DEBUG] {result}")
+                        successful_chunks += 1
                     except Exception as exc:
-                        print(f"[ERROR] Chunk processing failed: {exc}")
-                        raise exc
+                        failed_chunks += 1
+                        error_msg = f"Chunk {chunk_index + 1} processing failed: {exc}"
+                        print(f"[ERROR] {error_msg}")
+                        # 하나라도 실패하면 전체 작업 중단
+                        raise Exception(f"Insert failed - {error_msg}")
+                
+                print(f"[DEBUG] Chunk processing summary: {successful_chunks} successful, {failed_chunks} failed")
             
             chunk_end_time = time.time()
             print(f"[TIMING] 모든 청크 처리 완료: {(chunk_end_time - chunk_start_time):.4f}초")

@@ -154,9 +154,9 @@ class RerankerService:
             self.batch_size = self._get_batch_size()
             
             # GPU 동시 접근 제한 (환경변수로 설정 가능)
-            max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '7'))
-            self._gpu_semaphore = threading.Semaphore(max_gpu_workers)
-            logger.info(f"GPU 동시 작업 제한: {max_gpu_workers}개")
+            self.max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '7'))
+            self._gpu_semaphore = threading.Semaphore(self.max_gpu_workers)
+            logger.info(f"GPU 동시 작업 제한: {self.max_gpu_workers}개")
             
             # 프로파일링 설정
             self.enable_profiling = ENABLE_PROFILING and PROFILER_AVAILABLE
@@ -501,9 +501,8 @@ class RerankerService:
                                                 current_memory = torch.cuda.memory_allocated()/1024**2
                                                 reserved_memory = torch.cuda.memory_reserved()/1024**2
                                                 total_memory = torch.cuda.get_device_properties(0).total_memory/1024**2
-                                                max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '7'))
-                                                active_count = max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
-                                                logger.debug(f"[GPU] 활성작업: {active_count}/{max_gpu_workers}, 사용메모리: {current_memory:.1f}MB, 예약메모리: {reserved_memory:.1f}MB, 총메모리: {total_memory:.1f}MB")
+                                                active_count = self.max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
+                                                logger.debug(f"[GPU] 활성작업: {active_count}/{self.max_gpu_workers}, 사용메모리: {current_memory:.1f}MB, 예약메모리: {reserved_memory:.1f}MB, 총메모리: {total_memory:.1f}MB")
                                             
                                             batch_results = self.ranker.rerank(rerank_request)
                                     
@@ -537,9 +536,8 @@ class RerankerService:
                                             current_memory = torch.cuda.memory_allocated()/1024**2
                                             reserved_memory = torch.cuda.memory_reserved()/1024**2
                                             total_memory = torch.cuda.get_device_properties(0).total_memory/1024**2
-                                            max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '7'))
-                                            active_count = max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
-                                            logger.debug(f"[GPU] 활성작업: {active_count}/{max_gpu_workers}, 사용메모리: {current_memory:.1f}MB, 예약메모리: {reserved_memory:.1f}MB, 총메모리: {total_memory:.1f}MB")
+                                            active_count = self.max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
+                                            logger.debug(f"[GPU] 활성작업: {active_count}/{self.max_gpu_workers}, 사용메모리: {current_memory:.1f}MB, 예약메모리: {reserved_memory:.1f}MB, 총메모리: {total_memory:.1f}MB")
                                         
                                         reranked_results = self.ranker.rerank(rerank_request)
                                 
@@ -582,9 +580,8 @@ class RerankerService:
                                     current_memory = torch.cuda.memory_allocated()/1024**2
                                     reserved_memory = torch.cuda.memory_reserved()/1024**2
                                     total_memory = torch.cuda.get_device_properties(0).total_memory/1024**2
-                                    max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '7'))
-                                    active_count = max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
-                                    logger.debug(f"[GPU] 활성작업: {active_count}/{max_gpu_workers}, 사용메모리: {current_memory:.1f}MB, 예약메모리: {reserved_memory:.1f}MB, 총메모리: {total_memory:.1f}MB")
+                                    active_count = self.max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
+                                    logger.debug(f"[GPU] 활성작업: {active_count}/{self.max_gpu_workers}, 사용메모리: {current_memory:.1f}MB, 예약메모리: {reserved_memory:.1f}MB, 총메모리: {total_memory:.1f}MB")
                                 
                                 batch_results = self.ranker.rerank(rerank_request)
                             
@@ -615,9 +612,8 @@ class RerankerService:
                                 current_memory = torch.cuda.memory_allocated()/1024**2
                                 reserved_memory = torch.cuda.memory_reserved()/1024**2
                                 total_memory = torch.cuda.get_device_properties(0).total_memory/1024**2
-                                max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '7'))
-                                active_count = max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
-                                logger.debug(f"[GPU] 활성작업: {active_count}/{max_gpu_workers}, 사용메모리: {current_memory:.1f}MB, 예약메모리: {reserved_memory:.1f}MB, 총메모리: {total_memory:.1f}MB")
+                                active_count = self.max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
+                                logger.debug(f"[GPU] 활성작업: {active_count}/{self.max_gpu_workers}, 사용메모리: {current_memory:.1f}MB, 예약메모리: {reserved_memory:.1f}MB, 총메모리: {total_memory:.1f}MB")
                             
                             reranked_results = self.ranker.rerank(rerank_request)
                         
