@@ -71,7 +71,8 @@ class EmbModel(Model):
         }
         self._model_loaded = False  # 모델 로드 상태 추적
         # GPU 동시 접근 제한 (환경변수로 설정 가능)
-        max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '7'))
+        # Insert 작업: 3개 청크 처리 스레드 × 2 GPU 세마포어 = 최대 6회 gpu접근 (안전)
+        max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '2'))
         self._gpu_semaphore = threading.Semaphore(max_gpu_workers)
         logging.info(f"GPU 동시 작업 제한: {max_gpu_workers}개")
     

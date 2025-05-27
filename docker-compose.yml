@@ -144,7 +144,8 @@ services:
       - TRANSFORMERS_OFFLINE=1
       - HF_DATASETS_OFFLINE=1
       - HF_HUB_OFFLINE=1
-      - MAX_GPU_WORKERS=7
+      - MAX_GPU_WORKERS=2
+      - INSERT_CHUNK_THREADS=3
     depends_on:
       - standalone
     networks:
@@ -172,6 +173,7 @@ services:
       - UWSGI_PROTOCOL=fastcgi
       - UWSGI_SOCKET=/tmp/reranker.sock
       - UWSGI_CHMOD_SOCKET=666
+      - MAX_GPU_WORKERS=7
     networks:
       - rag_network
     command: uwsgi --ini /reranker/uwsgi.ini

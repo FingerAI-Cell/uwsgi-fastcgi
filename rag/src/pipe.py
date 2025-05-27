@@ -8,6 +8,8 @@ from pymilvus import utility
 import re
 import ast
 import time
+import concurrent.futures
+import threading
 
 class EnvManager():
     def __init__(self, args):
@@ -254,8 +256,10 @@ class InteractManager:
             if isinstance(tags, str):
                 tags = json.loads(tags)
             
-            for i, (chunk, passage_id) in enumerate(chunked_texts):
-                print(f"[DEBUG] Processing chunk {i+1}/{len(chunked_texts)}")
+            # 청크 처리를 위한 병렬 처리 함수
+            def process_chunk(chunk_data):
+                i, (chunk, passage_id) = chunk_data
+                print(f"[DEBUG] Processing chunk {i+1}/{len(chunked_texts)} in thread")
                 
                 # 텍스트 길이 체크 - 새 알고리즘에서는 청크 크기가 최대 약 512바이트로 제한됨
                 chunk_bytes = len(chunk.encode('utf-8'))
@@ -266,6 +270,7 @@ class InteractManager:
                 # passage의 고유 식별자 생성
                 passage_uid = f"{hashed_doc_id}_{passage_id}"
                 
+                # 임베딩 생성 (GPU 제한 적용됨)
                 chunk_emb = self.emb_model.bge_embed_data(chunk)
                 data = [
                     {
@@ -285,6 +290,32 @@ class InteractManager:
                 print(f"[DEBUG] Inserting chunk {i+1} with passage_uid: {passage_uid}")
                 self.vectordb.insert_data(data, collection_name=domain)
                 print(f"[DEBUG] Successfully inserted chunk {i+1}")
+                return f"chunk_{i+1}_success"
+            
+            # 청크별 임베딩 생성을 병렬 처리 (기본 3개 스레드)
+            max_workers = int(os.getenv('INSERT_CHUNK_THREADS', '3'))
+            print(f"[DEBUG] Using {max_workers} threads for chunk embedding processing")
+            
+            chunk_start_time = time.time()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 청크 데이터와 인덱스를 함께 전달
+                chunk_data_list = [(i, chunk_data) for i, chunk_data in enumerate(chunked_texts)]
+                
+                # 모든 청크를 병렬로 처리
+                future_to_chunk = {executor.submit(process_chunk, chunk_data): chunk_data for chunk_data in chunk_data_list}
+                
+                # 결과 수집
+                for future in concurrent.futures.as_completed(future_to_chunk):
+                    chunk_data = future_to_chunk[future]
+                    try:
+                        result = future.result()
+                        print(f"[DEBUG] {result}")
+                    except Exception as exc:
+                        print(f"[ERROR] Chunk processing failed: {exc}")
+                        raise exc
+            
+            chunk_end_time = time.time()
+            print(f"[TIMING] 모든 청크 처리 완료: {(chunk_end_time - chunk_start_time):.4f}초")
             
             return "success"  # 성공적인 삽입 상태 반환
                 
