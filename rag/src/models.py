@@ -72,9 +72,9 @@ class EmbModel(Model):
         self._model_loaded = False  # 모델 로드 상태 추적
         # GPU 동시 접근 제한 (환경변수로 설정 가능)
         # Insert 작업: 3개 청크 처리 스레드 × 2 GPU 세마포어 = 최대 6회 gpu접근 (안전)
-        max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '2'))
-        self._gpu_semaphore = threading.Semaphore(max_gpu_workers)
-        logging.info(f"GPU 동시 작업 제한: {max_gpu_workers}개")
+        self.max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '2'))
+        self._gpu_semaphore = threading.Semaphore(self.max_gpu_workers)
+        logging.info(f"GPU 동시 작업 제한: {self.max_gpu_workers}개")
     
     def set_embbeding_config(self, batch_size=None, max_length=1024):
         # GPU 여부에 따라 기본 배치 사이즈 선택
@@ -222,8 +222,8 @@ class EmbModel(Model):
                 current_memory = torch.cuda.memory_allocated()/1024**2
                 reserved_memory = torch.cuda.memory_reserved()/1024**2
                 total_memory = torch.cuda.get_device_properties(0).total_memory/1024**2
-                active_count = max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
-                print(f"[GPU] 활성작업: {active_count}/{max_gpu_workers}, 사용메모리: {current_memory:.1f}MB, 예약메모리: {reserved_memory:.1f}MB, 총메모리: {total_memory:.1f}MB")
+                active_count = self.max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
+                print(f"[GPU] 활성작업: {active_count}/{self.max_gpu_workers}, 사용메모리: {current_memory:.1f}MB, 예약메모리: {reserved_memory:.1f}MB, 총메모리: {total_memory:.1f}MB")
             
             try:
                 with torch.no_grad():  # 그래디언트 계산 비활성화
