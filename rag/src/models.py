@@ -223,7 +223,7 @@ class EmbModel(Model):
                 reserved_memory = torch.cuda.memory_reserved()/1024**2
                 total_memory = torch.cuda.get_device_properties(0).total_memory/1024**2
                 active_count = self.max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
-                print(f"[GPU] 활성작업: {active_count}/{self.max_gpu_workers}, 사용메모리: {current_memory:.1f}MB, 예약메모리: {reserved_memory:.1f}MB, 총메모리: {total_memory:.1f}MB")
+                print(f"[GPU] 활성작업: {active_count}/{self.max_gpu_workers}, 사용메모리: {current_memory:.2f}MB, 예약메모리: {reserved_memory:.2f}MB, 총메모리: {total_memory:.1f}MB")
             
             try:
                 with torch.no_grad():  # 그래디언트 계산 비활성화

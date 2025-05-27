@@ -144,8 +144,8 @@ services:
       - TRANSFORMERS_OFFLINE=1
       - HF_DATASETS_OFFLINE=1
       - HF_HUB_OFFLINE=1
-      - MAX_GPU_WORKERS=2
-      - INSERT_CHUNK_THREADS=3
+      - MAX_GPU_WORKERS=50
+      - INSERT_CHUNK_THREADS=20
     depends_on:
       - standalone
     networks:
