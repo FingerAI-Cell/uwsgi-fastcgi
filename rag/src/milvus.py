@@ -210,10 +210,15 @@ class DataMilVus(MilVus):   #  args: (DataProcessor)
         print(collection.num_entities)
 
     def set_search_params(self, query_emb, anns_field='text_emb', expr=None, limit=5, output_fields=None, consistency_level="Strong"):
+        # nprobe는 1~65536 범위에 있어야 함 (0은 불가능)
+        nprobe_value = self.db_config.get('search_nprobe', 16)  # 기본값 16
+        if nprobe_value <= 0:
+            nprobe_value = 16  # 안전한 기본값
+        
         self.search_params = {
             "data": [query_emb],
             "anns_field": anns_field, 
-            "param": {"metric_type": self.db_config['search_metric'], "params": {"nprobe": 0}, "offset": 0},
+            "param": {"metric_type": self.db_config['search_metric'], "params": {"nprobe": nprobe_value}, "offset": 0},
             "limit": limit,
             "expr": expr, 
             "output_fields": output_fields,
