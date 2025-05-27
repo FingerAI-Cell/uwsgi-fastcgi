@@ -6,12 +6,12 @@ location /rag/ {
     # 큰 요청 본문 처리를 위한 설정
     client_max_body_size 128M;        # 최대 요청 본문 크기 (128MB)
     client_body_buffer_size 1M;       # 클라이언트 본문 버퍼 크기 (1MB)
-    client_body_timeout 300s;         # 클라이언트 본문 읽기 타임아웃
+    client_body_timeout 600s;         # 클라이언트 본문 읽기 타임아웃 (10분)
     
-    # FastCGI 타임아웃 설정
-    fastcgi_read_timeout 300s;        # FastCGI 읽기 타임아웃
-    fastcgi_send_timeout 300s;        # FastCGI 전송 타임아웃
-    fastcgi_connect_timeout 300s;     # FastCGI 연결 타임아웃
+    # FastCGI 타임아웃 설정 (합리적인 수준으로 조정)
+    fastcgi_read_timeout 600s;        # FastCGI 읽기 타임아웃 (10분)
+    fastcgi_send_timeout 600s;        # FastCGI 전송 타임아웃 (10분)
+    fastcgi_connect_timeout 30s;      # FastCGI 연결 타임아웃
     
     # FastCGI 파라미터
     fastcgi_param SCRIPT_NAME /rag;
@@ -45,11 +45,11 @@ location /rag/ {
         # 큰 요청 본문 처리 설정 (상위 설정 재정의)
         client_max_body_size 128M;
         client_body_buffer_size 1M;
-        client_body_timeout 300s;
+        client_body_timeout 600s;
         
-        fastcgi_read_timeout 300s;
-        fastcgi_send_timeout 300s;
-        fastcgi_connect_timeout 300s;
+        fastcgi_read_timeout 600s;
+        fastcgi_send_timeout 600s;
+        fastcgi_connect_timeout 30s;
         
         fastcgi_param SCRIPT_NAME /rag;
         fastcgi_param PATH_INFO $uri;
