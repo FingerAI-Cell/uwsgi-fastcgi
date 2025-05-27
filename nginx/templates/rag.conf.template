@@ -2,16 +2,32 @@
 location /rag/ {
     include fastcgi_params;
     fastcgi_pass unix:/tmp/rag.sock;
-    fastcgi_read_timeout 300;
-    fastcgi_send_timeout 300;
+    
+    # 큰 요청 본문 처리를 위한 설정
+    client_max_body_size 128M;        # 최대 요청 본문 크기 (128MB)
+    client_body_buffer_size 1M;       # 클라이언트 본문 버퍼 크기 (1MB)
+    client_body_timeout 300s;         # 클라이언트 본문 읽기 타임아웃
+    
+    # FastCGI 타임아웃 설정
+    fastcgi_read_timeout 300s;        # FastCGI 읽기 타임아웃
+    fastcgi_send_timeout 300s;        # FastCGI 전송 타임아웃
+    fastcgi_connect_timeout 300s;     # FastCGI 연결 타임아웃
+    
+    # FastCGI 파라미터
     fastcgi_param SCRIPT_NAME /rag;
     fastcgi_param PATH_INFO $uri;
     fastcgi_param QUERY_STRING $args;
     
-    # 버퍼 설정
-    fastcgi_buffer_size 128k;
-    fastcgi_buffers 4 256k;
-    fastcgi_busy_buffers_size 256k;
+    # 버퍼 설정 (큰 요청 처리를 위해 증가)
+    fastcgi_buffer_size 256k;         # FastCGI 버퍼 크기 증가
+    fastcgi_buffers 8 256k;           # FastCGI 버퍼 수와 크기 증가
+    fastcgi_busy_buffers_size 512k;   # 바쁜 버퍼 크기 증가
+    fastcgi_temp_file_write_size 512k; # 임시 파일 쓰기 크기
+    
+    # 요청 본문 처리 설정
+    fastcgi_request_buffering on;     # 요청 버퍼링 활성화
+    fastcgi_pass_request_body on;     # 요청 본문 전달
+    fastcgi_intercept_errors on;      # 오류 가로채기
     
     # 헤더 설정
     fastcgi_param HTTP_X_REAL_IP $remote_addr;
@@ -21,14 +37,32 @@ location /rag/ {
     # 통계 로깅 - 모든 API 요청에 대해 JSON 형식으로 로깅
     access_log /var/log/nginx/api-stats.log stats_json;
     
-    # 특정 API 경로에 대한 통계 수집
+    # 특정 API 경로에 대한 통계 수집 (큰 요청 처리 설정 상속)
     location ~ ^/rag/(insert|insert/raw|search|delete)($|/) {
         include fastcgi_params;
         fastcgi_pass unix:/tmp/rag.sock;
-        fastcgi_read_timeout 300;
-        fastcgi_send_timeout 300;
+        
+        # 큰 요청 본문 처리 설정 (상위 설정 재정의)
+        client_max_body_size 128M;
+        client_body_buffer_size 1M;
+        client_body_timeout 300s;
+        
+        fastcgi_read_timeout 300s;
+        fastcgi_send_timeout 300s;
+        fastcgi_connect_timeout 300s;
+        
         fastcgi_param SCRIPT_NAME /rag;
         fastcgi_param PATH_INFO $uri;
         fastcgi_param QUERY_STRING $args;
+        
+        # 버퍼 설정
+        fastcgi_buffer_size 256k;
+        fastcgi_buffers 8 256k;
+        fastcgi_busy_buffers_size 512k;
+        fastcgi_temp_file_write_size 512k;
+        
+        fastcgi_request_buffering on;
+        fastcgi_pass_request_body on;
+        fastcgi_intercept_errors on;
     }
 } 
