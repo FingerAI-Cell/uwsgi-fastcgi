@@ -171,44 +171,88 @@ class InteractManager:
             doc_id (str): 삭제할 문서 ID
         """
         try:
+            # 시간 로깅을 위한 로거 설정
+            import logging
+            timing_logger = logging.getLogger('timing')
+            
+            delete_start = time.time()
             print(f"[DEBUG] Deleting all passages for doc_id: {doc_id} in domain: {domain}")
             
             # doc_id가 이미 해시된 값인지 확인
+            hash_start = time.time()
             is_already_hashed = len(doc_id) >= 64 and all(c in '0123456789abcdef' for c in doc_id.lower())
             hashed_doc_id = doc_id if is_already_hashed else self.data_p.hash_text(doc_id, hash_type='blake')
+            hash_end = time.time()
+            timing_logger.info(f"DELETE_HASH - doc_id: {hashed_doc_id}, duration: {(hash_end - hash_start):.4f}s")
             
             # 삭제할 문서 조건 설정 (작은따옴표 대신 큰따옴표 사용)
             expr = f'doc_id == "{hashed_doc_id}"'
             
-            # 삭제 전에 존재하는지 확인
+            # 컬렉션 로드
+            collection_start = time.time()
             collection = self.vectordb.get_collection(collection_name=domain)
+            collection_end = time.time()
+            timing_logger.info(f"DELETE_COLLECTION_LOAD - doc_id: {hashed_doc_id}, duration: {(collection_end - collection_start):.4f}s")
+            
+            # 삭제 전에 존재하는지 확인 및 개수 파악
+            query_start = time.time()
             print(f"[DEBUG] Checking existence with expression: {expr}")
             
             results = collection.query(
                 expr=expr,
-                output_fields=["doc_id"],
-                limit=1
+                output_fields=["doc_id", "passage_id"],
+                limit=1000  # 충분히 큰 수로 설정하여 모든 passage 확인
             )
+            query_end = time.time()
+            timing_logger.info(f"DELETE_QUERY - doc_id: {hashed_doc_id}, found_passages: {len(results)}, duration: {(query_end - query_start):.4f}s")
             
             if not results:
                 print(f"[DEBUG] No documents found with doc_id: {doc_id} in domain: {domain}")
+                timing_logger.info(f"DELETE_NOT_FOUND - doc_id: {hashed_doc_id}")
                 return
             
             # 문서 삭제 실행
-            print(f"[DEBUG] Executing delete operation for doc_id: {hashed_doc_id}")
-            deleted = collection.delete(expr)
-            collection.flush()  # 변경사항을 즉시 적용
-            print(f"[DEBUG] Delete operation completed. Deleted {deleted} entries.")
+            delete_exec_start = time.time()
+            print(f"[DEBUG] Executing delete operation for doc_id: {hashed_doc_id}, passages to delete: {len(results)}")
+            timing_logger.info(f"DELETE_EXEC_START - doc_id: {hashed_doc_id}, passages: {len(results)}")
+            
+            try:
+                deleted = collection.delete(expr)
+                delete_exec_end = time.time()
+                timing_logger.info(f"DELETE_EXEC_END - doc_id: {hashed_doc_id}, duration: {(delete_exec_end - delete_exec_start):.4f}s")
+                
+                # Flush 작업
+                flush_start = time.time()
+                collection.flush()  # 변경사항을 즉시 적용
+                flush_end = time.time()
+                timing_logger.info(f"DELETE_FLUSH - doc_id: {hashed_doc_id}, duration: {(flush_end - flush_start):.4f}s")
+                
+                print(f"[DEBUG] Delete operation completed. Deleted {deleted} entries.")
+                
+            except Exception as delete_exec_error:
+                delete_exec_error_time = time.time()
+                timing_logger.error(f"DELETE_EXEC_ERROR - doc_id: {hashed_doc_id}, duration: {(delete_exec_error_time - delete_exec_start):.4f}s, error: {str(delete_exec_error)}")
+                raise
             
             # 문서 메타데이터도 삭제
+            metadata_start = time.time()
             doc_metadata_key = f"{domain}:{doc_id}"
             if doc_metadata_key in self.document_metadata:
                 del self.document_metadata[doc_metadata_key]
                 print(f"[DEBUG] Deleted document metadata for key: {doc_metadata_key}")
+            metadata_end = time.time()
+            timing_logger.info(f"DELETE_METADATA - doc_id: {hashed_doc_id}, duration: {(metadata_end - metadata_start):.4f}s")
             
-            print(f"[DEBUG] Successfully deleted all passages for doc_id: {doc_id} in domain: {domain}")
+            delete_total_end = time.time()
+            delete_total_duration = delete_total_end - delete_start
+            timing_logger.info(f"DELETE_TOTAL - doc_id: {hashed_doc_id}, total_duration: {delete_total_duration:.4f}s")
+            print(f"[DEBUG] Successfully deleted all passages for doc_id: {doc_id} in domain: {domain} in {delete_total_duration:.4f}s")
             
         except Exception as e:
+            error_time = time.time()
+            if 'delete_start' in locals():
+                error_duration = error_time - delete_start
+                timing_logger.error(f"DELETE_TOTAL_ERROR - doc_id: {doc_id}, duration: {error_duration:.4f}s, error: {str(e)}")
             print(f"[ERROR] Failed to delete data: {str(e)}")
             raise
 
@@ -244,14 +288,34 @@ class InteractManager:
             # 중복된 문서가 존재하는 경우
             if results:
                 print(f"[DEBUG] Document with doc_id {hashed_doc_id} already exists in domain {domain}")
+                timing_logger.info(f"DUPLICATE_FOUND - doc_id: {hashed_doc_id}, ignore: {ignore}")
+                
                 if ignore:
                     print(f"[DEBUG] Ignoring insert due to ignore=True")
+                    timing_logger.info(f"DUPLICATE_SKIPPED - doc_id: {hashed_doc_id}")
                     return "skipped"  # 중복으로 인한 건너뛰기 상태 반환
                 else:
                     print(f"[DEBUG] Deleting existing document due to ignore=False")
-                    # 기존 문서 삭제
-                    self.delete_data(domain, doc_id)  # 원본 doc_id 전달
-                    print(f"[DEBUG] Successfully deleted existing document")
+                    
+                    # 기존 문서 삭제 시작
+                    delete_start_time = time.time()
+                    timing_logger.info(f"DELETE_START - doc_id: {hashed_doc_id}, existing_passages: {len(results)}")
+                    
+                    try:
+                        # 기존 문서 삭제
+                        self.delete_data(domain, doc_id)  # 원본 doc_id 전달
+                        
+                        delete_end_time = time.time()
+                        delete_duration = delete_end_time - delete_start_time
+                        timing_logger.info(f"DELETE_END - doc_id: {hashed_doc_id}, duration: {delete_duration:.4f}s")
+                        print(f"[DEBUG] Successfully deleted existing document in {delete_duration:.4f}s")
+                        
+                    except Exception as delete_error:
+                        delete_error_time = time.time()
+                        delete_duration = delete_error_time - delete_start_time
+                        timing_logger.error(f"DELETE_ERROR - doc_id: {hashed_doc_id}, duration: {delete_duration:.4f}s, error: {str(delete_error)}")
+                        print(f"[ERROR] Failed to delete existing document: {str(delete_error)}")
+                        raise Exception(f"Delete operation failed: {str(delete_error)}")
             
             # 텍스트 청킹 시작
             chunk_split_start = time.time()
@@ -318,13 +382,22 @@ class InteractManager:
                     # DB 삽입 시작
                     db_insert_start = time.time()
                     print(f"[DEBUG] Inserting chunk {i+1} with passage_uid: {passage_uid}")
-                    self.vectordb.insert_data(data, collection_name=domain)
-                    db_insert_end = time.time()
-                    db_insert_duration = db_insert_end - db_insert_start
                     
-                    print(f"[DEBUG] Successfully inserted chunk {i+1}")
-                    print(f"[TIMING] Chunk {i+1} - embedding: {chunk_emb_duration:.4f}s, db_insert: {db_insert_duration:.4f}s")
-                    return f"chunk_{i+1}_success"
+                    try:
+                        self.vectordb.insert_data(data, collection_name=domain)
+                        db_insert_end = time.time()
+                        db_insert_duration = db_insert_end - db_insert_start
+                        
+                        print(f"[DEBUG] Successfully inserted chunk {i+1}")
+                        print(f"[TIMING] Chunk {i+1} - embedding: {chunk_emb_duration:.4f}s, db_insert: {db_insert_duration:.4f}s")
+                        return f"chunk_{i+1}_success"
+                        
+                    except Exception as db_error:
+                        db_insert_error_time = time.time()
+                        db_insert_error_duration = db_insert_error_time - db_insert_start
+                        error_msg = f"DB insert failed for chunk {i+1}: {str(db_error)} (duration: {db_insert_error_duration:.4f}s)"
+                        print(f"[ERROR] {error_msg}")
+                        raise Exception(error_msg)
                     
                 except Exception as e:
                     error_msg = f"Error processing chunk {i+1}: {str(e)}"
@@ -381,9 +454,16 @@ class InteractManager:
             return "success"  # 성공적인 삽입 상태 반환
                 
         except ValueError as ve:
+            timing_logger.error(f"INSERT_VALIDATION_ERROR - doc_id: {hashed_doc_id if 'hashed_doc_id' in locals() else 'unknown'}, error: {str(ve)}")
             print(f"[ERROR] Validation error: {str(ve)}")
             raise
         except Exception as e:
+            error_time = time.time()
+            if 'embedding_start_time' in locals():
+                error_duration = error_time - embedding_start_time
+                timing_logger.error(f"INSERT_TOTAL_ERROR - doc_id: {hashed_doc_id if 'hashed_doc_id' in locals() else 'unknown'}, duration: {error_duration:.4f}s, error: {str(e)}")
+            else:
+                timing_logger.error(f"INSERT_EARLY_ERROR - doc_id: {hashed_doc_id if 'hashed_doc_id' in locals() else 'unknown'}, error: {str(e)}")
             print(f"[ERROR] Failed to insert data: {str(e)}")
             raise
     
