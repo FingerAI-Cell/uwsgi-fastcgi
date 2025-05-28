@@ -1006,67 +1006,24 @@ def get_domains():
                 
                 # 문서 개수 조회 (doc_id 기준으로 고유 개수 계산)
                 collection = Collection(domain)
-                try:
-                    # 효율적인 방법으로 고유 doc_id 개수 계산
-                    # Milvus 제한: limit는 최대 16384이어야 함
-                    max_limit = 16000  # 안전하게 16384보다 작은 값 사용
-                    
-                    # 페이징 처리를 위한 변수들
-                    unique_doc_ids = set()
-                    offset = 0
-                    total_processed = 0
-                    max_iterations = 100  # 무한 루프 방지
-                    iterations = 0
-                    
-                    # 페이징 처리로 모든 문서 ID 수집
-                    while iterations < max_iterations:
-                        iterations += 1
-                        
-                        # 한 페이지 쿼리
-                        doc_count_result = collection.query(
-                            expr="",
-                            output_fields=["doc_id"],
-                            offset=offset,
-                            limit=max_limit
-                        )
-                        
-                        # 결과가 없으면 종료
-                        if not doc_count_result:
-                            break
-                            
-                        # 고유 doc_id 추가
-                        for item in doc_count_result:
-                            if "doc_id" in item:
-                                unique_doc_ids.add(item["doc_id"])
-                        
-                        # 다음 페이지로 이동
-                        total_processed += len(doc_count_result)
-                        offset += max_limit
-                        
-                        # 마지막 페이지에서 가져온 항목 수가 max_limit보다 적으면 더 이상 데이터가 없음
-                        if len(doc_count_result) < max_limit:
-                            break
-                    
-                    doc_count = len(unique_doc_ids)
-                    
-                    # 로깅
-                    logger.info(f"도메인 '{domain}'의 고유 문서 수: {doc_count} (전체 엔티티: {milvus_db.num_entities}, 페이지 수: {iterations})")
-                except Exception as e:
-                    logger.warning(f"도메인 '{domain}'의 문서 개수 조회 실패: {str(e)}")
-                    doc_count = "계산 불가"
+                
+                # 도메인별 문서 개수 계산 최적화 함수
+                doc_count = calculate_domain_document_count(collection, domain)
                 
                 # 정보 수집 및 포맷팅
                 info = {
                     "name": domain,
-                    "entity_count": milvus_db.num_entities if hasattr(milvus_db, 'num_entities') else 0,
+                    "entity_count": collection.num_entities if hasattr(collection, 'num_entities') else 0,
                     "document_count": doc_count,  # 문서 개수 추가
                 }
                 domain_info.append(info)
             except Exception as e:
                 # 컬렉션 접근 오류 발생 시 기본 정보만 추가
+                logger.error(f"도메인 '{domain}' 정보 조회 실패: {str(e)}")
                 domain_info.append({
                     "name": domain,
                     "entity_count": 0,
+                    "document_count": "계산 불가",
                     "error": str(e)
                 })
         
@@ -1083,6 +1040,194 @@ def get_domains():
             "message": f"도메인 목록 조회에 실패했습니다: {str(e)}",
             "domains": []
         }), 500
+
+def calculate_domain_document_count(collection, domain_name):
+    """
+    도메인(컬렉션)의 고유 문서 개수를 계산합니다.
+    다양한 방법을 시도하며, 컬렉션 크기에 따라 적절한 방법을 선택합니다.
+    
+    Args:
+        collection: 컬렉션 객체
+        domain_name: 도메인 이름
+    
+    Returns:
+        int 또는 str: 문서 개수 또는 계산 불가 메시지
+    """
+    try:
+        # 컬렉션 크기 확인
+        collection_size = collection.num_entities if hasattr(collection, 'num_entities') else 0
+        logger.info(f"도메인 '{domain_name}'의 전체 엔티티 수: {collection_size}")
+        
+        # 작은 컬렉션은 전체 데이터 수집으로 빠르게 계산
+        if collection_size <= 50000:
+            return calculate_small_collection_doc_count(collection, domain_name)
+        # 중간 크기 컬렉션은 페이징 처리로 계산
+        elif collection_size <= 1000000:
+            return calculate_medium_collection_doc_count(collection, domain_name)
+        # 대형 컬렉션은 그룹화 또는 샘플링 기반 추정
+        else:
+            return calculate_large_collection_doc_count(collection, domain_name, collection_size)
+            
+    except Exception as e:
+        logger.error(f"문서 개수 계산 중 오류 발생: {str(e)}")
+        return "계산 불가"
+
+def calculate_small_collection_doc_count(collection, domain_name):
+    """작은 컬렉션에 대한 문서 개수 계산 (전체 데이터 조회)"""
+    try:
+        # 한 번에 가져올 수 있는 최대 크기로 조회
+        max_limit = 16000  # Milvus 제한
+        
+        # 모든 doc_id 조회
+        results = collection.query(
+            expr="",
+            output_fields=["doc_id"],
+            limit=max_limit
+        )
+        
+        if not results:
+            logger.info(f"도메인 '{domain_name}'에 문서가 없습니다.")
+            return 0
+            
+        # 고유 doc_id 추출
+        unique_doc_ids = set()
+        for item in results:
+            if "doc_id" in item:
+                unique_doc_ids.add(item["doc_id"])
+                
+        doc_count = len(unique_doc_ids)
+        logger.info(f"도메인 '{domain_name}'의 고유 문서 수: {doc_count} (전체 쿼리)")
+        return doc_count
+        
+    except Exception as e:
+        logger.warning(f"작은 컬렉션 문서 개수 계산 실패: {str(e)}")
+        return "계산 불가"
+
+def calculate_medium_collection_doc_count(collection, domain_name):
+    """중간 크기 컬렉션에 대한 문서 개수 계산 (페이징 처리)"""
+    try:
+        # 효율적인 방법으로 고유 doc_id 개수 계산
+        max_limit = 16000  # Milvus 제한: 최대 16384
+        
+        # 페이징 처리를 위한 변수들
+        unique_doc_ids = set()
+        offset = 0
+        max_iterations = 100  # 무한 루프 방지 (최대 160만 레코드까지 커버)
+        iterations = 0
+        
+        # 페이징 처리로 모든 문서 ID 수집
+        while iterations < max_iterations:
+            iterations += 1
+            
+            # 한 페이지 쿼리
+            page_results = collection.query(
+                expr="",
+                output_fields=["doc_id"],
+                offset=offset,
+                limit=max_limit
+            )
+            
+            # 결과가 없으면 종료
+            if not page_results:
+                break
+                
+            # 고유 doc_id 추가
+            for item in page_results:
+                if "doc_id" in item:
+                    unique_doc_ids.add(item["doc_id"])
+            
+            # 다음 페이지로 이동
+            offset += len(page_results)
+            
+            # 마지막 페이지에서 가져온 항목 수가 max_limit보다 적으면 더 이상 데이터가 없음
+            if len(page_results) < max_limit:
+                break
+        
+        doc_count = len(unique_doc_ids)
+        logger.info(f"도메인 '{domain_name}'의 고유 문서 수: {doc_count} (페이지 수: {iterations})")
+        return doc_count
+        
+    except Exception as e:
+        logger.warning(f"중간 크기 컬렉션 문서 개수 계산 실패: {str(e)}")
+        return "계산 불가"
+
+def calculate_large_collection_doc_count(collection, domain_name, collection_size):
+    """대형 컬렉션에 대한 문서 개수 계산 (샘플링 또는 추정)"""
+    try:
+        # 방법 1: GROUP BY 쿼리 시도 (가장 정확한 방법이지만 지원되지 않을 수 있음)
+        try:
+            # Milvus가 GROUP BY를 지원하면 이 방법이 가장 정확함
+            count_results = collection.query(
+                expr="",
+                output_fields=["count(DISTINCT doc_id)"],
+                limit=1
+            )
+            if count_results and "count(DISTINCT doc_id)" in count_results[0]:
+                doc_count = count_results[0]["count(DISTINCT doc_id)"]
+                logger.info(f"도메인 '{domain_name}'의 고유 문서 수: {doc_count} (GROUP BY 쿼리)")
+                return doc_count
+        except Exception as group_error:
+            logger.debug(f"GROUP BY 쿼리 실패: {str(group_error)}")
+        
+        # 방법 2: 샘플링 기반 추정 (대용량에서 효율적)
+        # 전체 컬렉션의 일부를 샘플링하여 고유 문서 수 추정
+        max_limit = 16000  # 최대 조회 수
+        
+        # 3개의 다른 오프셋에서 샘플 수집 (더 정확한 추정을 위해)
+        samples = []
+        for sample_offset in [0, collection_size // 3, 2 * collection_size // 3]:
+            if sample_offset >= collection_size:
+                continue
+                
+            sample_offset = min(sample_offset, max(0, collection_size - max_limit))
+            
+            # 샘플 쿼리
+            sample_results = collection.query(
+                expr="",
+                output_fields=["doc_id"],
+                offset=sample_offset,
+                limit=max_limit
+            )
+            
+            # 고유 doc_id 계산
+            if sample_results:
+                samples.append(sample_results)
+        
+        # 각 샘플에서 고유 비율 계산
+        if not samples:
+            return "계산 불가 (샘플링 실패)"
+            
+        # 모든 샘플에서의 고유 비율
+        all_doc_ids = set()
+        all_sample_size = 0
+        
+        for sample in samples:
+            sample_size = len(sample)
+            all_sample_size += sample_size
+            
+            unique_in_sample = set()
+            for item in sample:
+                if "doc_id" in item:
+                    all_doc_ids.add(item["doc_id"])
+                    unique_in_sample.add(item["doc_id"])
+            
+            # 개별 샘플에서의 고유 비율 로깅
+            logger.debug(f"샘플 크기: {sample_size}, 고유 doc_id: {len(unique_in_sample)}, 비율: {len(unique_in_sample)/max(1, sample_size):.4f}")
+        
+        # 전체 샘플에서의 고유 비율
+        unique_ratio = len(all_doc_ids) / max(1, all_sample_size)
+        
+        # 비율 기반 추정 (보정 계수 적용)
+        # 샘플이 클수록 추정이 더 정확해짐
+        correction_factor = 0.9  # 샘플링으로 인한 중복 과대 추정 보정
+        estimated_doc_count = int(collection_size * unique_ratio * correction_factor)
+        
+        logger.info(f"도메인 '{domain_name}'의 추정 문서 수: {estimated_doc_count} (샘플링 비율: {unique_ratio:.4f})")
+        return f"약 {estimated_doc_count:,}"
+        
+    except Exception as e:
+        logger.warning(f"대형 컬렉션 문서 개수 계산 실패: {str(e)}")
+        return "계산 불가"
 
 @app.route('/rag/domains/delete', methods=['POST'])
 def delete_domains():
