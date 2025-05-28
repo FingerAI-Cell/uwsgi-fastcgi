@@ -256,11 +256,27 @@ class InteractManager:
             print(f"[ERROR] Failed to delete data: {str(e)}")
             raise
 
+    # 전역 DB 접근 세마포어 및 배치 처리 관련 변수
+    db_semaphore = None
+    batch_lock = None
+    batch_data = {}  # 도메인별 배치 데이터 저장 {domain: [data_items]}
+    batch_size = 10  # 기본 배치 크기
+    
     def insert_data(self, domain, doc_id, title, author, text, info, tags, ignore=True):
         try:
             # 시간 로깅을 위한 로거 설정
             import logging
+            import threading
             timing_logger = logging.getLogger('timing')
+            
+            # DB 세마포어 및 배치 처리 락 초기화 (한 번만)
+            if self.__class__.db_semaphore is None:
+                max_db_connections = int(os.getenv('MAX_DB_CONNECTIONS', '20'))  # 최대 20개 동시 연결 기본값
+                batch_size = int(os.getenv('BATCH_SIZE', '10'))  # 배치 크기 설정
+                self.__class__.db_semaphore = threading.BoundedSemaphore(max_db_connections)
+                self.__class__.batch_lock = threading.Lock()
+                self.__class__.batch_size = batch_size
+                print(f"[DEBUG] Initialized DB connection semaphore with max {max_db_connections} connections and batch size {batch_size}")
             
             print(f"[DEBUG] Original text length: {len(text)}")
             
@@ -379,17 +395,24 @@ class InteractManager:
                             "tags": tags
                         }
                     ]        
-                    # DB 삽입 시작
+                    # DB 삽입 시작 (배치 처리 사용)
                     db_insert_start = time.time()
-                    print(f"[DEBUG] Inserting chunk {i+1} with passage_uid: {passage_uid}")
+                    print(f"[DEBUG] Preparing chunk {i+1} with passage_uid: {passage_uid} for batch insert")
                     
                     try:
-                        self.vectordb.insert_data(data, collection_name=domain)
+                        # 배치에 추가하고 필요시 삽입
+                        data_item = data[0]  # 단일 항목 추출
+                        batch_inserted = self._add_to_batch_and_insert(data_item, domain)
+                        
                         db_insert_end = time.time()
                         db_insert_duration = db_insert_end - db_insert_start
                         
-                        print(f"[DEBUG] Successfully inserted chunk {i+1}")
-                        print(f"[TIMING] Chunk {i+1} - embedding: {chunk_emb_duration:.4f}s, db_insert: {db_insert_duration:.4f}s")
+                        if batch_inserted:
+                            print(f"[DEBUG] Chunk {i+1} triggered a batch insert")
+                        else:
+                            print(f"[DEBUG] Chunk {i+1} added to batch (will be inserted later)")
+                            
+                        print(f"[TIMING] Chunk {i+1} - embedding: {chunk_emb_duration:.4f}s, batch_process: {db_insert_duration:.4f}s")
                         return f"chunk_{i+1}_success"
                         
                     except Exception as db_error:
@@ -408,9 +431,12 @@ class InteractManager:
             embedding_start_time = time.time()
             timing_logger.info(f"EMBEDDING_START - doc_id: {hashed_doc_id}, chunks: {len(chunked_texts)}")
             
-            # 청크별 임베딩 생성을 병렬 처리 (기본 3개 스레드)
-            max_workers = int(os.getenv('INSERT_CHUNK_THREADS', '3'))
-            print(f"[DEBUG] Using {max_workers} threads for chunk embedding processing")
+            # 청크별 임베딩 생성을 병렬 처리 (환경변수로 설정, 기본 10개 스레드)
+            max_workers = min(
+                int(os.getenv('INSERT_CHUNK_THREADS', '10')),  # 기본값을 10으로 설정
+                len(chunked_texts),  # 청크 수보다 많은 스레드는 불필요
+            )
+            print(f"[DEBUG] Using {max_workers} threads for chunk embedding processing (total chunks: {len(chunked_texts)})")
             
             chunk_start_time = time.time()
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -444,12 +470,18 @@ class InteractManager:
             embedding_duration = chunk_end_time - embedding_start_time
             timing_logger.info(f"EMBEDDING_END - doc_id: {hashed_doc_id}, duration: {embedding_duration:.4f}s")
             
+            # 남은 배치 데이터 처리
+            batch_flush_start = time.time()
+            print(f"[DEBUG] Flushing any remaining batch data for domain: {domain}")
+            self._flush_batch(domain)
+            batch_flush_end = time.time()
+            
             # DB 삽입 완료
             db_insert_end_time = time.time()
             db_insert_duration = db_insert_end_time - embedding_start_time
-            timing_logger.info(f"DB_INSERT_END - doc_id: {hashed_doc_id}, duration: {db_insert_duration:.4f}s")
+            timing_logger.info(f"DB_INSERT_END - doc_id: {hashed_doc_id}, duration: {db_insert_duration:.4f}s, batch_flush: {(batch_flush_end - batch_flush_start):.4f}s")
             
-            print(f"[TIMING] 모든 청크 처리 완료: {(chunk_end_time - chunk_start_time):.4f}초")
+            print(f"[TIMING] 모든 청크 처리 완료: {(chunk_end_time - chunk_start_time):.4f}초, 배치 정리: {(batch_flush_end - batch_flush_start):.4f}초")
             
             return "success"  # 성공적인 삽입 상태 반환
                 
@@ -946,3 +978,75 @@ class InteractManager:
         except Exception as e:
             print(f"Error in raw_insert_data: {str(e)}")
             raise
+
+    # 배치 삽입 처리 메소드 (새로 추가)
+    def _add_to_batch_and_insert(self, data, domain):
+        """
+        데이터를 배치에 추가하고 배치 크기가 충족되면 삽입합니다.
+        배치 처리를 통해 DB 접근 횟수를 줄입니다.
+        
+        Args:
+            data (dict): 삽입할 데이터 항목
+            domain (str): 삽입할 도메인(컬렉션)
+        
+        Returns:
+            bool: 배치 삽입이 수행되었는지 여부
+        """
+        inserted = False
+        
+        # 배치 락 획득
+        with self.__class__.batch_lock:
+            # 도메인별 배치 초기화
+            if domain not in self.__class__.batch_data:
+                self.__class__.batch_data[domain] = []
+            
+            # 데이터 배치에 추가
+            self.__class__.batch_data[domain].append(data)
+            
+            # 배치 크기 충족 시 삽입
+            if len(self.__class__.batch_data[domain]) >= self.__class__.batch_size:
+                batch_data = self.__class__.batch_data[domain].copy()
+                self.__class__.batch_data[domain] = []  # 배치 초기화
+                inserted = True
+                
+        # 배치 크기가 충족되어 삽입해야 하는 경우
+        if inserted:
+            try:
+                # 세마포어로 DB 접근 제한
+                with self.__class__.db_semaphore:
+                    print(f"[DEBUG] Batch inserting {len(batch_data)} items into {domain}")
+                    self.vectordb.insert_data(batch_data, collection_name=domain)
+                    print(f"[DEBUG] Batch insert completed successfully")
+            except Exception as e:
+                print(f"[ERROR] Batch insert failed: {str(e)}")
+                raise
+                
+        return inserted
+    
+    # 남은 배치 데이터 강제 삽입
+    def _flush_batch(self, domain):
+        """
+        지정된 도메인의 남은 배치 데이터를 강제로 삽입합니다.
+        
+        Args:
+            domain (str): 삽입할 도메인(컬렉션)
+        """
+        batch_data = None
+        
+        # 배치 락 획득
+        with self.__class__.batch_lock:
+            if domain in self.__class__.batch_data and self.__class__.batch_data[domain]:
+                batch_data = self.__class__.batch_data[domain].copy()
+                self.__class__.batch_data[domain] = []  # 배치 초기화
+        
+        # 남은 데이터가 있으면 삽입
+        if batch_data:
+            try:
+                # 세마포어로 DB 접근 제한
+                with self.__class__.db_semaphore:
+                    print(f"[DEBUG] Flushing remaining {len(batch_data)} items in batch for {domain}")
+                    self.vectordb.insert_data(batch_data, collection_name=domain)
+                    print(f"[DEBUG] Batch flush completed successfully")
+            except Exception as e:
+                print(f"[ERROR] Batch flush failed: {str(e)}")
+                raise

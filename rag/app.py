@@ -13,6 +13,7 @@ import torch
 import datetime
 import sys
 import signal
+import concurrent.futures
 
 # 시간 로깅 전용 로거 설정
 timing_logger = logging.getLogger('timing')
@@ -413,6 +414,10 @@ def insert_data():
         "ignore": true
     }
     '''
+    # API 전체 실행 시간 측정 시작
+    api_start_time = time.time()
+    logger.info("=== INSERT API START ===")
+    
     try:
         request_data = request.json
         if not request_data:
@@ -447,41 +452,45 @@ def insert_data():
             "error": 0     # 오류 발생
         }
         
-        for doc in request_data["documents"]:
+        # 스레드 안전성을 위한 락 객체
+        import threading
+        domain_creation_lock = threading.Lock()
+        
+        # 문서 레벨 병렬 처리 함수
+        def process_single_document(doc):
+            """단일 문서를 처리하는 함수"""
             try:
                 # 필수 필드 검증
                 missing_fields = [field for field in required_fields if field not in doc]
                 if missing_fields:
-                    results.append({
+                    return {
                         "status": "error",
                         "result_code": "F000004",
                         "message": f"필수 필드가 누락되었습니다: {', '.join(missing_fields)}",
                         "title": doc.get('title', 'unknown')
-                    })
-                    status_counts["error"] += 1
-                    continue
+                    }
 
                 if 'date' not in doc['tags']:
-                    results.append({
+                    return {
                         "status": "error",
                         "result_code": "F000005",
                         "message": "tags.date는 필수 입력값입니다.",
                         "title": doc['title']
-                    })
-                    status_counts["error"] += 1
-                    continue
+                    }
 
                 # doc_id 생성 및 해시 처리
                 raw_doc_id = f"{doc['tags']['date'].replace('-','')}-{doc['title']}-{doc['author']}"
                 doc_id = env_manager.data_p.hash_text(raw_doc_id, hash_type='blake')
                 
-                # 도메인이 없으면 생성
-                if doc['domain'] not in milvus_db.get_list_collection():
-                    interact_manager.create_domain(doc['domain'])
-                    # 새로 생성된 컬렉션 로드
-                    collection = Collection(doc['domain'])
-                    collection.load()
-                    print(f"[DEBUG] New collection {doc['domain']} created and loaded")
+                # 도메인 생성 시 스레드 안전성 보장
+                with domain_creation_lock:
+                    if doc['domain'] not in milvus_db.get_list_collection():
+                        logger.info(f"Creating new domain: {doc['domain']}")
+                        interact_manager.create_domain(doc['domain'])
+                        # 새로 생성된 컬렉션 로드
+                        collection = Collection(doc['domain'])
+                        collection.load()
+                        logger.info(f"New collection {doc['domain']} created and loaded")
                 
                 # INSERT 시작 시간 로깅
                 insert_start_time = time.time()
@@ -505,7 +514,7 @@ def insert_data():
                 timing_logger.info(f"INSERT_END - doc_id: {doc_id}, duration: {insert_duration:.4f}s, status: {insert_status}")
                 
                 if insert_status == "skipped":
-                    results.append({
+                    return {
                         "status": "skipped",
                         "result_code": "F000000",
                         "message": "이미 존재하는 문서로 건너뛰었습니다.",
@@ -513,10 +522,9 @@ def insert_data():
                         "raw_doc_id": raw_doc_id,
                         "domain": doc['domain'],
                         "title": doc['title']
-                    })
-                    status_counts["skipped"] += 1
+                    }
                 else:  # success
-                    results.append({
+                    return {
                         "status": "success",
                         "result_code": "F000000",
                         "message": "문서가 성공적으로 저장되었습니다.",
@@ -524,18 +532,62 @@ def insert_data():
                         "raw_doc_id": raw_doc_id,
                         "domain": doc['domain'],
                         "title": doc['title']
-                    })
-                    status_counts["success"] += 1
+                    }
                 
             except Exception as e:
                 logger.error(f"Error inserting document: {str(e)}")
-                results.append({
+                return {
                     "status": "error",
                     "result_code": "F000006",
                     "message": f"문서 저장 중 오류가 발생했습니다: {str(e)}",
                     "title": doc.get('title', 'unknown')
-                })
-                status_counts["error"] += 1
+                }
+        
+        # 문서 레벨 병렬 처리 실행 (원하는 스레드 수 설정)
+        max_document_workers = min(
+            int(os.getenv('INSERT_DOCUMENT_THREADS', '5')),  # 기본값을 5로 설정
+            len(request_data['documents']),  # 문서 수보다 많은 스레드는 불필요
+            10  # 최대 10개까지 허용 (충분한 리소스가 있다면)
+        )
+        logger.info(f"Processing {len(request_data['documents'])} documents with {max_document_workers} threads")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_document_workers) as executor:
+            # 모든 문서를 병렬로 처리
+            future_to_doc = {executor.submit(process_single_document, doc): doc for doc in request_data["documents"]}
+            
+            for future in concurrent.futures.as_completed(future_to_doc):
+                doc = future_to_doc[future]
+                try:
+                    # 타임아웃 설정 (60초)
+                    result = future.result(timeout=60)
+                    results.append(result)
+                    
+                    # 상태별 카운터 업데이트
+                    if result["status"] == "success":
+                        status_counts["success"] += 1
+                    elif result["status"] == "skipped":
+                        status_counts["skipped"] += 1
+                    else:  # error
+                        status_counts["error"] += 1
+                        
+                except concurrent.futures.TimeoutError:
+                    logger.error(f"Timeout processing document {doc.get('title', 'unknown')}")
+                    results.append({
+                        "status": "error",
+                        "result_code": "F000009",
+                        "message": "문서 처리 시간 초과 (60초)",
+                        "title": doc.get('title', 'unknown')
+                    })
+                    status_counts["error"] += 1
+                except Exception as e:
+                    logger.error(f"Error processing document {doc.get('title', 'unknown')}: {str(e)}")
+                    results.append({
+                        "status": "error",
+                        "result_code": "F000006",
+                        "message": f"문서 처리 중 예외 발생: {str(e)}",
+                        "title": doc.get('title', 'unknown')
+                    })
+                    status_counts["error"] += 1
 
         # 전체 상태 결정
         if status_counts["error"] == len(request_data["documents"]):
@@ -547,6 +599,11 @@ def insert_data():
         else:
             overall_status = "partial_error"  # 일부 실패
         
+        # API 전체 실행 시간 측정 완료
+        api_end_time = time.time()
+        api_duration = api_end_time - api_start_time
+        logger.info(f"=== INSERT API END === Duration: {api_duration:.4f}s, Status: {overall_status}, Documents: {len(request_data['documents'])}, Success: {status_counts['success']}, Skipped: {status_counts['skipped']}, Error: {status_counts['error']}")
+        
         return jsonify({
             "status": overall_status,
             "message": f"총 {len(request_data['documents'])}개 문서 중 {status_counts['success']}개 성공, {status_counts['skipped']}개 건너뜀, {status_counts['error']}개 실패",
@@ -555,7 +612,11 @@ def insert_data():
         }), 200 if overall_status != "error" else 500
         
     except Exception as e:
-        logger.error(f"Error in insert endpoint: {str(e)}")
+        # API 에러 시간 측정
+        api_end_time = time.time()
+        api_duration = api_end_time - api_start_time if 'api_start_time' in locals() else 0
+        logger.error(f"=== INSERT API ERROR === Duration: {api_duration:.4f}s, Error: {str(e)}")
+        
         return jsonify({
             "status": "error",
             "result_code": "F000007",
@@ -943,10 +1004,34 @@ def get_domains():
                 # 컬렉션 정보 조회
                 milvus_db.get_collection_info(domain)
                 
+                # 문서 개수 조회 (doc_id 기준으로 고유 개수 계산)
+                collection = Collection(domain)
+                try:
+                    # 효율적인 방법으로 고유 doc_id 개수 계산
+                    doc_count_result = collection.query(
+                        expr="",
+                        output_fields=["doc_id"],
+                        limit=1000000  # 대부분의 컬렉션에 충분한 값
+                    )
+                    
+                    # 중복 제거하여 고유 doc_id 개수 계산
+                    unique_doc_ids = set()
+                    for item in doc_count_result:
+                        if "doc_id" in item:
+                            unique_doc_ids.add(item["doc_id"])
+                    doc_count = len(unique_doc_ids)
+                    
+                    # 로깅
+                    logger.info(f"도메인 '{domain}'의 고유 문서 수: {doc_count} (전체 엔티티: {milvus_db.num_entities})")
+                except Exception as e:
+                    logger.warning(f"도메인 '{domain}'의 문서 개수 조회 실패: {str(e)}")
+                    doc_count = "계산 불가"
+                
                 # 정보 수집 및 포맷팅
                 info = {
                     "name": domain,
-                    "entity_count": milvus_db.num_entities if hasattr(milvus_db, 'num_entities') else 0
+                    "entity_count": milvus_db.num_entities if hasattr(milvus_db, 'num_entities') else 0,
+                    "document_count": doc_count,  # 문서 개수 추가
                 }
                 domain_info.append(info)
             except Exception as e:
