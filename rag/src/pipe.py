@@ -382,20 +382,43 @@ class InteractManager:
             
             # 중복 문서 체크 - 문서 단위로 체크
             collection = self.vectordb.get_collection(collection_name=domain)
+            
+            # 쿼리 설정
             expr = f'doc_id == "{hashed_doc_id}"'
-            results = collection.query(
-                expr=expr,
-                output_fields=["doc_id"],
-                limit=1
-            )
+            
+            # 중복 체크 쿼리 실행 - 쿼리 이터레이터 패턴 활용
+            page_size = 50  # 한 번에 가져올 개수
+            max_pages = 3   # 최대 페이지 수 제한 (성능 위해)
+            offset = 0
+            results = []
+            
+            # 페이지 단위로 결과 가져오기
+            for page in range(max_pages):
+                page_results = collection.query(
+                    expr=expr,
+                    output_fields=["doc_id", "passage_id"],  # 필요한 최소 필드만
+                    limit=page_size,
+                    offset=offset
+                )
+                
+                if not page_results:
+                    break  # 더 이상 결과 없음
+                    
+                results.extend(page_results)
+                offset += page_size
+                
+                # 적당한 수의 결과가 나왔다면 중단 (중복 여부 판단 가능)
+                if len(results) >= 100:  # 충분한 결과 수
+                    break
             
             # 중복된 문서가 존재하는 경우
             if results:
-                print(f"[DEBUG] Document with doc_id {hashed_doc_id} already exists in domain {domain}")
-                timing_logger.info(f"DUPLICATE_FOUND - doc_id: {hashed_doc_id}, ignore: {ignore}")
+                existing_chunks = len(results)
+                print(f"[DEBUG] Document with doc_id {hashed_doc_id} already exists in domain {domain} with at least {existing_chunks} chunks")
+                timing_logger.info(f"DUPLICATE_FOUND - doc_id: {hashed_doc_id}, chunks: {existing_chunks}, ignore: {ignore}")
                 
                 if ignore:
-                    print(f"[DEBUG] Ignoring insert due to ignore=True")
+                    print(f"[DEBUG] Skipping document due to ignore=True")
                     timing_logger.info(f"DUPLICATE_SKIPPED - doc_id: {hashed_doc_id}")
                     return "skipped"  # 중복으로 인한 건너뛰기 상태 반환
                 else:
@@ -403,11 +426,14 @@ class InteractManager:
                     
                     # 기존 문서 삭제 시작
                     delete_start_time = time.time()
-                    timing_logger.info(f"DELETE_START - doc_id: {hashed_doc_id}")
+                    timing_logger.info(f"DELETE_START - doc_id: {hashed_doc_id}, existing_chunks: {existing_chunks}")
                     
                     try:
                         # 기존 문서 삭제
-                        self.delete_data(domain, hashed_doc_id)  # 해시된 doc_id 전달
+                        delete_success = self.delete_data(domain, hashed_doc_id)
+                        if not delete_success:
+                            print(f"[ERROR] Failed to delete existing document")
+                            return "error"
                         
                         delete_end_time = time.time()
                         delete_duration = delete_end_time - delete_start_time
@@ -419,7 +445,7 @@ class InteractManager:
                         delete_duration = delete_error_time - delete_start_time
                         timing_logger.error(f"DELETE_ERROR - doc_id: {hashed_doc_id}, duration: {delete_duration:.4f}s, error: {str(delete_error)}")
                         print(f"[ERROR] Failed to delete existing document: {str(delete_error)}")
-                        raise Exception(f"Delete operation failed: {str(delete_error)}")
+                        return "error"
             
             # 텍스트 청킹 시작
             chunk_split_start = time.time()
@@ -1022,7 +1048,13 @@ class InteractManager:
             
             # 중복 체크 (큰따옴표 사용)
             expr = f'doc_id == "{hashed_doc_id}" && passage_id == {passage_id}'
-            res = collection.query(expr)
+            
+            # 최소한의 필드만 쿼리
+            res = collection.query(
+                expr=expr,
+                output_fields=["passage_uid"],  # 필요한 최소 필드만 가져옴
+                limit=1  # 존재 여부만 확인하면 됨
+            )
             
             is_update = False
             if res:
@@ -1302,41 +1334,54 @@ class InteractManager:
         return chunks
 
     def check_duplicates(self, doc_ids, domain):
-        """중복 문서 체크를 위한 개선된 쿼리"""
+        """중복 문서 체크"""
         try:
+            print(f"[DUPLICATION_CHECK] 시작: 총 {len(doc_ids)}개 문서 ID 중복 검사 (도메인: {domain})")
+            start_time = time.time()
+            
             collection = self.get_collection(domain)
             duplicates = []
-            batch_size = 10  # 한 번에 처리할 doc_id 수
             
-            for i in range(0, len(doc_ids), batch_size):
-                batch = doc_ids[i:i + batch_size]
-                # OR 조건으로 쿼리 구성
-                expr = " || ".join([f'doc_id == "{doc_id}"' for doc_id in batch])
-                
+            # 각 doc_id에 대해 직접 확인 (간단하고 확실한 방법)
+            for i, doc_id in enumerate(doc_ids):
                 try:
+                    # 로깅 - 진행 상황 (10개마다 또는 처음/마지막)
+                    if i == 0 or i == len(doc_ids)-1 or (i+1) % 10 == 0:
+                        print(f"[DUPLICATION_CHECK] 진행: {i+1}/{len(doc_ids)} 문서 검사 중...")
+                    
+                    # doc_id로 직접 쿼리
+                    expr = f'doc_id == "{doc_id}"'
+                    query_start = time.time()
                     results = collection.query(
                         expr=expr,
                         output_fields=["doc_id"],
-                        limit=len(batch)
+                        limit=1  # 존재 여부만 확인하면 됨
                     )
-                    duplicates.extend([r["doc_id"] for r in results if "doc_id" in r])
-                except Exception as query_error:
-                    print(f"[WARNING] 배치 {i//batch_size + 1} 중복 체크 실패: {str(query_error)}")
-                    # 개별 쿼리로 폴백
-                    for doc_id in batch:
-                        try:
-                            result = collection.query(
-                                expr=f'doc_id == "{doc_id}"',
-                                output_fields=["doc_id"],
-                                limit=1
-                            )
-                            if result and "doc_id" in result[0]:
-                                duplicates.append(result[0]["doc_id"])
-                        except Exception as e:
-                            print(f"[ERROR] 개별 중복 체크 실패 (doc_id: {doc_id}): {str(e)}")
-                            
+                    query_time = time.time() - query_start
+                    
+                    # 결과가 있으면 중복
+                    if results:
+                        duplicates.append(doc_id)
+                        print(f"[DUPLICATION_CHECK] 중복 발견: doc_id={doc_id}, 쿼리 시간: {query_time:.4f}초")
+                        
+                except Exception as e:
+                    print(f"[DUPLICATION_CHECK] 오류: doc_id={doc_id} 검사 실패: {str(e)}")
+            
+            total_time = time.time() - start_time
+            print(f"[DUPLICATION_CHECK] 완료: 총 {len(doc_ids)}개 문서 중 {len(duplicates)}개 중복 발견")
+            print(f"[DUPLICATION_CHECK] 성능: 총 소요시간 {total_time:.2f}초, 문서당 평균 {total_time/len(doc_ids):.4f}초")
+            
+            # 중복 문서 목록 출력 (최대 5개)
+            if duplicates:
+                display_dupes = duplicates[:5]
+                more_count = len(duplicates) - len(display_dupes)
+                display_str = ", ".join(display_dupes)
+                if more_count > 0:
+                    display_str += f" 외 {more_count}개"
+                print(f"[DUPLICATION_CHECK] 중복 문서 ID: {display_str}")
+            
             return duplicates
             
         except Exception as e:
-            print(f"[ERROR] 중복 체크 중 오류 발생: {str(e)}")
+            print(f"[DUPLICATION_CHECK] 심각한 오류: 중복 체크 실패: {str(e)}")
             return []
