@@ -28,25 +28,24 @@ def load_config():
         config_path = 'config/db_config.json'
         parent_config_path = '../config/db_config.json'
         
+        config = {}
         if os.path.exists(config_path):
             with open(config_path, 'r') as f:
                 config = json.load(f)
                 logger.info(f"설정 파일 로드 성공: {config_path}")
-                return config
         elif os.path.exists(parent_config_path):
             with open(parent_config_path, 'r') as f:
                 config = json.load(f)
                 logger.info(f"설정 파일 로드 성공: {parent_config_path}")
-                return config
-        else:
-            # 환경 변수에서 설정 가져오기
-            logger.info("설정 파일이 없어 환경 변수에서 값을 가져옵니다.")
-            ip_addr = os.environ.get('MILVUS_HOST', 'localhost')
-            port = os.environ.get('MILVUS_PORT', '19530')
-            return {
-                'ip_addr': ip_addr,
-                'port': port
-            }
+        
+        # 환경 변수에서 IP 주소 가져오기 (db_config.json에는 ip_addr이 없음)
+        ip_addr = os.environ.get('ip_addr', 'milvus-server')  # localhost 대신 milvus-server를 기본값으로 사용
+        logger.info(f"Milvus 서버 IP: {ip_addr} (환경 변수에서 로드)")
+        
+        # config에 ip_addr 추가
+        config['ip_addr'] = ip_addr
+        
+        return config
     except Exception as e:
         logger.error(f"설정 파일 로드 실패: {str(e)}")
         raise
@@ -62,26 +61,38 @@ def connect_to_milvus(config):
             pass
         
         # 연결 정보 로그
-        host = config.get('ip_addr', 'localhost')
+        host = config.get('ip_addr', 'milvus-server')
         port = config.get('port', '19530')
         logger.info(f"Milvus 서버 연결 시도: {host}:{port}")
         
-        # 연결 시도
+        # 연결 시도 - 타임아웃 설정 추가
         connections.connect(
             alias="default", 
             host=host,
-            port=port
+            port=port,
+            timeout=5.0  # 5초 타임아웃 설정
         )
         
         # 연결 확인
         if utility.has_collection("_test_connectivity_"):
             logger.info("연결 확인: 성공 (컬렉션 확인 가능)")
         else:
-            logger.info("연결 확인: 성공 (서버에 연결됨)")
+            all_collections = utility.list_collections()
+            logger.info(f"연결 확인: 성공 (서버에 연결됨, 컬렉션 수: {len(all_collections)})")
+            if all_collections:
+                logger.info(f"사용 가능한 컬렉션: {', '.join(all_collections)}")
         
         return True
     except MilvusException as me:
-        logger.error(f"Milvus 연결 실패 (Milvus 오류): {str(me)}")
+        error_code = getattr(me, 'code', '알 수 없음')
+        error_msg = str(me)
+        logger.error(f"Milvus 연결 실패 (Milvus 오류): 코드={error_code}, 메시지={error_msg}")
+        
+        # 연결 문제 가능성 진단
+        if "connection" in error_msg.lower():
+            logger.error(f"연결 문제 가능성: 1) Milvus 서버가 실행 중이 아닙니다. 2) 호스트명({host})이 잘못되었습니다. 3) 네트워크 연결 문제가 있습니다.")
+            logger.error(f"도커 환경의 경우: 컨테이너 간 통신은 'localhost' 대신 컨테이너 이름이나 네트워크 IP를 사용해야 합니다.")
+        
         return False
     except Exception as e:
         logger.error(f"Milvus 연결 실패 (일반 오류): {str(e)}")
