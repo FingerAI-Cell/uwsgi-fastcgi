@@ -368,8 +368,8 @@ class InteractManager:
             
             print(f"[DEBUG] Original text length: {len(text)}")
             
-            # doc_id는 이미 해시된 값이고, raw_doc_id는 원본 형식(YYYYMMDD-title-author)
-            hashed_doc_id = doc_id
+            # doc_id 해시 처리
+            hashed_doc_id = self.data_p.hash_text(doc_id, hash_type='blake')
             try:
                 date = tags.get('date', '00000000').replace('-','')  # 날짜 없으면 기본값
                 raw_doc_id = f"{date}-{title}-{author}"
@@ -380,7 +380,7 @@ class InteractManager:
                 raw_doc_id = f"unknown_doc_{hashed_doc_id[:8]}"  # 폴백
             print(f"[DEBUG] Hashed doc_id: {hashed_doc_id}, Raw doc_id: {raw_doc_id}")
             
-            # 중복 문서 체크
+            # 중복 문서 체크 - 문서 단위로 체크
             collection = self.vectordb.get_collection(collection_name=domain)
             expr = f'doc_id == "{hashed_doc_id}"'
             results = collection.query(
@@ -403,11 +403,11 @@ class InteractManager:
                     
                     # 기존 문서 삭제 시작
                     delete_start_time = time.time()
-                    timing_logger.info(f"DELETE_START - doc_id: {hashed_doc_id}, existing_passages: {len(results)}")
+                    timing_logger.info(f"DELETE_START - doc_id: {hashed_doc_id}")
                     
                     try:
                         # 기존 문서 삭제
-                        self.delete_data(domain, doc_id)  # 원본 doc_id 전달
+                        self.delete_data(domain, hashed_doc_id)  # 해시된 doc_id 전달
                         
                         delete_end_time = time.time()
                         delete_duration = delete_end_time - delete_start_time
