@@ -14,6 +14,7 @@ import datetime
 import sys
 import signal
 import concurrent.futures
+import threading
 
 # 시간 로깅 전용 로거 설정
 timing_logger = logging.getLogger('timing')
@@ -671,34 +672,41 @@ def insert_data():
                         10  # 최대 10개까지 제한
                     )
                     
-                    # 모든 문서의 모든 청크를 담을 리스트
+                    # 문서 병렬 처리를 위한 스레드 풀 크기 설정
+                    max_document_threads = min(
+                        int(os.getenv('INSERT_DOCUMENT_THREADS', '5')),  # 기본값: 5
+                        len(docs_to_insert),  # 문서 수보다 많은 스레드는 불필요
+                        5  # 하드 리밋 (선택적)
+                    )
+                    logger.info(f"[TIMING] 문서 병렬 처리 시작: 총 {len(docs_to_insert)}개 문서, 최대 {max_document_threads}개 스레드")
+                    
+                    # 모든 문서의 모든 청크를 담을 리스트 (스레드 안전 처리 필요)
                     all_chunks = []
+                    chunks_lock = threading.Lock()  # 스레드 안전성을 위한 락
                     chunk_to_doc_map = {}  # 청크 -> 원본 문서 매핑
                     
-                    # 청킹 시작
-                    chunking_start = time.time()
-                    
-                    # 스레드 풀을 사용한 병렬 청킹
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_embed_threads) as executor:
-                        # 각 문서에 대한 청킹 작업 제출
-                        future_to_doc = {}
-                        for doc in docs_to_insert:
-                            # 문서가 딕셔너리인지 확인하고 text 필드 추출
+                    # 문서 처리 함수 정의
+                    def process_document(doc):
+                        try:
+                            doc_process_start = time.time()
+                            doc_title = doc.get('title', 'unknown')
+                            doc_hashed_id = doc.get('_hashed_doc_id', 'unknown')
+                            
+                            logger.info(f"[TIMING] 문서 처리 시작: {doc_title} (ID: {doc_hashed_id})")
+                            
+                            # 문서 텍스트 추출
                             if isinstance(doc, dict) and 'text' in doc:
                                 doc_text = doc['text']
-                                future = executor.submit(interact_manager.chunk_document, doc_text)
                             else:
                                 # 문서 자체가 텍스트인 경우
-                                future = executor.submit(interact_manager.chunk_document, doc)
-                            future_to_doc[future] = doc
-                        
-                        for future in concurrent.futures.as_completed(future_to_doc):
-                            doc = future_to_doc[future]
-                            try:
-                                # 청킹 결과 가져오기
-                                chunks = future.result()
-                                if chunks:
-                                    # 각 청크에 문서 정보 추가
+                                doc_text = doc
+                            
+                            # 문서 청킹
+                            chunks = interact_manager.chunk_document(doc_text)
+                            
+                            if chunks:
+                                # 스레드 안전하게 all_chunks에 추가
+                                with chunks_lock:
                                     for chunk in chunks:
                                         # 청크 데이터에 doc_id 필드 직접 추가 (누락 방지)
                                         chunk_data = {
@@ -710,11 +718,29 @@ def insert_data():
                                         }
                                         all_chunks.append(chunk_data)
                                         chunk_to_doc_map[chunk[1]] = doc
-                            except Exception as e:
-                                logger.error(f"문서 청킹 오류 (title: {doc.get('title', 'unknown')}): {str(e)}")
+                            
+                            doc_process_end = time.time()
+                            doc_process_duration = doc_process_end - doc_process_start
+                            logger.info(f"[TIMING] 문서 처리 완료: {doc_title}, 청크 수: {len(chunks) if chunks else 0}, 소요시간: {doc_process_duration:.4f}초")
+                            
+                            return len(chunks) if chunks else 0
+                        except Exception as e:
+                            logger.error(f"문서 처리 오류 (title: {doc.get('title', 'unknown')}): {str(e)}")
+                            return 0
+                    
+                    # 문서 병렬 처리 실행
+                    chunking_start = time.time()
+                    total_chunks = 0
+                    
+                    # 문서 처리를 병렬로 수행
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_document_threads) as doc_executor:
+                        # 각 문서에 대한 처리 작업 제출
+                        future_results = list(doc_executor.map(process_document, docs_to_insert))
+                        # 총 청크 수 계산
+                        total_chunks = sum(future_results)
                     
                     chunking_end = time.time()
-                    logger.info(f"[TIMING] 문서 청킹 완료: {len(docs_to_insert)}개 문서 -> {len(all_chunks)}개 청크, 소요시간: {chunking_end - chunking_start:.4f}초")
+                    logger.info(f"[TIMING] 문서 청킹 완료: {len(docs_to_insert)}개 문서 -> {total_chunks}개 청크, 소요시간: {chunking_end - chunking_start:.4f}초")
                     
                     # 임베딩 및 삽입 준비
                     if all_chunks:
@@ -954,6 +980,8 @@ def insert_raw_data():
             "error": 0     # 오류 발생
         }
         
+        # 유효성 검사 단계 - 유효하지 않은 문서 필터링
+        valid_documents = []
         for doc in request_data["documents"]:
             try:
                 # 필수 필드 검증
@@ -992,87 +1020,169 @@ def insert_raw_data():
                     status_counts["error"] += 1
                     continue
                 
-                # 도메인이 없으면 생성
-                if doc['domain'] not in milvus_db.get_list_collection():
-                    interact_manager.create_domain(doc['domain'])
-                    # 새로 생성된 컬렉션 로드
-                    collection = Collection(doc['domain'])
-                    collection.load()
-                    print(f"[DEBUG] New collection {doc['domain']} created and loaded")
-                
-                # 데이터 삽입 시도 (raw_insert_data 메소드 사용)
-                insert_status = interact_manager.raw_insert_data(
-                    doc['domain'], 
-                    doc['doc_id'],  # 사용자가 제공한 doc_id 사용
-                    doc['passage_id'],  # 사용자가 제공한 passage_id 사용
-                    doc['title'], 
-                    doc['author'], 
-                    doc['text'], 
-                    doc.get('info', {}),
-                    doc['tags'],
-                    ignore=ignore  # 전체 요청에 대한 ignore 값 사용
-                )
-                
-                if insert_status == "skipped":
-                    results.append({
-                        "status": "skipped",
-                        "result_code": "F000000",
-                        "message": "이미 존재하는 문서로 건너뛰었습니다.",
-                        "doc_id": doc['doc_id'],
-                        "passage_id": doc['passage_id'],
-                        "domain": doc['domain'],
-                        "title": doc['title']
-                    })
-                    status_counts["skipped"] += 1
-                elif insert_status == "updated":
-                    results.append({
-                        "status": "updated",
-                        "result_code": "F000000",
-                        "message": "기존 문서를 삭제하고 새로운 문서로 업데이트했습니다.",
-                        "doc_id": doc['doc_id'],
-                        "passage_id": doc['passage_id'],
-                        "domain": doc['domain'],
-                        "title": doc['title']
-                    })
-                    status_counts["updated"] += 1
-                else:  # success
-                    results.append({
-                        "status": "success",
-                        "result_code": "F000000",
-                        "message": "문서가 성공적으로 저장되었습니다.",
-                        "doc_id": doc['doc_id'],
-                        "passage_id": doc['passage_id'],
-                        "domain": doc['domain'],
-                        "title": doc['title']
-                    })
-                    status_counts["success"] += 1
+                # 유효한 문서 목록에 추가
+                valid_documents.append(doc)
                 
             except Exception as e:
-                logger.error(f"Error inserting document: {str(e)}")
+                logger.error(f"Error validating document: {str(e)}")
                 results.append({
                     "status": "error",
                     "result_code": "F000006",
-                    "message": f"문서 저장 중 오류가 발생했습니다: {str(e)}",
+                    "message": f"문서 유효성 검사 중 오류가 발생했습니다: {str(e)}",
                     "title": doc.get('title', 'unknown')
                 })
                 status_counts["error"] += 1
-
+        
+        # 도메인별로 문서 그룹화
+        domain_documents = {}
+        for doc in valid_documents:
+            domain = doc['domain']
+            if domain not in domain_documents:
+                domain_documents[domain] = []
+            domain_documents[domain].append(doc)
+        
+        # 각 도메인별 처리
+        for domain, docs in domain_documents.items():
+            try:
+                # 도메인이 없으면 생성
+                if domain not in milvus_db.get_list_collection():
+                    interact_manager.create_domain(domain)
+                    # 새로 생성된 컬렉션 로드
+                    collection = Collection(domain)
+                    collection.load()
+                    print(f"[DEBUG] New collection {domain} created and loaded")
+                
+                # 문서 처리 함수 정의
+                def process_document(doc):
+                    try:
+                        # 데이터 삽입 시도 (raw_insert_data 메소드 사용)
+                        insert_status = interact_manager.raw_insert_data(
+                            doc['domain'], 
+                            doc['doc_id'],  # 사용자가 제공한 doc_id 사용
+                            doc['passage_id'],  # 사용자가 제공한 passage_id 사용
+                            doc['title'], 
+                            doc['author'], 
+                            doc['text'], 
+                            doc.get('info', {}),
+                            doc['tags'],
+                            ignore=ignore  # 전체 요청에 대한 ignore 값 사용
+                        )
+                        
+                        result = {
+                            "doc_id": doc['doc_id'],
+                            "passage_id": doc['passage_id'],
+                            "domain": doc['domain'],
+                            "title": doc['title']
+                        }
+                        
+                        if insert_status == "skipped":
+                            result.update({
+                                "status": "skipped",
+                                "result_code": "F000000",
+                                "message": "이미 존재하는 문서로 건너뛰었습니다."
+                            })
+                        elif insert_status == "updated":
+                            result.update({
+                                "status": "updated",
+                                "result_code": "F000000",
+                                "message": "기존 문서를 삭제하고 새로운 문서로 업데이트했습니다."
+                            })
+                        else:  # success
+                            result.update({
+                                "status": "success",
+                                "result_code": "F000000",
+                                "message": "문서가 성공적으로 저장되었습니다."
+                            })
+                        
+                        return result
+                    except Exception as e:
+                        logger.error(f"Error inserting document: {str(e)}")
+                        return {
+                            "status": "error",
+                            "result_code": "F000006",
+                            "message": f"문서 저장 중 오류가 발생했습니다: {str(e)}",
+                            "title": doc.get('title', 'unknown')
+                        }
+                
+                # 문서 단위 병렬 처리 실행
+                max_document_threads = min(
+                    int(os.getenv('INSERT_DOCUMENT_THREADS', '5')),  # 기본값: 5
+                    len(docs)  # 문서 수보다 많은 스레드는 불필요
+                )
+                logger.info(f"[TIMING] 도메인 '{domain}'의 문서 병렬 처리 시작: {len(docs)}개 문서, 최대 {max_document_threads}개 스레드")
+                
+                # 문서 처리를 병렬로 수행
+                doc_results = []
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_document_threads) as executor:
+                    # 각 문서에 대한 처리 작업 제출
+                    future_to_doc = {executor.submit(process_document, doc): doc for doc in docs}
+                    
+                    # 결과 수집
+                    for future in concurrent.futures.as_completed(future_to_doc):
+                        try:
+                            result = future.result()
+                            doc_results.append(result)
+                            
+                            # 상태 카운터 업데이트
+                            if result["status"] == "success":
+                                status_counts["success"] += 1
+                            elif result["status"] == "updated":
+                                status_counts["updated"] += 1
+                            elif result["status"] == "skipped":
+                                status_counts["skipped"] += 1
+                            elif result["status"] == "error":
+                                status_counts["error"] += 1
+                            
+                            # 결과 목록에 추가
+                            results.append(result)
+                        except Exception as e:
+                            logger.error(f"Error getting result: {str(e)}")
+                            # 오류 처리
+                            error_result = {
+                                "status": "error",
+                                "result_code": "F000006",
+                                "message": f"문서 처리 결과 수집 중 오류: {str(e)}",
+                                "domain": domain
+                            }
+                            results.append(error_result)
+                            status_counts["error"] += 1
+                
+                logger.info(f"[TIMING] 도메인 '{domain}'의 문서 처리 완료: {len(doc_results)}개 결과")
+                
+            except Exception as e:
+                logger.error(f"Error processing domain {domain}: {str(e)}")
+                # 도메인 처리 실패 시 해당 도메인의 모든 문서를 오류로 처리
+                for doc in docs:
+                    error_result = {
+                        "status": "error",
+                        "result_code": "F000006",
+                        "message": f"도메인 처리 중 오류 발생: {str(e)}",
+                        "title": doc.get('title', 'unknown'),
+                        "domain": domain
+                    }
+                    results.append(error_result)
+                    status_counts["error"] += 1
+        
         # 전체 상태 결정
         if status_counts["error"] == len(request_data["documents"]):
             overall_status = "error"  # 모두 실패
+            status_code = 500
         elif status_counts["error"] == 0 and status_counts["skipped"] == 0 and status_counts["updated"] == 0:
             overall_status = "success"  # 모두 새로 성공
+            status_code = 200
         elif status_counts["error"] == 0:
             overall_status = "partial_success"  # 일부는 성공/업데이트/건너뜀
+            status_code = 207  # Multi-Status
         else:
             overall_status = "partial_error"  # 일부 실패
+            status_code = 207  # Multi-Status
         
         return jsonify({
             "status": overall_status,
             "message": f"총 {len(request_data['documents'])}개 문서 중 {status_counts['success']}개 성공, {status_counts['updated']}개 업데이트, {status_counts['skipped']}개 건너뜀, {status_counts['error']}개 실패",
             "status_counts": status_counts,
             "results": results
-        }), 200 if overall_status != "error" else 500
+        }), status_code
         
     except Exception as e:
         logger.error(f"Error in insert endpoint: {str(e)}")

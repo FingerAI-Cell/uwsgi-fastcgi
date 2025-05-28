@@ -380,40 +380,13 @@ class InteractManager:
                 raw_doc_id = f"unknown_doc_{hashed_doc_id[:8]}"  # 폴백
             print(f"[DEBUG] Hashed doc_id: {hashed_doc_id}, Raw doc_id: {raw_doc_id}")
             
-            # 중복 문서 체크 - 문서 단위로 체크
-            collection = self.vectordb.get_collection(collection_name=domain)
-            
-            # 쿼리 설정
-            expr = f'doc_id == "{hashed_doc_id}"'
-            
-            # 중복 체크 쿼리 실행 - 쿼리 이터레이터 패턴 활용
-            page_size = 50  # 한 번에 가져올 개수
-            max_pages = 3   # 최대 페이지 수 제한 (성능 위해)
-            offset = 0
-            results = []
-            
-            # 페이지 단위로 결과 가져오기
-            for page in range(max_pages):
-                page_results = collection.query(
-                    expr=expr,
-                    output_fields=["doc_id", "passage_id"],  # 필요한 최소 필드만
-                    limit=page_size,
-                    offset=offset
-                )
-                
-                if not page_results:
-                    break  # 더 이상 결과 없음
-                    
-                results.extend(page_results)
-                offset += page_size
-                
-                # 적당한 수의 결과가 나왔다면 중단 (중복 여부 판단 가능)
-                if len(results) >= 100:  # 충분한 결과 수
-                    break
+            # 중복 문서 체크 - check_duplicates 함수 활용
+            duplicate_results = self.check_duplicates([hashed_doc_id], domain)
+            print(f"[DEBUG] 중복 체크 결과: {duplicate_results}")
             
             # 중복된 문서가 존재하는 경우
-            if results:
-                existing_chunks = len(results)
+            if duplicate_results and hashed_doc_id in duplicate_results:
+                existing_chunks = len(duplicate_results.get(hashed_doc_id, []))
                 print(f"[DEBUG] Document with doc_id {hashed_doc_id} already exists in domain {domain} with at least {existing_chunks} chunks")
                 timing_logger.info(f"DUPLICATE_FOUND - doc_id: {hashed_doc_id}, chunks: {existing_chunks}, ignore: {ignore}")
                 
@@ -1046,45 +1019,43 @@ class InteractManager:
             # passage_uid 생성 (해시된 doc_id 사용)
             passage_uid = f"{hashed_doc_id}-p{passage_id}"
             
-            # 중복 체크 (큰따옴표 사용)
-            expr = f'doc_id == "{hashed_doc_id}" && passage_id == {passage_id}'
+            # 중복 체크 - check_duplicates 함수 활용
+            duplicate_results = self.check_duplicates([hashed_doc_id], domain)
+            print(f"[DEBUG] 중복 체크 결과: {duplicate_results}")
             
-            # 최소한의 필드만 쿼리
-            res = collection.query(
-                expr=expr,
-                output_fields=["passage_uid"],  # 필요한 최소 필드만 가져옴
-                limit=1  # 존재 여부만 확인하면 됨
-            )
-            
+            # 추가로 passage_id 일치 여부 확인
             is_update = False
-            if res:
-                if ignore:
-                    print(f"[DEBUG] Skipping insert due to ignore=True")
-                    timing_logger.info(f"RAW_INSERT_SKIPPED - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
-                    return "skipped"
-                else:
-                    print(f"[DEBUG] Deleting existing document due to ignore=False")
-                    timing_logger.info(f"RAW_DELETE_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
-                    
-                    # 삭제 작업 시작
-                    delete_start = time.time()
-                    try:
-                        # passage_uid 기반 삭제가 doc_id & passage_id 쿼리보다 효율적
-                        del_expr = f'passage_uid == "{passage_uid}"'
-                        collection.delete(del_expr)
+            if duplicate_results and hashed_doc_id in duplicate_results:
+                # passage_id가 일치하는 항목이 있는지 확인
+                matching_passages = [p for p in duplicate_results.get(hashed_doc_id, []) if p.get('passage_id') == passage_id]
+                if matching_passages:
+                    if ignore:
+                        print(f"[DEBUG] Skipping insert due to ignore=True")
+                        timing_logger.info(f"RAW_INSERT_SKIPPED - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
+                        return "skipped"
+                    else:
+                        print(f"[DEBUG] Deleting existing document due to ignore=False")
+                        timing_logger.info(f"RAW_DELETE_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
                         
-                        delete_end = time.time()
-                        delete_duration = delete_end - delete_start
-                        timing_logger.info(f"RAW_DELETE_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s")
-                        print(f"[DEBUG] Successfully deleted existing document in {delete_duration:.4f}s")
-                        
-                        is_update = True
-                    except Exception as delete_error:
-                        delete_error_time = time.time()
-                        delete_duration = delete_error_time - delete_start
-                        timing_logger.error(f"RAW_DELETE_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s, error: {str(delete_error)}")
-                        print(f"[ERROR] Failed to delete existing document: {str(delete_error)}")
-                        raise Exception(f"Raw delete operation failed: {str(delete_error)}")
+                        # 삭제 작업 시작
+                        delete_start = time.time()
+                        try:
+                            # passage_uid 기반 삭제가 doc_id & passage_id 쿼리보다 효율적
+                            del_expr = f'passage_uid == "{passage_uid}"'
+                            collection.delete(del_expr)
+                            
+                            delete_end = time.time()
+                            delete_duration = delete_end - delete_start
+                            timing_logger.info(f"RAW_DELETE_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s")
+                            print(f"[DEBUG] Successfully deleted existing document in {delete_duration:.4f}s")
+                            
+                            is_update = True
+                        except Exception as delete_error:
+                            delete_error_time = time.time()
+                            delete_duration = delete_error_time - delete_start
+                            timing_logger.error(f"RAW_DELETE_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s, error: {str(delete_error)}")
+                            print(f"[ERROR] Failed to delete existing document: {str(delete_error)}")
+                            raise Exception(f"Raw delete operation failed: {str(delete_error)}")
             
             # 텍스트 임베딩
             embed_start = time.time()
