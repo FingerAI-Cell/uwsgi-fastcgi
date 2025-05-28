@@ -57,6 +57,9 @@ class InteractManager:
         self.max_cached_collections = 10
         self.collection_access_count = {}  # 컬렉션 접근 횟수 추적
         self._collection_cache_lock = threading.Lock()  # 컬렉션 캐시 동시성 제어
+        
+        # 텍스트 필드 최대 길이 설정
+        self.MAX_TEXT_LENGTH = 9500  # 여유를 두고 9500으로 설정
     
     def get_collection(self, collection_name):
         """
@@ -1180,73 +1183,69 @@ class InteractManager:
         return inserted
     
     def _execute_batch_insert(self, batch_data, domain):
-        """
-        배치 데이터를 실제로 데이터베이스에 삽입합니다.
-        실패 시 재시도 로직을 포함합니다.
-        
-        Args:
-            batch_data (list): 삽입할 데이터 배치
-            domain (str): 삽입할 도메인(컬렉션)
-            
-        Returns:
-            bool: 삽입 성공 여부
-        """
+        """배치 데이터 삽입을 위한 개선된 메서드"""
         try:
-            # 로거 설정
+            import gc
             import logging
             logger = logging.getLogger('rag-backend')
-            timing_logger = logging.getLogger('timing')
+            
+            collection = self.get_collection(domain)
+            max_batch_size = 50  # 한 번에 처리할 최대 레코드 수
+            total_success = 0
             
             insert_start = time.time()
             
-            # DB 세마포어 획득
-            self.__class__.init_db_semaphore()
-            with self.__class__.db_semaphore:
-                # 컬렉션 로드
-                collection = Collection(domain)
-                collection.load()
+            for i in range(0, len(batch_data), max_batch_size):
+                sub_batch = batch_data[i:i + max_batch_size]
                 
-                # 삽입 시도
+                # 각 레코드의 텍스트 길이 검증
+                valid_batch = []
+                for item in sub_batch:
+                    text_length = len(item.get('text', '').encode('utf-8'))
+                    if text_length > self.MAX_TEXT_LENGTH:
+                        # 텍스트가 너무 긴 경우 분할
+                        sub_chunks = self._split_large_chunk(item['text'])
+                        for idx, sub_chunk in enumerate(sub_chunks):
+                            new_item = item.copy()
+                            new_item['text'] = sub_chunk
+                            new_item['passage_id'] = f"{item['passage_id']}_{idx}"
+                            new_item['passage_uid'] = f"{item['passage_uid']}_{idx}"
+                            valid_batch.append(new_item)
+                    else:
+                        valid_batch.append(item)
+                
                 try:
-                    inserted = collection.insert(batch_data)
-                    collection.flush()  # 변경사항 즉시 적용
+                    # 배치 삽입 시도
+                    collection.insert(valid_batch)
+                    total_success += len(valid_batch)
                     
-                    insert_end = time.time()
-                    insert_duration = insert_end - insert_start
+                    # 주기적으로 flush 및 메모리 정리
+                    if (i + max_batch_size) % (max_batch_size * 2) == 0:
+                        collection.flush()
+                        gc.collect()
+                        
+                except Exception as batch_error:
+                    logger.warning(f"배치 삽입 실패, 개별 삽입 시도: {str(batch_error)}")
                     
-                    logger.info(f"배치 삽입 성공: {len(batch_data)}개 항목, 소요시간: {insert_duration:.4f}초")
-                    timing_logger.info(f"BATCH_INSERT - domain: {domain}, count: {len(batch_data)}, time: {insert_duration:.4f}s")
-                    
-                    return True
-                    
-                except Exception as e:
-                    # 배치 삽입 실패 시 항목별 삽입 시도
-                    logger.warning(f"배치 삽입 실패, 개별 항목 삽입 시도: {str(e)}")
-                    
-                    success_count = 0
-                    for item in batch_data:
+                    # 개별 삽입 시도
+                    for item in valid_batch:
                         try:
-                            # 개별 항목 삽입
                             collection.insert([item])
-                            success_count += 1
-                            
-                            # 5개 항목마다 flush
-                            if success_count % 5 == 0:
-                                collection.flush()
-                                
+                            total_success += 1
                         except Exception as item_error:
                             logger.error(f"개별 항목 삽입 실패: {str(item_error)}")
-                    
-                    # 마지막 flush
+                            
                     collection.flush()
                     
-                    insert_end = time.time()
-                    insert_duration = insert_end - insert_start
-                    
-                    logger.info(f"개별 항목 삽입 완료: {success_count}/{len(batch_data)}개 성공, 소요시간: {insert_duration:.4f}초")
-                    timing_logger.info(f"INDIVIDUAL_INSERT - domain: {domain}, success: {success_count}/{len(batch_data)}, time: {insert_duration:.4f}s")
-                    
-                    return success_count > 0
+            # 최종 flush
+            collection.flush()
+            
+            insert_end = time.time()
+            insert_duration = insert_end - insert_start
+            
+            logger.info(f"개별 항목 삽입 완료: {total_success}/{len(batch_data)}개 성공, 소요시간: {insert_duration:.4f}초")
+            
+            return total_success > 0
             
         except Exception as e:
             logger.error(f"배치 삽입 중 예외 발생: {str(e)}")
@@ -1263,3 +1262,81 @@ class InteractManager:
                     
                     # 락 해제 상태에서 삽입 수행
                     self._execute_batch_insert(data_to_insert, domain)
+
+    def chunk_document(self, text):
+        """문서를 청크로 나누는 메서드"""
+        try:
+            return self.data_p.chunk_text(text)
+        except Exception as e:
+            print(f"[ERROR] 문서 청킹 실패: {str(e)}")
+            raise
+
+    def _split_large_chunk(self, chunk, max_length=None):
+        """큰 청크를 최대 길이에 맞게 분할"""
+        if max_length is None:
+            max_length = self.MAX_TEXT_LENGTH
+            
+        # 청크가 최대 길이보다 작으면 그대로 반환
+        if len(chunk.encode('utf-8')) <= max_length:
+            return [chunk]
+            
+        # 문장 단위로 분할
+        sentences = chunk.split('.')
+        current_chunk = ""
+        chunks = []
+        
+        for sentence in sentences:
+            sentence = sentence.strip() + '.'
+            temp_chunk = current_chunk + ' ' + sentence if current_chunk else sentence
+            
+            if len(temp_chunk.encode('utf-8')) > max_length:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                current_chunk = sentence
+            else:
+                current_chunk = temp_chunk
+                
+        if current_chunk:
+            chunks.append(current_chunk)
+            
+        return chunks
+
+    def check_duplicates(self, doc_ids, domain):
+        """중복 문서 체크를 위한 개선된 쿼리"""
+        try:
+            collection = self.get_collection(domain)
+            duplicates = []
+            batch_size = 10  # 한 번에 처리할 doc_id 수
+            
+            for i in range(0, len(doc_ids), batch_size):
+                batch = doc_ids[i:i + batch_size]
+                # OR 조건으로 쿼리 구성
+                expr = " || ".join([f'doc_id == "{doc_id}"' for doc_id in batch])
+                
+                try:
+                    results = collection.query(
+                        expr=expr,
+                        output_fields=["doc_id"],
+                        limit=len(batch)
+                    )
+                    duplicates.extend([r["doc_id"] for r in results if "doc_id" in r])
+                except Exception as query_error:
+                    print(f"[WARNING] 배치 {i//batch_size + 1} 중복 체크 실패: {str(query_error)}")
+                    # 개별 쿼리로 폴백
+                    for doc_id in batch:
+                        try:
+                            result = collection.query(
+                                expr=f'doc_id == "{doc_id}"',
+                                output_fields=["doc_id"],
+                                limit=1
+                            )
+                            if result and "doc_id" in result[0]:
+                                duplicates.append(result[0]["doc_id"])
+                        except Exception as e:
+                            print(f"[ERROR] 개별 중복 체크 실패 (doc_id: {doc_id}): {str(e)}")
+                            
+            return duplicates
+            
+        except Exception as e:
+            print(f"[ERROR] 중복 체크 중 오류 발생: {str(e)}")
+            return []
