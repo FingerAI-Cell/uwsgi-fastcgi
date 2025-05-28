@@ -10,6 +10,18 @@ from flask.cli import with_appcontext
 import click
 import atexit
 import torch
+import datetime
+import sys
+import signal
+
+# 시간 로깅 전용 로거 설정
+timing_logger = logging.getLogger('timing')
+timing_logger.setLevel(logging.INFO)
+timing_handler = logging.FileHandler('/var/log/rag/timing.log')
+timing_formatter = logging.Formatter('%(asctime)s - %(message)s')
+timing_handler.setFormatter(timing_formatter)
+timing_logger.addHandler(timing_handler)
+timing_logger.propagate = False  # 다른 로거로 전파 방지
 
 # 로깅 설정
 logging.basicConfig(
@@ -471,6 +483,10 @@ def insert_data():
                     collection.load()
                     print(f"[DEBUG] New collection {doc['domain']} created and loaded")
                 
+                # INSERT 시작 시간 로깅
+                insert_start_time = time.time()
+                timing_logger.info(f"INSERT_START - doc_id: {doc_id}, title: {doc['title']}, domain: {doc['domain']}")
+                
                 # 데이터 삽입 시도
                 insert_status = interact_manager.insert_data(
                     doc['domain'], 
@@ -482,6 +498,11 @@ def insert_data():
                     doc['tags'],
                     ignore=ignore  # 전체 요청에 대한 ignore 값 사용
                 )
+                
+                # INSERT 완료 시간 로깅
+                insert_end_time = time.time()
+                insert_duration = insert_end_time - insert_start_time
+                timing_logger.info(f"INSERT_END - doc_id: {doc_id}, duration: {insert_duration:.4f}s, status: {insert_status}")
                 
                 if insert_status == "skipped":
                     results.append({

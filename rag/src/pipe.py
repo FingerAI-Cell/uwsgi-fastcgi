@@ -214,6 +214,10 @@ class InteractManager:
 
     def insert_data(self, domain, doc_id, title, author, text, info, tags, ignore=True):
         try:
+            # 시간 로깅을 위한 로거 설정
+            import logging
+            timing_logger = logging.getLogger('timing')
+            
             print(f"[DEBUG] Original text length: {len(text)}")
             
             # doc_id는 이미 해시된 값이고, raw_doc_id는 원본 형식(YYYYMMDD-title-author)
@@ -249,8 +253,15 @@ class InteractManager:
                     self.delete_data(domain, doc_id)  # 원본 doc_id 전달
                     print(f"[DEBUG] Successfully deleted existing document")
             
-            # 텍스트 청킹 및 삽입
+            # 텍스트 청킹 시작
+            chunk_split_start = time.time()
+            timing_logger.info(f"CHUNK_SPLIT_START - doc_id: {hashed_doc_id}")
+            
             chunked_texts = self.data_p.chunk_text(text)
+            
+            chunk_split_end = time.time()
+            chunk_split_duration = chunk_split_end - chunk_split_start
+            timing_logger.info(f"CHUNK_SPLIT_END - doc_id: {hashed_doc_id}, chunks: {len(chunked_texts)}, duration: {chunk_split_duration:.4f}s")
             print(f"[DEBUG] Number of chunks: {len(chunked_texts)}")
             
             # info와 tags가 문자열인 경우 파싱
@@ -276,8 +287,14 @@ class InteractManager:
                     # passage의 고유 식별자 생성
                     passage_uid = f"{hashed_doc_id}_{passage_id}"
                     
+                    # 개별 청크 임베딩 시작
+                    chunk_emb_start = time.time()
+                    
                     # 임베딩 생성 (GPU 제한 적용됨)
                     chunk_emb = self.emb_model.bge_embed_data(chunk)
+                    
+                    chunk_emb_end = time.time()
+                    chunk_emb_duration = chunk_emb_end - chunk_emb_start
                     
                     # 임베딩 결과 검증
                     if not chunk_emb or len(chunk_emb) == 0:
@@ -298,15 +315,25 @@ class InteractManager:
                             "tags": tags
                         }
                     ]        
+                    # DB 삽입 시작
+                    db_insert_start = time.time()
                     print(f"[DEBUG] Inserting chunk {i+1} with passage_uid: {passage_uid}")
                     self.vectordb.insert_data(data, collection_name=domain)
+                    db_insert_end = time.time()
+                    db_insert_duration = db_insert_end - db_insert_start
+                    
                     print(f"[DEBUG] Successfully inserted chunk {i+1}")
+                    print(f"[TIMING] Chunk {i+1} - embedding: {chunk_emb_duration:.4f}s, db_insert: {db_insert_duration:.4f}s")
                     return f"chunk_{i+1}_success"
                     
                 except Exception as e:
                     error_msg = f"Error processing chunk {i+1}: {str(e)}"
                     print(f"[ERROR] {error_msg}")
                     raise Exception(error_msg)
+            
+            # 임베딩 및 DB 삽입 시작
+            embedding_start_time = time.time()
+            timing_logger.info(f"EMBEDDING_START - doc_id: {hashed_doc_id}, chunks: {len(chunked_texts)}")
             
             # 청크별 임베딩 생성을 병렬 처리 (기본 3개 스레드)
             max_workers = int(os.getenv('INSERT_CHUNK_THREADS', '3'))
@@ -341,6 +368,14 @@ class InteractManager:
                 print(f"[DEBUG] Chunk processing summary: {successful_chunks} successful, {failed_chunks} failed")
             
             chunk_end_time = time.time()
+            embedding_duration = chunk_end_time - embedding_start_time
+            timing_logger.info(f"EMBEDDING_END - doc_id: {hashed_doc_id}, duration: {embedding_duration:.4f}s")
+            
+            # DB 삽입 완료
+            db_insert_end_time = time.time()
+            db_insert_duration = db_insert_end_time - embedding_start_time
+            timing_logger.info(f"DB_INSERT_END - doc_id: {hashed_doc_id}, duration: {db_insert_duration:.4f}s")
+            
             print(f"[TIMING] 모든 청크 처리 완료: {(chunk_end_time - chunk_start_time):.4f}초")
             
             return "success"  # 성공적인 삽입 상태 반환
