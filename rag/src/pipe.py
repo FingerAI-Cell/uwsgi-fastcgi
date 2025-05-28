@@ -1298,6 +1298,16 @@ class InteractManager:
     def chunk_document(self, text):
         """문서를 청크로 나누는 메서드"""
         try:
+            # 입력이 딕셔너리일 경우 text 필드 추출
+            if isinstance(text, dict) and 'text' in text:
+                print(f"[DEBUG] 입력이 딕셔너리입니다. text 필드를 추출합니다.")
+                text = text['text']
+            
+            # 입력이 문자열인지 확인
+            if not isinstance(text, str):
+                print(f"[ERROR] 문서 청킹 실패: 입력이 문자열이 아닙니다. 타입: {type(text)}")
+                raise TypeError(f"입력은 문자열이어야 합니다. 받은 타입: {type(text)}")
+            
             return self.data_p.chunk_text(text)
         except Exception as e:
             print(f"[ERROR] 문서 청킹 실패: {str(e)}")
@@ -1336,7 +1346,19 @@ class InteractManager:
     def check_duplicates(self, doc_ids, domain):
         """중복 문서 체크"""
         try:
+            if not doc_ids:
+                print(f"[DUPLICATION_CHECK] 경고: 검사할 문서가 없습니다 (도메인: {domain})")
+                return []
+                
             print(f"[DUPLICATION_CHECK] 시작: 총 {len(doc_ids)}개 문서 ID 중복 검사 (도메인: {domain})")
+            
+            # 전체 doc_id 목록 로깅 (50개 미만일 경우)
+            if len(doc_ids) <= 50:
+                print(f"[DUPLICATION_CHECK] 검사할 모든 doc_id 목록: {doc_ids}")
+            else:
+                sample_ids = doc_ids[:5] + ['...'] + doc_ids[-5:]
+                print(f"[DUPLICATION_CHECK] 검사할 doc_id 샘플: {sample_ids}")
+                
             start_time = time.time()
             
             collection = self.get_collection(domain)
@@ -1345,11 +1367,11 @@ class InteractManager:
             # 각 doc_id에 대해 직접 확인 (간단하고 확실한 방법)
             for i, doc_id in enumerate(doc_ids):
                 try:
-                    # 로깅 - 진행 상황 (10개마다 또는 처음/마지막)
-                    if i == 0 or i == len(doc_ids)-1 or (i+1) % 10 == 0:
-                        print(f"[DUPLICATION_CHECK] 진행: {i+1}/{len(doc_ids)} 문서 검사 중...")
+                    # 로깅 - 진행 상황 (5개마다 또는 처음/마지막)
+                    if i == 0 or i == len(doc_ids)-1 or (i+1) % 5 == 0:
+                        print(f"[DUPLICATION_CHECK] 진행: {i+1}/{len(doc_ids)} 문서 검사 중... (doc_id: {doc_id})")
                     
-                    # doc_id로 직접 쿼리
+                    # doc_id로 직접 쿼리 - 정확한 일치 조건 사용
                     expr = f'doc_id == "{doc_id}"'
                     query_start = time.time()
                     results = collection.query(
@@ -1360,10 +1382,18 @@ class InteractManager:
                     query_time = time.time() - query_start
                     
                     # 결과가 있으면 중복
-                    if results:
-                        duplicates.append(doc_id)
-                        print(f"[DUPLICATION_CHECK] 중복 발견: doc_id={doc_id}, 쿼리 시간: {query_time:.4f}초")
-                        
+                    if results and len(results) > 0:
+                        found_doc_id = results[0].get("doc_id", "")
+                        # 정확히 일치하는 경우만 중복으로 처리
+                        if found_doc_id == doc_id:
+                            duplicates.append(doc_id)
+                            print(f"[DUPLICATION_CHECK] 중복 발견: doc_id={doc_id}, 쿼리 시간: {query_time:.4f}초")
+                        else:
+                            print(f"[DUPLICATION_CHECK] 비슷한 ID 발견 (중복 아님): 검색={doc_id}, 발견={found_doc_id}")
+                    else:
+                        # 결과가 없는 경우도 로깅
+                        print(f"[DUPLICATION_CHECK] 중복 없음: doc_id={doc_id}, 쿼리 시간: {query_time:.4f}초")
+                    
                 except Exception as e:
                     print(f"[DUPLICATION_CHECK] 오류: doc_id={doc_id} 검사 실패: {str(e)}")
             
@@ -1371,14 +1401,16 @@ class InteractManager:
             print(f"[DUPLICATION_CHECK] 완료: 총 {len(doc_ids)}개 문서 중 {len(duplicates)}개 중복 발견")
             print(f"[DUPLICATION_CHECK] 성능: 총 소요시간 {total_time:.2f}초, 문서당 평균 {total_time/len(doc_ids):.4f}초")
             
-            # 중복 문서 목록 출력 (최대 5개)
+            # 중복 문서 목록 출력 (최대 50개)
             if duplicates:
-                display_dupes = duplicates[:5]
-                more_count = len(duplicates) - len(display_dupes)
-                display_str = ", ".join(display_dupes)
-                if more_count > 0:
-                    display_str += f" 외 {more_count}개"
-                print(f"[DUPLICATION_CHECK] 중복 문서 ID: {display_str}")
+                if len(duplicates) <= 50:
+                    print(f"[DUPLICATION_CHECK] 중복 문서 ID 전체 목록: {duplicates}")
+                else:
+                    display_dupes = duplicates[:20]
+                    more_count = len(duplicates) - len(display_dupes)
+                    print(f"[DUPLICATION_CHECK] 중복 문서 ID 일부: {display_dupes} 외 {more_count}개")
+            else:
+                print(f"[DUPLICATION_CHECK] 중복 문서 없음")
             
             return duplicates
             

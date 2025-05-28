@@ -3,11 +3,12 @@
 모든 Milvus 컬렉션에서 doc_id 인덱스를 제거하는 스크립트
 """
 
-from pymilvus import connections, utility, Collection
+from pymilvus import connections, utility, Collection, MilvusException
 import json
 import os
 import time
 import logging
+import sys
 
 # 로깅 설정
 logging.basicConfig(
@@ -23,8 +24,29 @@ logger = logging.getLogger('remove-index')
 def load_config():
     """DB 설정 로드"""
     try:
-        with open('config/db_config.json', 'r') as f:
-            return json.load(f)
+        # 먼저 상위 디렉토리에 config 폴더가 있는지 확인
+        config_path = 'config/db_config.json'
+        parent_config_path = '../config/db_config.json'
+        
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                logger.info(f"설정 파일 로드 성공: {config_path}")
+                return config
+        elif os.path.exists(parent_config_path):
+            with open(parent_config_path, 'r') as f:
+                config = json.load(f)
+                logger.info(f"설정 파일 로드 성공: {parent_config_path}")
+                return config
+        else:
+            # 환경 변수에서 설정 가져오기
+            logger.info("설정 파일이 없어 환경 변수에서 값을 가져옵니다.")
+            ip_addr = os.environ.get('MILVUS_HOST', 'localhost')
+            port = os.environ.get('MILVUS_PORT', '19530')
+            return {
+                'ip_addr': ip_addr,
+                'port': port
+            }
     except Exception as e:
         logger.error(f"설정 파일 로드 실패: {str(e)}")
         raise
@@ -32,15 +54,37 @@ def load_config():
 def connect_to_milvus(config):
     """Milvus 연결"""
     try:
+        # 먼저 이전 연결이 있으면 정리
+        try:
+            connections.disconnect("default")
+            logger.info("기존 연결 종료")
+        except:
+            pass
+        
+        # 연결 정보 로그
+        host = config.get('ip_addr', 'localhost')
+        port = config.get('port', '19530')
+        logger.info(f"Milvus 서버 연결 시도: {host}:{port}")
+        
+        # 연결 시도
         connections.connect(
             alias="default", 
-            host=config.get('ip_addr', 'localhost'),
-            port=config.get('port', '19530')
+            host=host,
+            port=port
         )
-        logger.info(f"Milvus 서버 연결 성공: {config.get('ip_addr', 'localhost')}:{config.get('port', '19530')}")
+        
+        # 연결 확인
+        if utility.has_collection("_test_connectivity_"):
+            logger.info("연결 확인: 성공 (컬렉션 확인 가능)")
+        else:
+            logger.info("연결 확인: 성공 (서버에 연결됨)")
+        
         return True
+    except MilvusException as me:
+        logger.error(f"Milvus 연결 실패 (Milvus 오류): {str(me)}")
+        return False
     except Exception as e:
-        logger.error(f"Milvus 연결 실패: {str(e)}")
+        logger.error(f"Milvus 연결 실패 (일반 오류): {str(e)}")
         return False
 
 def remove_doc_id_index():
@@ -48,7 +92,15 @@ def remove_doc_id_index():
     try:
         # 모든 컬렉션 조회
         collections = utility.list_collections()
-        logger.info(f"총 {len(collections)}개 컬렉션 발견")
+        if not collections:
+            logger.warning("컬렉션이 없습니다.")
+            return True
+            
+        logger.info(f"총 {len(collections)}개 컬렉션 발견: {', '.join(collections)}")
+        
+        success_count = 0
+        fail_count = 0
+        skip_count = 0
 
         for coll_name in collections:
             try:
@@ -56,10 +108,15 @@ def remove_doc_id_index():
                 
                 # 컬렉션 로드
                 collection = Collection(coll_name)
+                collection.load()
                 
                 # 모든 인덱스 조회
-                indexes = collection.index().info
-                logger.info(f"컬렉션 '{coll_name}'에 {len(indexes) if indexes else 0}개 인덱스 존재")
+                try:
+                    indexes = collection.index().info
+                    logger.info(f"컬렉션 '{coll_name}'에 {len(indexes) if indexes else 0}개 인덱스 존재")
+                except Exception as idx_error:
+                    logger.error(f"인덱스 정보 조회 실패: {str(idx_error)}")
+                    indexes = []
                 
                 # doc_id 관련 인덱스 찾기
                 doc_id_indexes = []
@@ -69,7 +126,14 @@ def remove_doc_id_index():
                         doc_id_indexes.append(idx)
                         logger.info(f"doc_id 인덱스 발견: {idx.get('index_name', 'unnamed')}")
                 
+                # doc_id 인덱스가 없으면 건너뛰기
+                if not doc_id_indexes:
+                    logger.info(f"컬렉션 '{coll_name}'에 doc_id 인덱스가 없습니다. 건너뜁니다.")
+                    skip_count += 1
+                    continue
+                    
                 # 인덱스 삭제
+                index_success = True
                 for idx in doc_id_indexes:
                     index_name = idx.get('index_name')
                     if index_name:
@@ -79,17 +143,31 @@ def remove_doc_id_index():
                             logger.info(f"인덱스 '{index_name}' 삭제 완료")
                         except Exception as e:
                             logger.error(f"인덱스 '{index_name}' 삭제 실패: {str(e)}")
+                            index_success = False
                 
                 # 컬렉션 변경사항 적용
-                collection.flush()
-                logger.info(f"컬렉션 '{coll_name}' 처리 완료")
+                try:
+                    collection.flush()
+                    logger.info(f"컬렉션 '{coll_name}' 변경사항 적용 완료")
+                except Exception as flush_error:
+                    logger.error(f"컬렉션 '{coll_name}' 변경사항 적용 실패: {str(flush_error)}")
+                    index_success = False
+                    
+                # 결과 집계
+                if index_success:
+                    success_count += 1
+                    logger.info(f"컬렉션 '{coll_name}' 처리 완료")
+                else:
+                    fail_count += 1
+                    logger.warning(f"컬렉션 '{coll_name}' 처리 중 일부 오류 발생")
                 
             except Exception as coll_error:
                 logger.error(f"컬렉션 '{coll_name}' 처리 중 오류: {str(coll_error)}")
+                fail_count += 1
                 continue
         
-        logger.info("모든 컬렉션 처리 완료")
-        return True
+        logger.info(f"모든 컬렉션 처리 완료 (성공: {success_count}, 실패: {fail_count}, 건너뜀: {skip_count})")
+        return fail_count == 0
     
     except Exception as e:
         logger.error(f"인덱스 제거 중 오류 발생: {str(e)}")
@@ -107,16 +185,18 @@ def main():
         # Milvus 연결
         if not connect_to_milvus(config):
             logger.error("Milvus 연결 실패로 작업 중단")
-            return
+            sys.exit(1)
         
         # 인덱스 제거
         if remove_doc_id_index():
             logger.info("인덱스 제거 작업 성공")
         else:
             logger.error("인덱스 제거 작업 실패")
+            sys.exit(2)
     
     except Exception as e:
         logger.error(f"예상치 못한 오류: {str(e)}")
+        sys.exit(3)
     
     finally:
         # 연결 종료
@@ -127,7 +207,7 @@ def main():
             pass
         
         end_time = time.time()
-        logger.info(f"작업 완료. 총 소요시간: {end_time - start_time:.2f}초")
+        logger.info(f"작업 완료. 총 소요시간: {(end_time - start_time):.2f}초")
 
 if __name__ == "__main__":
     main() 

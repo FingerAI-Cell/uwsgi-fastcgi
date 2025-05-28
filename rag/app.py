@@ -541,7 +541,14 @@ def insert_data():
                 duplicate_check_start = time.time()
                 
                 # 개선된 방식으로 중복 체크 - pipe.py의 check_duplicates 함수 사용
-                logger.info(f"[DUPLICATION_CHECK] 시작: 총 {len(doc_hashes)}개 문서 ID 중복 검사 (도메인: {domain})")
+                logger.info(f"[DUPLICATION_CHECK] 시작: 총 {len(doc_hashes)}개 문서 ID 중복 검사 (도메인: {domain}, ignore={ignore})")
+                
+                # 전체 doc_id 목록 로깅 (50개 미만일 경우)
+                if len(doc_hashes) <= 50:
+                    logger.info(f"[DUPLICATION_CHECK] 검사할 모든 doc_id 목록: {doc_hashes}")
+                else:
+                    sample_ids = doc_hashes[:5] + ['...'] + doc_hashes[-5:]
+                    logger.info(f"[DUPLICATION_CHECK] 검사할 doc_id 샘플: {sample_ids}")
                 
                 if doc_hashes:
                     try:
@@ -549,19 +556,23 @@ def insert_data():
                         existing_doc_ids = interact_manager.check_duplicates(doc_hashes, domain)
                         logger.info(f"[DUPLICATION_CHECK] 완료: 총 {len(doc_hashes)}개 문서 중 {len(existing_doc_ids)}개 중복 발견")
                         
-                        # 중복 목록 출력 (최대 5개)
+                        # 중복 목록 출력
                         if existing_doc_ids:
-                            display_dupes = existing_doc_ids[:5]
-                            more_count = len(existing_doc_ids) - len(display_dupes)
-                            display_str = ", ".join(display_dupes)
-                            if more_count > 0:
-                                display_str += f" 외 {more_count}개"
-                            logger.info(f"[DUPLICATION_CHECK] 중복 문서 ID: {display_str}")
+                            if len(existing_doc_ids) <= 50:
+                                logger.info(f"[DUPLICATION_CHECK] 중복 문서 ID 전체 목록: {existing_doc_ids}")
+                            else:
+                                display_dupes = existing_doc_ids[:20]
+                                more_count = len(existing_doc_ids) - len(display_dupes)
+                                logger.info(f"[DUPLICATION_CHECK] 중복 문서 ID 일부: {display_dupes} 외 {more_count}개")
+                            logger.info(f"[DUPLICATION_CHECK] 처리 방식: {'건너뛰기 (ignore=true)' if ignore else '삭제 후 재삽입 (ignore=false)'}")
+                        else:
+                            logger.info(f"[DUPLICATION_CHECK] 중복 문서 없음")
                     except Exception as e:
                         logger.error(f"[DUPLICATION_CHECK] 심각한 오류: 중복 체크 실패: {str(e)}")
                         existing_doc_ids = []
                 else:
                     existing_doc_ids = []
+                    logger.warning(f"[DUPLICATION_CHECK] 경고: 검사할 문서가 없습니다 (도메인: {domain})")
                 
                 duplicate_check_end = time.time()
                 logger.info(f"[TIMING] 중복 문서 체크 완료: {len(existing_doc_ids)}/{len(doc_hashes)}개 중복, 소요시간: {duplicate_check_end - duplicate_check_start:.4f}초")
@@ -577,13 +588,18 @@ def insert_data():
                         if ignore:
                             # 중복이고 ignore=true면 건너뜀
                             docs_to_skip.append(doc)
+                            logger.info(f"[DUPLICATION_CHECK] 문서 건너뛰기: {doc_id} (ignore=true)")
                         else:
                             # 중복이지만 ignore=false면 삭제 후 재삽입
                             docs_to_delete.append(doc)
                             docs_to_insert.append(doc)
+                            logger.info(f"[DUPLICATION_CHECK] 문서 재삽입: {doc_id} (ignore=false)")
                     else:
                         # 중복이 아니면 삽입
                         docs_to_insert.append(doc)
+                
+                # 주요 동작 결과 요약 로그
+                logger.info(f"[DUPLICATION_CHECK] 결과 요약: 총 {len(doc_hashes)}개 문서 중 {len(docs_to_skip)}개 건너뛰기, {len(docs_to_delete)}개 재삽입, {len(docs_to_insert) - len(docs_to_delete)}개 신규 삽입")
                 
                 # 4. 중복 문서 일괄 삭제 (ignore=false인 경우)
                 if not ignore and docs_to_delete:
@@ -632,7 +648,16 @@ def insert_data():
                     # 스레드 풀을 사용한 병렬 청킹
                     with concurrent.futures.ThreadPoolExecutor(max_workers=max_embed_threads) as executor:
                         # 각 문서에 대한 청킹 작업 제출
-                        future_to_doc = {executor.submit(interact_manager.chunk_document, doc): doc for doc in docs_to_insert}
+                        future_to_doc = {}
+                        for doc in docs_to_insert:
+                            # 문서가 딕셔너리인지 확인하고 text 필드 추출
+                            if isinstance(doc, dict) and 'text' in doc:
+                                doc_text = doc['text']
+                                future = executor.submit(interact_manager.chunk_document, doc_text)
+                            else:
+                                # 문서 자체가 텍스트인 경우
+                                future = executor.submit(interact_manager.chunk_document, doc)
+                            future_to_doc[future] = doc
                         
                         for future in concurrent.futures.as_completed(future_to_doc):
                             doc = future_to_doc[future]
@@ -642,9 +667,9 @@ def insert_data():
                                 if chunks:
                                     # 각 청크에 문서 정보 추가
                                     for chunk in chunks:
-                                        chunk['_doc'] = doc
-                                        all_chunks.append(chunk)
-                                        chunk_to_doc_map[chunk['id']] = doc
+                                        chunk_data = {'id': chunk[1], 'text': chunk[0], '_doc': doc}
+                                        all_chunks.append(chunk_data)
+                                        chunk_to_doc_map[chunk[1]] = doc
                             except Exception as e:
                                 logger.error(f"문서 청킹 오류 (title: {doc.get('title', 'unknown')}): {str(e)}")
                     
