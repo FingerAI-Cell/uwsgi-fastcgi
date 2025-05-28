@@ -1008,21 +1008,49 @@ def get_domains():
                 collection = Collection(domain)
                 try:
                     # 효율적인 방법으로 고유 doc_id 개수 계산
-                    doc_count_result = collection.query(
-                        expr="",
-                        output_fields=["doc_id"],
-                        limit=1000000  # 대부분의 컬렉션에 충분한 값
-                    )
+                    # Milvus 제한: limit는 최대 16384이어야 함
+                    max_limit = 16000  # 안전하게 16384보다 작은 값 사용
                     
-                    # 중복 제거하여 고유 doc_id 개수 계산
+                    # 페이징 처리를 위한 변수들
                     unique_doc_ids = set()
-                    for item in doc_count_result:
-                        if "doc_id" in item:
-                            unique_doc_ids.add(item["doc_id"])
+                    offset = 0
+                    total_processed = 0
+                    max_iterations = 100  # 무한 루프 방지
+                    iterations = 0
+                    
+                    # 페이징 처리로 모든 문서 ID 수집
+                    while iterations < max_iterations:
+                        iterations += 1
+                        
+                        # 한 페이지 쿼리
+                        doc_count_result = collection.query(
+                            expr="",
+                            output_fields=["doc_id"],
+                            offset=offset,
+                            limit=max_limit
+                        )
+                        
+                        # 결과가 없으면 종료
+                        if not doc_count_result:
+                            break
+                            
+                        # 고유 doc_id 추가
+                        for item in doc_count_result:
+                            if "doc_id" in item:
+                                unique_doc_ids.add(item["doc_id"])
+                        
+                        # 다음 페이지로 이동
+                        total_processed += len(doc_count_result)
+                        offset += max_limit
+                        
+                        # 마지막 페이지에서 가져온 항목 수가 max_limit보다 적으면 더 이상 데이터가 없음
+                        if len(doc_count_result) < max_limit:
+                            break
+                    
                     doc_count = len(unique_doc_ids)
                     
                     # 로깅
-                    logger.info(f"도메인 '{domain}'의 고유 문서 수: {doc_count} (전체 엔티티: {milvus_db.num_entities})")
+                    logger.info(f"도메인 '{domain}'의 고유 문서 수: {doc_count} (전체 엔티티: {milvus_db.num_entities}, 페이지 수: {iterations})")
                 except Exception as e:
                     logger.warning(f"도메인 '{domain}'의 문서 개수 조회 실패: {str(e)}")
                     doc_count = "계산 불가"
