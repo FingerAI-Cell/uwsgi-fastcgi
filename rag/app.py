@@ -540,29 +540,28 @@ def insert_data():
                 # 2. 중복 문서 일괄 확인 (단일 쿼리로 모든 문서 체크)
                 duplicate_check_start = time.time()
                 
-                # IN 연산자로 한 번의 쿼리로 중복 체크
+                # 개선된 방식으로 중복 체크 - pipe.py의 check_duplicates 함수 사용
+                logger.info(f"[DUPLICATION_CHECK] 시작: 총 {len(doc_hashes)}개 문서 ID 중복 검사 (도메인: {domain})")
+                
                 if doc_hashes:
-                    # 쿼리 제한으로 인해 배치 단위로 체크
-                    batch_size = 500  # 쿼리 제한보다 작게 설정
-                    existing_doc_ids = set()
-                    
-                    for i in range(0, len(doc_hashes), batch_size):
-                        batch_hashes = doc_hashes[i:i+batch_size]
-                        hash_list = '", "'.join(batch_hashes)
-                        expr = f'doc_id in ("{hash_list}")'
+                    try:
+                        # interact_manager의 check_duplicates 함수 사용
+                        existing_doc_ids = interact_manager.check_duplicates(doc_hashes, domain)
+                        logger.info(f"[DUPLICATION_CHECK] 완료: 총 {len(doc_hashes)}개 문서 중 {len(existing_doc_ids)}개 중복 발견")
                         
-                        try:
-                            existing_docs = collection.query(
-                                expr=expr,
-                                output_fields=["doc_id"],
-                                limit=len(batch_hashes)
-                            )
-                            
-                            for doc in existing_docs:
-                                if "doc_id" in doc:
-                                    existing_doc_ids.add(doc["doc_id"])
-                        except Exception as e:
-                            logger.warning(f"중복 체크 쿼리 오류 (배치 {i//batch_size + 1}): {str(e)}")
+                        # 중복 목록 출력 (최대 5개)
+                        if existing_doc_ids:
+                            display_dupes = existing_doc_ids[:5]
+                            more_count = len(existing_doc_ids) - len(display_dupes)
+                            display_str = ", ".join(display_dupes)
+                            if more_count > 0:
+                                display_str += f" 외 {more_count}개"
+                            logger.info(f"[DUPLICATION_CHECK] 중복 문서 ID: {display_str}")
+                    except Exception as e:
+                        logger.error(f"[DUPLICATION_CHECK] 심각한 오류: 중복 체크 실패: {str(e)}")
+                        existing_doc_ids = []
+                else:
+                    existing_doc_ids = []
                 
                 duplicate_check_end = time.time()
                 logger.info(f"[TIMING] 중복 문서 체크 완료: {len(existing_doc_ids)}/{len(doc_hashes)}개 중복, 소요시간: {duplicate_check_end - duplicate_check_start:.4f}초")
