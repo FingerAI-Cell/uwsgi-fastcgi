@@ -184,187 +184,141 @@ class InteractManager:
             is_already_hashed = len(doc_id) >= 64 and all(c in '0123456789abcdef' for c in doc_id.lower())
             hashed_doc_id = doc_id if is_already_hashed else self.data_p.hash_text(doc_id, hash_type='blake')
             hash_end = time.time()
-            timing_logger.info(f"DELETE_HASH - doc_id: {hashed_doc_id}, duration: {(hash_end - hash_start):.4f}s")
             
-            # 삭제할 문서 조건 설정 (작은따옴표 대신 큰따옴표 사용)
-            expr = f'doc_id == "{hashed_doc_id}"'
+            if not is_already_hashed:
+                print(f"[DEBUG] Hashed doc_id from '{doc_id}' to '{hashed_doc_id}' in {hash_end - hash_start:.4f}s")
             
             # 컬렉션 로드
-            collection_start = time.time()
-            collection = self.vectordb.get_collection(collection_name=domain)
-            collection_end = time.time()
-            timing_logger.info(f"DELETE_COLLECTION_LOAD - doc_id: {hashed_doc_id}, duration: {(collection_end - collection_start):.4f}s")
+            load_start = time.time()
+            collection = Collection(domain)
+            collection.load()
+            load_end = time.time()
+            print(f"[DEBUG] Loaded collection in {load_end - load_start:.4f}s")
             
-            # 총 passage 개수 확인 (페이징 처리를 위해)
-            query_start = time.time()
-            print(f"[DEBUG] Checking existence with expression: {expr}")
-            
-            # 배치 크기 정의 - 한 번에 가져올 passage 수
-            batch_size = 1000
-            
-            # 첫 배치만 가져와서 총 개수 확인
-            initial_results = collection.query(
-                expr=expr,
-                output_fields=["passage_uid"],
-                limit=batch_size
-            )
-            
-            if not initial_results:
-                print(f"[DEBUG] No documents found with doc_id: {doc_id} in domain: {domain}")
-                timing_logger.info(f"DELETE_NOT_FOUND - doc_id: {hashed_doc_id}")
-                query_end = time.time()
-                timing_logger.info(f"DELETE_QUERY - doc_id: {hashed_doc_id}, found_passages: 0, duration: {(query_end - query_start):.4f}s")
-                return
-            
-            # 전체 개수 추정 (첫 배치가 가득 찼다면 더 있을 수 있음)
-            estimated_total = len(initial_results)
-            if len(initial_results) == batch_size:
-                # 추가 배치가 있을 수 있음 - 총 개수 별도 확인
-                count_expr = f'doc_id == "{hashed_doc_id}"'
+            # 삭제할 항목의 전체 개수 확인 (선택적)
+            count_start = time.time()
+            try:
+                # 빠른 개수 체크
+                count_result = collection.query(
+                    expr=f'doc_id == "{hashed_doc_id}"',
+                    output_fields=["count(*)"],
+                    limit=1
+                )
+                total_items = count_result[0]["count(*)"] if count_result and "count(*)" in count_result[0] else None
+            except Exception as count_error:
+                # 개수 쿼리가 실패하면 대체 방법 시도
                 try:
-                    # 총 개수만 가져오는 쿼리 (속도 향상을 위해)
-                    passage_count = collection.query(
-                        expr=count_expr,
-                        output_fields=["count(*)"],
-                        limit=1
+                    items = collection.query(
+                        expr=f'doc_id == "{hashed_doc_id}"',
+                        output_fields=["passage_id"],
+                        limit=10000  # 안전한 상한값
                     )
-                    if passage_count and 'count(*)' in passage_count[0]:
-                        estimated_total = passage_count[0]['count(*)']
-                except Exception:
-                    # count 쿼리가 실패하면 기본 배치 수로 진행
-                    print(f"[DEBUG] Could not get exact passage count, using estimate: {estimated_total}+")
+                    total_items = len(items)
+                except Exception as e:
+                    print(f"[DEBUG] Count operation also failed: {str(e)}")
+                    total_items = None
+            count_end = time.time()
             
-            query_end = time.time()
-            timing_logger.info(f"DELETE_QUERY - doc_id: {hashed_doc_id}, found_passages: {estimated_total}, duration: {(query_end - query_start):.4f}s")
+            if total_items is not None:
+                print(f"[DEBUG] Found {total_items} items to delete (count in {count_end - count_start:.4f}s)")
+                timing_logger.info(f"DELETE_COUNT - doc_id: {hashed_doc_id}, count: {total_items}, time: {count_end - count_start:.4f}s")
             
-            # 대량 문서 삭제를 위한 배치 처리 준비
-            total_deleted = 0
-            delete_exec_start = time.time()
-            print(f"[DEBUG] Executing delete operation for doc_id: {hashed_doc_id}, estimated passages to delete: {estimated_total}")
-            timing_logger.info(f"DELETE_EXEC_START - doc_id: {hashed_doc_id}, passages: {estimated_total}")
+            # 효율적인 삭제 실행
+            delete_expr = f'doc_id == "{hashed_doc_id}"'
             
-            # 대용량 데이터인 경우 배치 단위로 삭제 (배치 크기 최적화)
-            # 너무 큰 배치는 성능 문제를 일으킬 수 있음
-            delete_batch_size = min(5000, max(1000, estimated_total // 5))  # 적절한 배치 크기 결정
-            
-            if estimated_total > delete_batch_size:
-                # 대용량 데이터는 배치 단위로 삭제
-                print(f"[DEBUG] Using batched deletion with batch size: {delete_batch_size}")
+            # DB 세마포어 획득
+            self.__class__.init_db_semaphore()
+            with self.__class__.db_semaphore:
+                # 실제 삭제 수행
+                exec_start = time.time()
                 
-                # passage_uid를 기준으로 배치 삭제 준비
-                all_passage_uids = []
-                
-                # 모든 passage_uid 수집 (페이징 처리)
-                offset = 0
-                while True:
-                    # 배치 단위로 passage_uid 조회
-                    batch_results = collection.query(
-                        expr=expr,
-                        output_fields=["passage_uid"],
-                        offset=offset,
-                        limit=batch_size
-                    )
+                try:
+                    # 단일 삭제 표현식으로 모든 항목 삭제
+                    deleted_count = collection.delete(delete_expr)
                     
-                    if not batch_results:
-                        break  # 더 이상 결과 없음
+                    # 즉시 변경사항 적용
+                    collection.flush()
                     
-                    # passage_uid 추출
-                    batch_uids = [item["passage_uid"] for item in batch_results if "passage_uid" in item]
-                    all_passage_uids.extend(batch_uids)
+                    exec_end = time.time()
+                    exec_duration = exec_end - exec_start
+                    delete_duration = exec_end - delete_start
                     
-                    # 다음 배치로 이동
-                    offset += len(batch_results)
-                    print(f"[DEBUG] Collected {offset}/{estimated_total} passage UIDs for deletion")
+                    print(f"[DEBUG] Successfully deleted {deleted_count} items in {exec_duration:.4f}s (total: {delete_duration:.4f}s)")
+                    timing_logger.info(f"DELETE_COMPLETE - doc_id: {hashed_doc_id}, count: {deleted_count}, time: {exec_duration:.4f}s, total: {delete_duration:.4f}s")
+                    return True
                     
-                    # 예상 개수에 도달하면 종료
-                    if offset >= estimated_total:
-                        break
-                
-                # 실제 수집된 총 개수
-                total_passages = len(all_passage_uids)
-                print(f"[DEBUG] Total passages to delete: {total_passages}")
-                
-                # 배치 단위로 삭제 실행
-                batches_since_flush = 0
-                flush_threshold = 10  # 10개 배치마다 flush 수행 (성능 최적화)
-                
-                for i in range(0, total_passages, delete_batch_size):
-                    batch_start = time.time()
-                    batch_uids = all_passage_uids[i:i+delete_batch_size]
-                    
-                    # IN 연산자를 사용한 배치 삭제 표현식 구성
-                    # passage_uid가 primary key이므로 이를 사용한 삭제가 더 효율적
-                    uid_list = '", "'.join(batch_uids)
-                    batch_expr = f'passage_uid in ("{uid_list}")'
+                except Exception as delete_error:
+                    # 삭제 실패 시 대체 전략 시도
+                    print(f"[DEBUG] Bulk delete failed: {str(delete_error)}. Trying alternative strategy...")
                     
                     try:
-                        batch_deleted = collection.delete(batch_expr)
-                        total_deleted += batch_deleted
-                        batch_end = time.time()
-                        print(f"[DEBUG] Deleted batch {i//delete_batch_size + 1}/{(total_passages+delete_batch_size-1)//delete_batch_size}: {batch_deleted} passages in {batch_end - batch_start:.4f}s")
+                        # 페이징을 통한 삭제 시도
+                        alt_start = time.time()
+                        batch_size = 1000
+                        offset = 0
+                        total_deleted = 0
+                        max_iterations = 100  # 무한 루프 방지
                         
-                        # 배치 카운터 증가
-                        batches_since_flush += 1
+                        for i in range(max_iterations):
+                            # 삭제할 항목의 ID 검색
+                            items = collection.query(
+                                expr=delete_expr,
+                                output_fields=["passage_id"],
+                                limit=batch_size,
+                                offset=offset
+                            )
+                            
+                            if not items:
+                                break  # 더 이상 삭제할 항목 없음
+                                
+                            # 개별 항목 삭제
+                            passage_ids = [f'passage_id == "{item["passage_id"]}"' for item in items if "passage_id" in item]
+                            
+                            if passage_ids:
+                                batch_expr = " || ".join(passage_ids)
+                                batch_deleted = collection.delete(batch_expr)
+                                total_deleted += batch_deleted
+                                
+                                if (i + 1) % 5 == 0 or not items:  # 5번째 배치마다 flush
+                                    collection.flush()
+                                    
+                                print(f"[DEBUG] Deleted batch {i+1}: {batch_deleted} items")
+                            
+                            # 남은 항목이 batch_size보다 적으면 종료
+                            if len(items) < batch_size:
+                                break
                         
-                        # 일정 수의 배치 처리 후 flush 수행 (메모리 관리와 성능 최적화 균형)
-                        # 너무 자주 flush하면 성능 저하, 너무 적게 하면 메모리 문제
-                        if batches_since_flush >= flush_threshold:
-                            flush_start = time.time()
-                            collection.flush()
-                            flush_end = time.time()
-                            print(f"[DEBUG] Intermediate flush completed in {flush_end - flush_start:.4f}s")
-                            batches_since_flush = 0  # 카운터 초기화
-                    except Exception as batch_error:
-                        print(f"[ERROR] Error deleting batch {i//delete_batch_size + 1}: {str(batch_error)}")
-                        # 오류가 발생해도 계속 진행
-            else:
-                # 소량 데이터는 한 번에 삭제 (기존 방식)
-                try:
-                    total_deleted = collection.delete(expr)
-                except Exception as delete_error:
-                    delete_exec_error_time = time.time()
-                    timing_logger.error(f"DELETE_EXEC_ERROR - doc_id: {hashed_doc_id}, duration: {(delete_exec_error_time - delete_exec_start):.4f}s, error: {str(delete_error)}")
-                    raise
-            
-            # 삭제 작업 완료
-            delete_exec_end = time.time()
-            timing_logger.info(f"DELETE_EXEC_END - doc_id: {hashed_doc_id}, duration: {(delete_exec_end - delete_exec_start):.4f}s, deleted: {total_deleted}")
-            
-            # 최종 Flush 작업
-            flush_start = time.time()
-            collection.flush()  # 변경사항을 즉시 적용
-            flush_end = time.time()
-            timing_logger.info(f"DELETE_FLUSH - doc_id: {hashed_doc_id}, duration: {(flush_end - flush_start):.4f}s")
-            
-            print(f"[DEBUG] Delete operation completed. Deleted {total_deleted} entries.")
-            
-            # 문서 메타데이터도 삭제
-            metadata_start = time.time()
-            doc_metadata_key = f"{domain}:{doc_id}"
-            if doc_metadata_key in self.document_metadata:
-                del self.document_metadata[doc_metadata_key]
-                print(f"[DEBUG] Deleted document metadata for key: {doc_metadata_key}")
-            metadata_end = time.time()
-            timing_logger.info(f"DELETE_METADATA - doc_id: {hashed_doc_id}, duration: {(metadata_end - metadata_start):.4f}s")
-            
-            delete_total_end = time.time()
-            delete_total_duration = delete_total_end - delete_start
-            timing_logger.info(f"DELETE_TOTAL - doc_id: {hashed_doc_id}, total_duration: {delete_total_duration:.4f}s")
-            print(f"[DEBUG] Successfully deleted all passages for doc_id: {doc_id} in domain: {domain} in {delete_total_duration:.4f}s")
+                        # 마지막 flush
+                        collection.flush()
+                        
+                        alt_end = time.time()
+                        alt_duration = alt_end - alt_start
+                        delete_duration = alt_end - delete_start
+                        
+                        print(f"[DEBUG] Successfully deleted {total_deleted} items with alternative method in {alt_duration:.4f}s (total: {delete_duration:.4f}s)")
+                        timing_logger.info(f"DELETE_COMPLETE_ALT - doc_id: {hashed_doc_id}, count: {total_deleted}, time: {alt_duration:.4f}s, total: {delete_duration:.4f}s")
+                        return True
+                        
+                    except Exception as alt_error:
+                        # 대체 방법도 실패
+                        exec_end = time.time()
+                        exec_duration = exec_end - exec_start
+                        delete_duration = exec_end - delete_start
+                        
+                        print(f"[ERROR] All delete methods failed: {str(alt_error)}")
+                        timing_logger.error(f"DELETE_FAILED - doc_id: {hashed_doc_id}, error: {str(alt_error)}, time: {exec_duration:.4f}s, total: {delete_duration:.4f}s")
+                        return False
             
         except Exception as e:
-            error_time = time.time()
-            if 'delete_start' in locals():
-                error_duration = error_time - delete_start
-                timing_logger.error(f"DELETE_TOTAL_ERROR - doc_id: {doc_id}, duration: {error_duration:.4f}s, error: {str(e)}")
-            print(f"[ERROR] Failed to delete data: {str(e)}")
-            raise
+            print(f"[ERROR] Failed to delete passages for doc_id {doc_id}: {str(e)}")
+            timing_logger.error(f"DELETE_ERROR - doc_id: {doc_id}, error: {str(e)}")
+            return False
 
     # 전역 DB 접근 세마포어 및 배치 처리 관련 변수
     db_semaphore = None
     batch_lock = None
     batch_data = {}  # 도메인별 배치 데이터 저장 {domain: [data_items]}
-    batch_size = 10  # 기본 배치 크기
+    batch_size = 100  # 기본 배치 크기
     gpu_semaphore = None  # GPU 접근 제한을 위한 세마포어
 
     @classmethod
@@ -375,7 +329,24 @@ class InteractManager:
             cls.gpu_semaphore = threading.BoundedSemaphore(max_gpu_workers)
             print(f"[DEBUG] Initialized GPU semaphore with {max_gpu_workers} max workers")
         return cls.gpu_semaphore
-
+    
+    @classmethod
+    def init_batch_processing(cls):
+        """배치 처리를 위한 공유 변수를 초기화합니다."""
+        if cls.batch_lock is None:
+            cls.batch_lock = threading.Lock()
+            cls.batch_data = {}
+            cls.batch_size = int(os.getenv('BATCH_SIZE', '100'))
+            print(f"[DEBUG] Initialized batch processing with size {cls.batch_size}")
+    
+    @classmethod
+    def init_db_semaphore(cls):
+        """DB 접근을 제한하기 위한 세마포어를 초기화합니다."""
+        if cls.db_semaphore is None:
+            max_db_connections = int(os.getenv('MAX_DB_CONNECTIONS', '20'))  # 기본값: 20
+            cls.db_semaphore = threading.BoundedSemaphore(max_db_connections)
+            print(f"[DEBUG] Initialized DB semaphore with {max_db_connections} max connections")
+    
     def insert_data(self, domain, doc_id, title, author, text, info, tags, ignore=True):
         try:
             # 시간 로깅을 위한 로거 설정
@@ -1198,70 +1169,97 @@ class InteractManager:
             # 데이터 배치에 추가
             self.__class__.batch_data[domain].extend(data_items)
             
-            # 배치 크기 충족 시 삽입
+            # 배치 크기가 충족되면 삽입
             if len(self.__class__.batch_data[domain]) >= self.__class__.batch_size:
-                batch_data = self.__class__.batch_data[domain].copy()
-                self.__class__.batch_data[domain] = []  # 배치 초기화
-                inserted = True
+                batch_data = self.__class__.batch_data[domain]
+                self.__class__.batch_data[domain] = []  # 배치 비우기
                 
-        # 배치 크기가 충족되어 삽입해야 하는 경우
-        if inserted:
-            max_retries = 3  # 최대 재시도 횟수
-            retry_count = 0
-            
-            while retry_count < max_retries:
-                try:
-                    # 세마포어로 DB 접근 제한
-                    with self.__class__.db_semaphore:
-                        print(f"[DEBUG] Batch inserting {len(batch_data)} items into {domain}")
-                        self.vectordb.insert_data(batch_data, collection_name=domain)
-                        print(f"[DEBUG] Batch insert completed successfully")
-                    return inserted  # 성공 시 종료
-                except Exception as e:
-                    retry_count += 1
-                    print(f"[ERROR] Batch insert failed (attempt {retry_count}/{max_retries}): {str(e)}")
-                    
-                    if retry_count >= max_retries:
-                        print(f"[ERROR] Max retries reached, batch insert failed permanently")
-                        
-                        # 마지막 시도에서도 실패한 경우, 원래 배치에 다시 추가하여 나중에 재시도할 수 있도록 함
-                        with self.__class__.batch_lock:
-                            # 실패한 데이터를 다시 배치에 추가 (앞쪽에 추가하여 우선 처리)
-                            self.__class__.batch_data[domain] = batch_data + self.__class__.batch_data[domain]
-                        
-                        raise  # 예외를 다시 발생시켜 호출자에게 알림
-                    
-                    # 재시도 전 잠시 대기 (지수 백오프)
-                    wait_time = 0.5 * (2 ** retry_count)  # 0.5초, 1초, 2초...
-                    print(f"[DEBUG] Waiting {wait_time:.2f}s before retry")
-                    time.sleep(wait_time)
-                
+                # 락 해제 상태에서 실제 삽입 수행
+                inserted = self._execute_batch_insert(batch_data, domain)
+        
         return inserted
     
-    # 남은 배치 데이터 강제 삽입
-    def _flush_batch(self, domain):
+    def _execute_batch_insert(self, batch_data, domain):
         """
-        지정된 도메인의 남은 배치 데이터를 강제로 삽입합니다.
+        배치 데이터를 실제로 데이터베이스에 삽입합니다.
+        실패 시 재시도 로직을 포함합니다.
         
         Args:
+            batch_data (list): 삽입할 데이터 배치
             domain (str): 삽입할 도메인(컬렉션)
+            
+        Returns:
+            bool: 삽입 성공 여부
         """
-        batch_data = None
-        
-        # 배치 락 획득
+        try:
+            # 로거 설정
+            import logging
+            logger = logging.getLogger('rag-backend')
+            timing_logger = logging.getLogger('timing')
+            
+            insert_start = time.time()
+            
+            # DB 세마포어 획득
+            self.__class__.init_db_semaphore()
+            with self.__class__.db_semaphore:
+                # 컬렉션 로드
+                collection = Collection(domain)
+                collection.load()
+                
+                # 삽입 시도
+                try:
+                    inserted = collection.insert(batch_data)
+                    collection.flush()  # 변경사항 즉시 적용
+                    
+                    insert_end = time.time()
+                    insert_duration = insert_end - insert_start
+                    
+                    logger.info(f"배치 삽입 성공: {len(batch_data)}개 항목, 소요시간: {insert_duration:.4f}초")
+                    timing_logger.info(f"BATCH_INSERT - domain: {domain}, count: {len(batch_data)}, time: {insert_duration:.4f}s")
+                    
+                    return True
+                    
+                except Exception as e:
+                    # 배치 삽입 실패 시 항목별 삽입 시도
+                    logger.warning(f"배치 삽입 실패, 개별 항목 삽입 시도: {str(e)}")
+                    
+                    success_count = 0
+                    for item in batch_data:
+                        try:
+                            # 개별 항목 삽입
+                            collection.insert([item])
+                            success_count += 1
+                            
+                            # 5개 항목마다 flush
+                            if success_count % 5 == 0:
+                                collection.flush()
+                                
+                        except Exception as item_error:
+                            logger.error(f"개별 항목 삽입 실패: {str(item_error)}")
+                    
+                    # 마지막 flush
+                    collection.flush()
+                    
+                    insert_end = time.time()
+                    insert_duration = insert_end - insert_start
+                    
+                    logger.info(f"개별 항목 삽입 완료: {success_count}/{len(batch_data)}개 성공, 소요시간: {insert_duration:.4f}초")
+                    timing_logger.info(f"INDIVIDUAL_INSERT - domain: {domain}, success: {success_count}/{len(batch_data)}, time: {insert_duration:.4f}s")
+                    
+                    return success_count > 0
+            
+        except Exception as e:
+            logger.error(f"배치 삽입 중 예외 발생: {str(e)}")
+            return False
+    
+    def flush_all_batches(self):
+        """모든 도메인의 배치 데이터를 즉시 삽입합니다."""
         with self.__class__.batch_lock:
-            if domain in self.__class__.batch_data and self.__class__.batch_data[domain]:
-                batch_data = self.__class__.batch_data[domain].copy()
-                self.__class__.batch_data[domain] = []  # 배치 초기화
-        
-        # 남은 데이터가 있으면 삽입
-        if batch_data:
-            try:
-                # 세마포어로 DB 접근 제한
-                with self.__class__.db_semaphore:
-                    print(f"[DEBUG] Flushing remaining {len(batch_data)} items in batch for {domain}")
-                    self.vectordb.insert_data(batch_data, collection_name=domain)
-                    print(f"[DEBUG] Batch flush completed successfully")
-            except Exception as e:
-                print(f"[ERROR] Batch flush failed: {str(e)}")
-                raise
+            for domain, batch_data in self.__class__.batch_data.items():
+                if batch_data:
+                    # 배치 데이터 복사 및 비우기
+                    data_to_insert = batch_data.copy()
+                    self.__class__.batch_data[domain] = []
+                    
+                    # 락 해제 상태에서 삽입 수행
+                    self._execute_batch_insert(data_to_insert, domain)

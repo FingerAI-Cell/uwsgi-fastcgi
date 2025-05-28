@@ -443,7 +443,42 @@ def insert_data():
 
         # 필수 필드 검증
         required_fields = ['domain', 'title', 'author', 'text', 'tags']
-        results = []
+        
+        # 요청 유효성 검사 결과 저장용 변수
+        validation_results = []
+        valid_documents = []
+        
+        # 유효성 검사 단계
+        validation_start = time.time()
+        for doc_index, doc in enumerate(request_data["documents"]):
+            # 필수 필드 검증
+            missing_fields = [field for field in required_fields if field not in doc]
+            if missing_fields:
+                validation_results.append({
+                    "status": "error",
+                    "result_code": "F000004",
+                    "message": f"필수 필드가 누락되었습니다: {', '.join(missing_fields)}",
+                    "title": doc.get('title', 'unknown'),
+                    "index": doc_index
+                })
+                continue
+
+            if 'date' not in doc['tags']:
+                validation_results.append({
+                    "status": "error",
+                    "result_code": "F000005",
+                    "message": "tags.date는 필수 입력값입니다.",
+                    "title": doc['title'],
+                    "index": doc_index
+                })
+                continue
+                
+            # 유효한 문서 목록에 추가
+            doc['_index'] = doc_index  # 원래 인덱스 추적용
+            valid_documents.append(doc)
+            
+        validation_end = time.time()
+        logger.info(f"[TIMING] 문서 유효성 검사 완료: {len(valid_documents)}/{len(request_data['documents'])} 유효, 소요시간: {validation_end - validation_start:.4f}초")
         
         # 상태별 카운터 초기화
         status_counts = {
@@ -452,143 +487,287 @@ def insert_data():
             "error": 0     # 오류 발생
         }
         
-        # 스레드 안전성을 위한 락 객체
-        import threading
-        domain_creation_lock = threading.Lock()
+        # 초기 에러 결과 집계
+        for result in validation_results:
+            status_counts["error"] += 1
         
-        # 문서 레벨 병렬 처리 함수
-        def process_single_document(doc):
-            """단일 문서를 처리하는 함수"""
+        # 처리 결과 저장 배열
+        results = validation_results.copy()  # 유효성 검사 결과로 초기화
+        
+        # 도메인별로 문서 그룹화 (배치 처리를 위해)
+        domain_documents = {}
+        for doc in valid_documents:
+            domain = doc['domain']
+            if domain not in domain_documents:
+                domain_documents[domain] = []
+            domain_documents[domain].append(doc)
+        
+        # 각 도메인별 처리
+        for domain, docs in domain_documents.items():
+            domain_start = time.time()
+            logger.info(f"[TIMING] 도메인 '{domain}' 처리 시작: {len(docs)}개 문서")
+            
             try:
-                # 필수 필드 검증
-                missing_fields = [field for field in required_fields if field not in doc]
-                if missing_fields:
-                    return {
-                        "status": "error",
-                        "result_code": "F000004",
-                        "message": f"필수 필드가 누락되었습니다: {', '.join(missing_fields)}",
-                        "title": doc.get('title', 'unknown')
-                    }
-
-                if 'date' not in doc['tags']:
-                    return {
-                        "status": "error",
-                        "result_code": "F000005",
-                        "message": "tags.date는 필수 입력값입니다.",
-                        "title": doc['title']
-                    }
-
-                # doc_id 생성 및 해시 처리
-                raw_doc_id = f"{doc['tags']['date'].replace('-','')}-{doc['title']}-{doc['author']}"
-                doc_id = env_manager.data_p.hash_text(raw_doc_id, hash_type='blake')
+                # 도메인 생성 (없는 경우에만)
+                if domain not in milvus_db.get_list_collection():
+                    logger.info(f"Creating new domain: {domain}")
+                    interact_manager.create_domain(domain)
+                    # 새로 생성된 컬렉션 로드
+                    collection = Collection(domain)
+                    collection.load()
+                    logger.info(f"New collection {domain} created and loaded")
                 
-                # 도메인 생성 시 스레드 안전성 보장
-                with domain_creation_lock:
-                    if doc['domain'] not in milvus_db.get_list_collection():
-                        logger.info(f"Creating new domain: {doc['domain']}")
-                        interact_manager.create_domain(doc['domain'])
-                        # 새로 생성된 컬렉션 로드
-                        collection = Collection(doc['domain'])
-                        collection.load()
-                        logger.info(f"New collection {doc['domain']} created and loaded")
+                # 1. 문서 ID 해시 계산 및 중복 확인 준비
+                doc_hashes = []
+                doc_hash_map = {}  # 해시 ID -> 원본 문서 매핑
                 
-                # INSERT 시작 시간 로깅
-                insert_start_time = time.time()
-                timing_logger.info(f"INSERT_START - doc_id: {doc_id}, title: {doc['title']}, domain: {doc['domain']}")
+                for doc in docs:
+                    # doc_id 생성 및 해시 처리
+                    raw_doc_id = f"{doc['tags']['date'].replace('-','')}-{doc['title']}-{doc['author']}"
+                    hashed_doc_id = env_manager.data_p.hash_text(raw_doc_id, hash_type='blake')
+                    
+                    # 추적을 위해 문서에 해시 ID 저장
+                    doc['_hashed_doc_id'] = hashed_doc_id
+                    doc['_raw_doc_id'] = raw_doc_id
+                    
+                    doc_hashes.append(hashed_doc_id)
+                    doc_hash_map[hashed_doc_id] = doc
                 
-                # 데이터 삽입 시도
-                insert_status = interact_manager.insert_data(
-                    doc['domain'], 
-                    doc_id,  # 해시된 doc_id 사용
-                    doc['title'], 
-                    doc['author'], 
-                    doc['text'], 
-                    doc.get('info', {}),
-                    doc['tags'],
-                    ignore=ignore  # 전체 요청에 대한 ignore 값 사용
-                )
+                # 컬렉션 로드
+                collection = Collection(domain)
+                collection.load()
                 
-                # INSERT 완료 시간 로깅
-                insert_end_time = time.time()
-                insert_duration = insert_end_time - insert_start_time
-                timing_logger.info(f"INSERT_END - doc_id: {doc_id}, duration: {insert_duration:.4f}s, status: {insert_status}")
+                # 2. 중복 문서 일괄 확인 (단일 쿼리로 모든 문서 체크)
+                duplicate_check_start = time.time()
                 
-                if insert_status == "skipped":
-                    return {
+                # IN 연산자로 한 번의 쿼리로 중복 체크
+                if doc_hashes:
+                    # 쿼리 제한으로 인해 배치 단위로 체크
+                    batch_size = 500  # 쿼리 제한보다 작게 설정
+                    existing_doc_ids = set()
+                    
+                    for i in range(0, len(doc_hashes), batch_size):
+                        batch_hashes = doc_hashes[i:i+batch_size]
+                        hash_list = '", "'.join(batch_hashes)
+                        expr = f'doc_id in ("{hash_list}")'
+                        
+                        try:
+                            existing_docs = collection.query(
+                                expr=expr,
+                                output_fields=["doc_id"],
+                                limit=len(batch_hashes)
+                            )
+                            
+                            for doc in existing_docs:
+                                if "doc_id" in doc:
+                                    existing_doc_ids.add(doc["doc_id"])
+                        except Exception as e:
+                            logger.warning(f"중복 체크 쿼리 오류 (배치 {i//batch_size + 1}): {str(e)}")
+                
+                duplicate_check_end = time.time()
+                logger.info(f"[TIMING] 중복 문서 체크 완료: {len(existing_doc_ids)}/{len(doc_hashes)}개 중복, 소요시간: {duplicate_check_end - duplicate_check_start:.4f}초")
+                
+                # 3. 문서 분류 (삭제할 문서, 건너뛸 문서, 삽입할 문서)
+                docs_to_delete = []
+                docs_to_skip = []
+                docs_to_insert = []
+                
+                for doc_id in doc_hashes:
+                    doc = doc_hash_map[doc_id]
+                    if doc_id in existing_doc_ids:
+                        if ignore:
+                            # 중복이고 ignore=true면 건너뜀
+                            docs_to_skip.append(doc)
+                        else:
+                            # 중복이지만 ignore=false면 삭제 후 재삽입
+                            docs_to_delete.append(doc)
+                            docs_to_insert.append(doc)
+                    else:
+                        # 중복이 아니면 삽입
+                        docs_to_insert.append(doc)
+                
+                # 4. 중복 문서 일괄 삭제 (ignore=false인 경우)
+                if not ignore and docs_to_delete:
+                    delete_start = time.time()
+                    delete_ids = [doc['_hashed_doc_id'] for doc in docs_to_delete]
+                    
+                    # 배치 단위로 삭제 (쿼리 크기 제한 고려)
+                    delete_batch_size = 500
+                    total_deleted = 0
+                    
+                    for i in range(0, len(delete_ids), delete_batch_size):
+                        batch_ids = delete_ids[i:i+delete_batch_size]
+                        ids_list = '", "'.join(batch_ids)
+                        expr = f'doc_id in ("{ids_list}")'
+                        
+                        try:
+                            deleted_count = collection.delete(expr)
+                            total_deleted += deleted_count
+                            logger.info(f"[TIMING] 배치 삭제 완료 ({i//delete_batch_size + 1}/{(len(delete_ids)+delete_batch_size-1)//delete_batch_size}): {deleted_count}개 항목")
+                        except Exception as e:
+                            logger.error(f"배치 삭제 오류 (배치 {i//delete_batch_size + 1}): {str(e)}")
+                    
+                    # 삭제 후 즉시 flush하여 변경사항 적용
+                    collection.flush()
+                    
+                    delete_end = time.time()
+                    logger.info(f"[TIMING] 문서 일괄 삭제 완료: {total_deleted}개 항목, 소요시간: {delete_end - delete_start:.4f}초")
+                
+                # 5. 삽입할 문서 처리 (청킹 및 임베딩)
+                if docs_to_insert:
+                    insert_start = time.time()
+                    
+                    # 임베딩 스레드 풀 생성
+                    max_embed_threads = min(
+                        int(os.getenv('INSERT_CHUNK_THREADS', '10')),  # 기본값: 10
+                        10  # 최대 10개까지 제한
+                    )
+                    
+                    # 모든 문서의 모든 청크를 담을 리스트
+                    all_chunks = []
+                    chunk_to_doc_map = {}  # 청크 -> 원본 문서 매핑
+                    
+                    # 청킹 시작
+                    chunking_start = time.time()
+                    
+                    # 스레드 풀을 사용한 병렬 청킹
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_embed_threads) as executor:
+                        # 각 문서에 대한 청킹 작업 제출
+                        future_to_doc = {executor.submit(interact_manager.chunk_document, doc): doc for doc in docs_to_insert}
+                        
+                        for future in concurrent.futures.as_completed(future_to_doc):
+                            doc = future_to_doc[future]
+                            try:
+                                # 청킹 결과 가져오기
+                                chunks = future.result()
+                                if chunks:
+                                    # 각 청크에 문서 정보 추가
+                                    for chunk in chunks:
+                                        chunk['_doc'] = doc
+                                        all_chunks.append(chunk)
+                                        chunk_to_doc_map[chunk['id']] = doc
+                            except Exception as e:
+                                logger.error(f"문서 청킹 오류 (title: {doc.get('title', 'unknown')}): {str(e)}")
+                    
+                    chunking_end = time.time()
+                    logger.info(f"[TIMING] 문서 청킹 완료: {len(docs_to_insert)}개 문서 -> {len(all_chunks)}개 청크, 소요시간: {chunking_end - chunking_start:.4f}초")
+                    
+                    # 임베딩 및 삽입 준비
+                    if all_chunks:
+                        # 임베딩 스레드 풀 생성
+                        embedding_start = time.time()
+                        
+                        # 배치 크기 설정
+                        batch_size = int(os.getenv('BATCH_SIZE', '100'))
+                        chunk_batch_size = min(batch_size, 100)  # 안전을 위해 상한선 설정
+                        
+                        # 임베딩 및 데이터 준비
+                        prepared_data = []
+                        
+                        # 스레드 풀을 사용한 병렬 임베딩
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=max_embed_threads) as executor:
+                            # 각 청크에 대한 임베딩 작업 제출
+                            future_to_chunk = {executor.submit(interact_manager.embed_and_prepare_chunk, chunk, domain): chunk for chunk in all_chunks}
+                            
+                            for future in concurrent.futures.as_completed(future_to_chunk):
+                                chunk = future_to_chunk[future]
+                                try:
+                                    # 임베딩 및 데이터 준비 결과 가져오기
+                                    data = future.result()
+                                    if data:
+                                        prepared_data.append(data)
+                                except Exception as e:
+                                    logger.error(f"청크 임베딩 오류 (chunk_id: {chunk.get('id', 'unknown')}): {str(e)}")
+                        
+                        embedding_end = time.time()
+                        logger.info(f"[TIMING] 청크 임베딩 완료: {len(prepared_data)}/{len(all_chunks)}개 청크, 소요시간: {embedding_end - embedding_start:.4f}초")
+                        
+                        # 배치 삽입 수행
+                        if prepared_data:
+                            insert_db_start = time.time()
+                            
+                            # 배치 단위로 삽입 (배치 크기 고려)
+                            for i in range(0, len(prepared_data), chunk_batch_size):
+                                batch_data = prepared_data[i:i+chunk_batch_size]
+                                
+                                try:
+                                    # 배치 삽입 수행
+                                    interact_manager.batch_insert_data(domain, batch_data)
+                                    logger.info(f"[TIMING] 배치 삽입 완료 ({i//chunk_batch_size + 1}/{(len(prepared_data)+chunk_batch_size-1)//chunk_batch_size}): {len(batch_data)}개 청크")
+                                except Exception as e:
+                                    logger.error(f"배치 삽입 오류 (배치 {i//chunk_batch_size + 1}): {str(e)}")
+                            
+                            insert_db_end = time.time()
+                            logger.info(f"[TIMING] DB 삽입 완료: {len(prepared_data)}개 청크, 소요시간: {insert_db_end - insert_db_start:.4f}초")
+                    
+                    insert_end = time.time()
+                    logger.info(f"[TIMING] 문서 삽입 처리 완료: 소요시간: {insert_end - insert_start:.4f}초")
+                
+                # 6. 결과 구성
+                for doc in docs_to_skip:
+                    results.append({
                         "status": "skipped",
                         "result_code": "F000000",
                         "message": "이미 존재하는 문서로 건너뛰었습니다.",
-                        "doc_id": doc_id,
-                        "raw_doc_id": raw_doc_id,
+                        "doc_id": doc['_hashed_doc_id'],
+                        "raw_doc_id": doc['_raw_doc_id'],
                         "domain": doc['domain'],
-                        "title": doc['title']
-                    }
-                else:  # success
-                    return {
-                        "status": "success",
-                        "result_code": "F000000",
-                        "message": "문서가 성공적으로 저장되었습니다.",
-                        "doc_id": doc_id,
-                        "raw_doc_id": raw_doc_id,
-                        "domain": doc['domain'],
-                        "title": doc['title']
-                    }
-                
-            except Exception as e:
-                logger.error(f"Error inserting document: {str(e)}")
-                return {
-                    "status": "error",
-                    "result_code": "F000006",
-                    "message": f"문서 저장 중 오류가 발생했습니다: {str(e)}",
-                    "title": doc.get('title', 'unknown')
-                }
-        
-        # 문서 레벨 병렬 처리 실행 (원하는 스레드 수 설정)
-        max_document_workers = min(
-            int(os.getenv('INSERT_DOCUMENT_THREADS', '5')),  # 기본값을 5로 설정
-            len(request_data['documents']),  # 문서 수보다 많은 스레드는 불필요
-            10  # 최대 10개까지 허용 (충분한 리소스가 있다면)
-        )
-        logger.info(f"Processing {len(request_data['documents'])} documents with {max_document_workers} threads")
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_document_workers) as executor:
-            # 모든 문서를 병렬로 처리
-            future_to_doc = {executor.submit(process_single_document, doc): doc for doc in request_data["documents"]}
-            
-            for future in concurrent.futures.as_completed(future_to_doc):
-                doc = future_to_doc[future]
-                try:
-                    # 타임아웃 설정 (60초)
-                    result = future.result(timeout=60)
-                    results.append(result)
-                    
-                    # 상태별 카운터 업데이트
-                    if result["status"] == "success":
-                        status_counts["success"] += 1
-                    elif result["status"] == "skipped":
-                        status_counts["skipped"] += 1
-                    else:  # error
-                        status_counts["error"] += 1
-                        
-                except concurrent.futures.TimeoutError:
-                    logger.error(f"Timeout processing document {doc.get('title', 'unknown')}")
-                    results.append({
-                        "status": "error",
-                        "result_code": "F000009",
-                        "message": "문서 처리 시간 초과 (60초)",
-                        "title": doc.get('title', 'unknown')
+                        "title": doc['title'],
+                        "index": doc['_index']
                     })
-                    status_counts["error"] += 1
-                except Exception as e:
-                    logger.error(f"Error processing document {doc.get('title', 'unknown')}: {str(e)}")
+                    status_counts["skipped"] += 1
+                
+                for doc in docs_to_insert:
+                    if doc in docs_to_delete:
+                        # 삭제 후 재삽입된 문서
+                        results.append({
+                            "status": "updated",
+                            "result_code": "F000000",
+                            "message": "기존 문서가 삭제되고 새 문서로 대체되었습니다.",
+                            "doc_id": doc['_hashed_doc_id'],
+                            "raw_doc_id": doc['_raw_doc_id'],
+                            "domain": doc['domain'],
+                            "title": doc['title'],
+                            "index": doc['_index']
+                        })
+                    else:
+                        # 새로 삽입된 문서
+                        results.append({
+                            "status": "success",
+                            "result_code": "F000000",
+                            "message": "문서가 성공적으로 저장되었습니다.",
+                            "doc_id": doc['_hashed_doc_id'],
+                            "raw_doc_id": doc['_raw_doc_id'],
+                            "domain": doc['domain'],
+                            "title": doc['title'],
+                            "index": doc['_index']
+                        })
+                    status_counts["success"] += 1
+                
+                domain_end = time.time()
+                logger.info(f"[TIMING] 도메인 '{domain}' 처리 완료: 소요시간: {domain_end - domain_start:.4f}초")
+                
+            except Exception as domain_error:
+                logger.error(f"도메인 '{domain}' 처리 중 오류: {str(domain_error)}")
+                # 도메인 처리 실패 시 해당 도메인의 모든 문서를 오류로 처리
+                for doc in docs:
                     results.append({
                         "status": "error",
                         "result_code": "F000006",
-                        "message": f"문서 처리 중 예외 발생: {str(e)}",
-                        "title": doc.get('title', 'unknown')
+                        "message": f"도메인 처리 중 오류 발생: {str(domain_error)}",
+                        "title": doc['title'],
+                        "index": doc['_index']
                     })
                     status_counts["error"] += 1
-
+        
+        # 결과 정렬 (원래 인덱스 기준)
+        results.sort(key=lambda x: x.get("index", 0))
+        
+        # 인덱스 필드 제거 (클라이언트에게 불필요)
+        for result in results:
+            if "index" in result:
+                del result["index"]
+        
         # 전체 상태 결정
         if status_counts["error"] == len(request_data["documents"]):
             overall_status = "error"  # 모두 실패
@@ -608,7 +787,10 @@ def insert_data():
             "status": overall_status,
             "message": f"총 {len(request_data['documents'])}개 문서 중 {status_counts['success']}개 성공, {status_counts['skipped']}개 건너뜀, {status_counts['error']}개 실패",
             "status_counts": status_counts,
-            "results": results
+            "results": results,
+            "performance": {
+                "total_time": api_duration
+            }
         }), 200 if overall_status != "error" else 500
         
     except Exception as e:
@@ -1014,19 +1196,20 @@ def get_domains():
                 info = {
                     "name": domain,
                     "entity_count": collection.num_entities if hasattr(collection, 'num_entities') else 0,
-                    "document_count": doc_count,  # 문서 개수 추가
+                    "document_count": doc_count
                 }
                 domain_info.append(info)
+                
             except Exception as e:
-                # 컬렉션 접근 오류 발생 시 기본 정보만 추가
                 logger.error(f"도메인 '{domain}' 정보 조회 실패: {str(e)}")
+                # 오류 발생 시에도 기본 정보는 제공
                 domain_info.append({
                     "name": domain,
                     "entity_count": 0,
-                    "document_count": "계산 불가",
-                    "error": str(e)
+                    "document_count": "계산 불가"
                 })
         
+        # 전체 응답 구성
         return jsonify({
             "result_code": "S000000",
             "message": "도메인 목록을 성공적으로 조회했습니다.",
@@ -1034,17 +1217,17 @@ def get_domains():
         }), 200
         
     except Exception as e:
-        logger.error(f"도메인 목록 조회 중 오류 발생: {str(e)}")
+        logger.error(f"도메인 목록 조회 중 오류: {str(e)}")
         return jsonify({
-            "result_code": "F000010",
-            "message": f"도메인 목록 조회에 실패했습니다: {str(e)}",
+            "result_code": "F000001",
+            "message": f"도메인 목록 조회 중 오류가 발생했습니다: {str(e)}",
             "domains": []
         }), 500
 
 def calculate_domain_document_count(collection, domain_name):
     """
-    도메인(컬렉션)의 고유 문서 개수를 계산합니다.
-    다양한 방법을 시도하며, 컬렉션 크기에 따라 적절한 방법을 선택합니다.
+    Query Iterator를 사용하여 도메인(컬렉션)의 고유 문서 개수를 계산합니다.
+    대용량 컬렉션에서도 효율적으로 작동합니다.
     
     Args:
         collection: 컬렉션 객체
@@ -1058,175 +1241,84 @@ def calculate_domain_document_count(collection, domain_name):
         collection_size = collection.num_entities if hasattr(collection, 'num_entities') else 0
         logger.info(f"도메인 '{domain_name}'의 전체 엔티티 수: {collection_size}")
         
-        # 작은 컬렉션은 전체 데이터 수집으로 빠르게 계산
-        if collection_size <= 50000:
-            return calculate_small_collection_doc_count(collection, domain_name)
-        # 중간 크기 컬렉션은 페이징 처리로 계산
-        elif collection_size <= 1000000:
-            return calculate_medium_collection_doc_count(collection, domain_name)
-        # 대형 컬렉션은 그룹화 또는 샘플링 기반 추정
-        else:
-            return calculate_large_collection_doc_count(collection, domain_name, collection_size)
-            
-    except Exception as e:
-        logger.error(f"문서 개수 계산 중 오류 발생: {str(e)}")
-        return "계산 불가"
-
-def calculate_small_collection_doc_count(collection, domain_name):
-    """작은 컬렉션에 대한 문서 개수 계산 (전체 데이터 조회)"""
-    try:
-        # 한 번에 가져올 수 있는 최대 크기로 조회
-        max_limit = 16000  # Milvus 제한
-        
-        # 모든 doc_id 조회
-        results = collection.query(
-            expr="",
-            output_fields=["doc_id"],
-            limit=max_limit
-        )
-        
-        if not results:
-            logger.info(f"도메인 '{domain_name}'에 문서가 없습니다.")
+        if collection_size == 0:
             return 0
             
-        # 고유 doc_id 추출
+        # 준비: 고유 doc_id 집합과 타이머 초기화
         unique_doc_ids = set()
-        for item in results:
-            if "doc_id" in item:
-                unique_doc_ids.add(item["doc_id"])
-                
-        doc_count = len(unique_doc_ids)
-        logger.info(f"도메인 '{domain_name}'의 고유 문서 수: {doc_count} (전체 쿼리)")
-        return doc_count
+        start_time = time.time()
         
-    except Exception as e:
-        logger.warning(f"작은 컬렉션 문서 개수 계산 실패: {str(e)}")
-        return "계산 불가"
-
-def calculate_medium_collection_doc_count(collection, domain_name):
-    """중간 크기 컬렉션에 대한 문서 개수 계산 (페이징 처리)"""
-    try:
-        # 효율적인 방법으로 고유 doc_id 개수 계산
-        max_limit = 16000  # Milvus 제한: 최대 16384
-        
-        # 페이징 처리를 위한 변수들
-        unique_doc_ids = set()
-        offset = 0
-        max_iterations = 100  # 무한 루프 방지 (최대 160만 레코드까지 커버)
-        iterations = 0
-        
-        # 페이징 처리로 모든 문서 ID 수집
-        while iterations < max_iterations:
-            iterations += 1
-            
-            # 한 페이지 쿼리
-            page_results = collection.query(
-                expr="",
-                output_fields=["doc_id"],
-                offset=offset,
-                limit=max_limit
-            )
-            
-            # 결과가 없으면 종료
-            if not page_results:
-                break
-                
-            # 고유 doc_id 추가
-            for item in page_results:
-                if "doc_id" in item:
-                    unique_doc_ids.add(item["doc_id"])
-            
-            # 다음 페이지로 이동
-            offset += len(page_results)
-            
-            # 마지막 페이지에서 가져온 항목 수가 max_limit보다 적으면 더 이상 데이터가 없음
-            if len(page_results) < max_limit:
-                break
-        
-        doc_count = len(unique_doc_ids)
-        logger.info(f"도메인 '{domain_name}'의 고유 문서 수: {doc_count} (페이지 수: {iterations})")
-        return doc_count
-        
-    except Exception as e:
-        logger.warning(f"중간 크기 컬렉션 문서 개수 계산 실패: {str(e)}")
-        return "계산 불가"
-
-def calculate_large_collection_doc_count(collection, domain_name, collection_size):
-    """대형 컬렉션에 대한 문서 개수 계산 (샘플링 또는 추정)"""
-    try:
-        # 방법 1: GROUP BY 쿼리 시도 (가장 정확한 방법이지만 지원되지 않을 수 있음)
         try:
-            # Milvus가 GROUP BY를 지원하면 이 방법이 가장 정확함
-            count_results = collection.query(
-                expr="",
-                output_fields=["count(DISTINCT doc_id)"],
-                limit=1
-            )
-            if count_results and "count(DISTINCT doc_id)" in count_results[0]:
-                doc_count = count_results[0]["count(DISTINCT doc_id)"]
-                logger.info(f"도메인 '{domain_name}'의 고유 문서 수: {doc_count} (GROUP BY 쿼리)")
-                return doc_count
-        except Exception as group_error:
-            logger.debug(f"GROUP BY 쿼리 실패: {str(group_error)}")
-        
-        # 방법 2: 샘플링 기반 추정 (대용량에서 효율적)
-        # 전체 컬렉션의 일부를 샘플링하여 고유 문서 수 추정
-        max_limit = 16000  # 최대 조회 수
-        
-        # 3개의 다른 오프셋에서 샘플 수집 (더 정확한 추정을 위해)
-        samples = []
-        for sample_offset in [0, collection_size // 3, 2 * collection_size // 3]:
-            if sample_offset >= collection_size:
-                continue
+            # 안전한 파라미터 설정
+            batch_size = 5000  # 배치 크기
+            
+            # Query Iterator 사용 (페이지네이션 자동 처리)
+            from pymilvus import MilvusException
+            
+            try:
+                # 쿼리 설정
+                search_params = {
+                    "metric_type": "L2",
+                    "params": {"nprobe": 10}
+                }
                 
-            sample_offset = min(sample_offset, max(0, collection_size - max_limit))
+                # 효율적인 iterator 쿼리 생성
+                iterator = collection.query_iterator(
+                    expr="",  # 모든 레코드 대상
+                    output_fields=["doc_id"],  # doc_id만 가져옴
+                    batch_size=batch_size,
+                    limit=-1  # 모든 결과 반환
+                )
+                
+                # 배치 단위로 결과 처리
+                total_processed = 0
+                batch_count = 0
+                
+                while True:
+                    try:
+                        # 다음 배치 가져오기
+                        batch_data = iterator.next()
+                        batch_count += 1
+                        
+                        if not batch_data:
+                            break  # 더 이상 데이터가 없음
+                            
+                        # 배치의 고유 doc_id 추출
+                        for item in batch_data:
+                            if "doc_id" in item:
+                                unique_doc_ids.add(item["doc_id"])
+                                
+                        # 처리 진행 상황 로깅
+                        total_processed += len(batch_data)
+                        
+                        if batch_count % 10 == 0:  # 10개 배치마다 로그 출력
+                            logger.info(f"도메인 '{domain_name}' 문서 수 계산 중: {len(unique_doc_ids)}개 고유 문서 / {total_processed}개 항목 처리 ({batch_count}개 배치)")
+                        
+                    except StopIteration:
+                        # Iterator 종료
+                        break
+                        
+                # 고유 문서 수 계산 완료
+                doc_count = len(unique_doc_ids)
+                end_time = time.time()
+                
+                # 처리 결과 로깅
+                logger.info(f"도메인 '{domain_name}'의 고유 문서 수: {doc_count} (전체 엔티티: {collection_size}, 페이지 수: {batch_count}, 소요시간: {end_time - start_time:.4f}초)")
+                return doc_count
+                
+            except MilvusException as me:
+                # Milvus 오류 처리
+                logger.warning(f"도메인 '{domain_name}'의 문서 개수 조회 실패: {me}")
+                return "계산 불가"
+                
+        except Exception as e:
+            # 기타 오류 처리
+            logger.warning(f"도메인 '{domain_name}'의 문서 개수 계산 중 오류: {str(e)}")
+            return "계산 불가"
             
-            # 샘플 쿼리
-            sample_results = collection.query(
-                expr="",
-                output_fields=["doc_id"],
-                offset=sample_offset,
-                limit=max_limit
-            )
-            
-            # 고유 doc_id 계산
-            if sample_results:
-                samples.append(sample_results)
-        
-        # 각 샘플에서 고유 비율 계산
-        if not samples:
-            return "계산 불가 (샘플링 실패)"
-            
-        # 모든 샘플에서의 고유 비율
-        all_doc_ids = set()
-        all_sample_size = 0
-        
-        for sample in samples:
-            sample_size = len(sample)
-            all_sample_size += sample_size
-            
-            unique_in_sample = set()
-            for item in sample:
-                if "doc_id" in item:
-                    all_doc_ids.add(item["doc_id"])
-                    unique_in_sample.add(item["doc_id"])
-            
-            # 개별 샘플에서의 고유 비율 로깅
-            logger.debug(f"샘플 크기: {sample_size}, 고유 doc_id: {len(unique_in_sample)}, 비율: {len(unique_in_sample)/max(1, sample_size):.4f}")
-        
-        # 전체 샘플에서의 고유 비율
-        unique_ratio = len(all_doc_ids) / max(1, all_sample_size)
-        
-        # 비율 기반 추정 (보정 계수 적용)
-        # 샘플이 클수록 추정이 더 정확해짐
-        correction_factor = 0.9  # 샘플링으로 인한 중복 과대 추정 보정
-        estimated_doc_count = int(collection_size * unique_ratio * correction_factor)
-        
-        logger.info(f"도메인 '{domain_name}'의 추정 문서 수: {estimated_doc_count} (샘플링 비율: {unique_ratio:.4f})")
-        return f"약 {estimated_doc_count:,}"
-        
     except Exception as e:
-        logger.warning(f"대형 컬렉션 문서 개수 계산 실패: {str(e)}")
+        # 전체 오류 처리
+        logger.error(f"도메인 '{domain_name}'의 문서 개수 계산 중 예외 발생: {str(e)}")
         return "계산 불가"
 
 @app.route('/rag/domains/delete', methods=['POST'])
