@@ -108,13 +108,32 @@ def cleanup_on_exit():
         # GPU 메모리 정리
         if torch.cuda.is_available():
             try:
-                torch.cuda.empty_cache()
-                logger.info("GPU memory cache cleared")
+                # 안전하게 GPU 메모리 정리
+                logger.info("Safely clearing GPU memory...")
+                # 명시적으로 모델 정리
+                if hasattr(emb_model, 'model'):
+                    try:
+                        emb_model.model = None
+                    except:
+                        pass
+                
+                # 가비지 컬렉션 실행
+                import gc
+                gc.collect()
+                
+                # 조심스럽게 캐시 비우기 시도
+                try:
+                    torch.cuda.empty_cache()
+                    logger.info("GPU memory cache cleared")
+                except Exception as e:
+                    logger.error(f"Could not clear GPU cache: {str(e)}")
             except Exception as e:
                 logger.error(f"Failed to clear GPU memory: {str(e)}")
                 
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
+        import traceback
+        logger.error(f"Cleanup error details: {traceback.format_exc()}")
     
     logger.info("Cleanup complete")
 
@@ -688,23 +707,34 @@ def insert_data():
                         # 임베딩 및 데이터 준비
                         prepared_data = []
                         
-                        # 스레드 풀을 사용한 병렬 임베딩
+                        # 멀티스레딩으로 임베딩 작업 병렬 처리
+                        chunk_errors = 0
                         with concurrent.futures.ThreadPoolExecutor(max_workers=max_embed_threads) as executor:
                             # 각 청크에 대한 임베딩 작업 제출
-                            future_to_chunk = {executor.submit(interact_manager.embed_and_prepare_chunk, chunk, domain): chunk for chunk in all_chunks}
+                            futures = {executor.submit(interact_manager.embed_and_prepare_chunk, chunk, domain): chunk for chunk in all_chunks}
                             
-                            for future in concurrent.futures.as_completed(future_to_chunk):
-                                chunk = future_to_chunk[future]
+                            # 결과 수집
+                            for future in concurrent.futures.as_completed(futures):
+                                chunk = futures[future]
                                 try:
-                                    # 임베딩 및 데이터 준비 결과 가져오기
                                     data = future.result()
                                     if data:
                                         prepared_data.append(data)
+                                    else:
+                                        chunk_errors += 1
+                                        logger.error(f"청크 임베딩 실패 (반환값 없음, chunk_id: {chunk.get('id', 'unknown')})")
                                 except Exception as e:
+                                    chunk_errors += 1
                                     logger.error(f"청크 임베딩 오류 (chunk_id: {chunk.get('id', 'unknown')}): {str(e)}")
                         
                         embedding_end = time.time()
-                        logger.info(f"[TIMING] 청크 임베딩 완료: {len(prepared_data)}/{len(all_chunks)}개 청크, 소요시간: {embedding_end - embedding_start:.4f}초")
+                        logger.info(f"[TIMING] 청크 임베딩 완료: 성공={len(prepared_data)}, 실패={chunk_errors}, 총={len(all_chunks)}개 청크, 소요시간: {embedding_end - embedding_start:.4f}초")
+                        
+                        # 실패율이 너무 높은 경우 경고
+                        if len(all_chunks) > 0:
+                            error_rate = chunk_errors / len(all_chunks)
+                            if error_rate > 0.5:  # 50% 이상 실패 시
+                                logger.warning(f"[WARNING] 임베딩 실패율이 높습니다: {error_rate:.1%} ({chunk_errors}/{len(all_chunks)})")
                         
                         # 배치 삽입 수행
                         if prepared_data:
@@ -716,10 +746,23 @@ def insert_data():
                                 
                                 try:
                                     # 배치 삽입 수행
-                                    interact_manager.batch_insert_data(domain, batch_data)
-                                    logger.info(f"[TIMING] 배치 삽입 완료 ({i//chunk_batch_size + 1}/{(len(prepared_data)+chunk_batch_size-1)//chunk_batch_size}): {len(batch_data)}개 청크")
+                                    success = interact_manager.batch_insert_data(domain, batch_data)
+                                    if success:
+                                        logger.info(f"[TIMING] 배치 삽입 완료 ({i//chunk_batch_size + 1}/{(len(prepared_data)+chunk_batch_size-1)//chunk_batch_size}): {len(batch_data)}개 청크")
+                                    else:
+                                        logger.warning(f"[WARNING] 배치 삽입 부분 실패 ({i//chunk_batch_size + 1}/{(len(prepared_data)+chunk_batch_size-1)//chunk_batch_size}): {len(batch_data)}개 청크")
                                 except Exception as e:
                                     logger.error(f"배치 삽입 오류 (배치 {i//chunk_batch_size + 1}): {str(e)}")
+                                    # 배치 실패 시 개별 항목 삽입 시도
+                                    for j, item in enumerate(batch_data):
+                                        if item is None:
+                                            continue
+                                        try:
+                                            single_batch = [item]
+                                            interact_manager.batch_insert_data(domain, single_batch)
+                                            logger.info(f"[RECOVERY] 개별 항목 삽입 성공: batch_index={i+j}")
+                                        except Exception as single_error:
+                                            logger.error(f"[ERROR] 개별 항목 삽입 실패: batch_index={i+j}, 오류={str(single_error)}")
                             
                             insert_db_end = time.time()
                             logger.info(f"[TIMING] DB 삽입 완료: {len(prepared_data)}개 청크, 소요시간: {insert_db_end - insert_db_start:.4f}초")

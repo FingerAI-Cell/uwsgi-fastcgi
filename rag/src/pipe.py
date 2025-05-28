@@ -1109,7 +1109,7 @@ class InteractManager:
             data = {
                 "passage_uid": passage_uid,
                 "doc_id": hashed_doc_id,
-                "raw_doc_id": raw_doc_id,  # 원본 doc_id 추가
+                "raw_doc_id": raw_doc_id,
                 "passage_id": passage_id,
                 "domain": domain,
                 "title": title,
@@ -1295,6 +1295,129 @@ class InteractManager:
                     # 락 해제 상태에서 삽입 수행
                     self._execute_batch_insert(data_to_insert, domain)
 
+    def embed_and_prepare_chunk(self, chunk, domain):
+        """
+        청크를 임베딩하고 DB 삽입을 위한 데이터를 준비합니다.
+        
+        Args:
+            chunk (dict): 청크 정보가 담긴 딕셔너리 (id, text, doc_id, raw_doc_id 등 포함)
+            domain (str): 도메인 이름
+            
+        Returns:
+            dict: 삽입 준비가 완료된 데이터 딕셔너리
+        """
+        try:
+            # 청크 정보 추출
+            chunk_id = chunk.get('id')
+            chunk_text = chunk.get('text')
+            doc_id = chunk.get('doc_id')
+            raw_doc_id = chunk.get('raw_doc_id')
+            passage_id = chunk.get('passage_id', chunk_id)
+            title = chunk.get('title', '')
+            author = chunk.get('author', '')
+            info = chunk.get('info', {})
+            tags = chunk.get('tags', {})
+            
+            # 필수 필드 확인
+            if not chunk_text:
+                raise ValueError(f"청크 {chunk_id}에 텍스트가 없습니다")
+            
+            if not doc_id:
+                raise ValueError(f"청크 {chunk_id}에 doc_id가 없습니다")
+            
+            # 청크 ID와 문서 ID로 고유 식별자 생성
+            passage_uid = f"{doc_id}_{passage_id}"
+            
+            # 텍스트 길이 체크
+            chunk_bytes = len(chunk_text.encode('utf-8'))
+            if chunk_bytes > self.MAX_TEXT_LENGTH:
+                print(f"[WARNING] 청크 {chunk_id}의 텍스트가 너무 큽니다: {chunk_bytes} 바이트 (최대: {self.MAX_TEXT_LENGTH}). 분할을 시도합니다.")
+                sub_chunks = self._split_large_chunk(chunk_text)
+                if not sub_chunks:
+                    raise ValueError(f"청크 {chunk_id} 분할 실패")
+                
+                # 첫 번째 하위 청크만 사용 (나머지는 별도 처리 필요)
+                chunk_text = sub_chunks[0]
+                chunk_bytes = len(chunk_text.encode('utf-8'))
+                print(f"[INFO] 청크 {chunk_id}를 {len(sub_chunks)}개로 분할, 첫 번째 청크 크기: {chunk_bytes} 바이트")
+            
+            # GPU 리소스 세마포어 사용
+            gpu_semaphore = self.get_gpu_semaphore()
+            with gpu_semaphore:
+                try:
+                    # 임베딩 생성
+                    text_emb = self.emb_model.bge_embed_data(chunk_text)
+                except Exception as e:
+                    print(f"[ERROR] 청크 {chunk_id} 임베딩 생성 실패: {str(e)}")
+                    # 임베딩 재시도
+                    try:
+                        print(f"[INFO] 청크 {chunk_id} 임베딩 재시도...")
+                        text_emb = self.emb_model.bge_embed_data(chunk_text)
+                    except Exception as retry_error:
+                        raise ValueError(f"청크 {chunk_id} 임베딩 재시도 실패: {str(retry_error)}")
+            
+            if not text_emb or len(text_emb) == 0:
+                raise ValueError(f"청크 {chunk_id}에 대한 빈 임베딩이 생성되었습니다")
+            
+            # 데이터 구성
+            data = {
+                "passage_uid": passage_uid,
+                "doc_id": doc_id,
+                "raw_doc_id": raw_doc_id,
+                "passage_id": passage_id,
+                "domain": domain,
+                "title": title,
+                "author": author,
+                "text": chunk_text,
+                "text_emb": text_emb,
+                "info": info,
+                "tags": tags
+            }
+            
+            return data
+            
+        except Exception as e:
+            print(f"[ERROR] 청크 {chunk.get('id', 'unknown')} 임베딩 및 준비 실패: {str(e)}")
+            import traceback
+            print(f"[ERROR] 상세 오류: {traceback.format_exc()}")
+            return None
+
+    def batch_insert_data(self, domain, data_batch):
+        """
+        준비된 데이터 배치를 지정된 도메인에 삽입합니다.
+        
+        Args:
+            domain (str): 삽입할 도메인 이름
+            data_batch (list): 삽입할 데이터 항목의 리스트
+            
+        Returns:
+            bool: 삽입 성공 여부
+        """
+        try:
+            if not data_batch:
+                print(f"[WARNING] 빈 데이터 배치가 전달되었습니다 (도메인: {domain})")
+                return False
+            
+            # None 값 필터링 (임베딩 실패한 항목)
+            valid_batch = [item for item in data_batch if item is not None]
+            if len(valid_batch) == 0:
+                print(f"[WARNING] 유효한 데이터 항목이 없습니다 (도메인: {domain})")
+                return False
+                
+            print(f"[DEBUG] 배치 삽입 시작: {len(valid_batch)}/{len(data_batch)}개 유효 항목 (도메인: {domain})")
+            
+            # 데이터 배치 처리 (내부적으로 하위 배치로 나누어 처리)
+            return self._execute_batch_insert(valid_batch, domain)
+            
+        except Exception as e:
+            print(f"[ERROR] 배치 삽입 실패 (도메인: {domain}): {str(e)}")
+            import logging
+            logger = logging.getLogger('rag-backend')
+            logger.error(f"배치 삽입 실패: {str(e)}")
+            import traceback
+            print(f"[ERROR] 배치 삽입 상세 오류: {traceback.format_exc()}")
+            return False
+
     def chunk_document(self, text):
         """문서를 청크로 나누는 메서드"""
         try:
@@ -1361,14 +1484,28 @@ class InteractManager:
                 
             start_time = time.time()
             
-            collection = self.get_collection(domain)
+            # 컬렉션 얻기
+            try:
+                collection = self.get_collection(domain)
+                # 컬렉션이 비어있는지 확인
+                stats = collection.get_statistics()
+                if stats.get('row_count', 0) == 0:
+                    print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}'이 비어 있습니다. 중복 문서가 없습니다.")
+                    return []
+                print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}' 로드 완료, 총 문서 수: {stats.get('row_count', '알 수 없음')}")
+            except Exception as e:
+                print(f"[DUPLICATION_CHECK] 컬렉션 로드 오류: {str(e)}")
+                # 컬렉션 로드 실패 시 빈 결과 반환
+                return []
+            
             duplicates = []
+            errors = []
             
             # 각 doc_id에 대해 직접 확인 (간단하고 확실한 방법)
             for i, doc_id in enumerate(doc_ids):
                 try:
-                    # 로깅 - 진행 상황 (5개마다 또는 처음/마지막)
-                    if i == 0 or i == len(doc_ids)-1 or (i+1) % 5 == 0:
+                    # 로깅 - 진행 상황 (10개마다 또는 처음/마지막)
+                    if i == 0 or i == len(doc_ids)-1 or (i+1) % 10 == 0:
                         print(f"[DUPLICATION_CHECK] 진행: {i+1}/{len(doc_ids)} 문서 검사 중... (doc_id: {doc_id})")
                     
                     # doc_id로 직접 쿼리 - 정확한 일치 조건 사용
@@ -1391,15 +1528,22 @@ class InteractManager:
                         else:
                             print(f"[DUPLICATION_CHECK] 비슷한 ID 발견 (중복 아님): 검색={doc_id}, 발견={found_doc_id}")
                     else:
-                        # 결과가 없는 경우도 로깅
-                        print(f"[DUPLICATION_CHECK] 중복 없음: doc_id={doc_id}, 쿼리 시간: {query_time:.4f}초")
+                        # 결과가 없는 경우도 로깅 (5개마다 또는 처음/마지막)
+                        if i == 0 or i == len(doc_ids)-1 or (i+1) % 5 == 0:
+                            print(f"[DUPLICATION_CHECK] 중복 없음: doc_id={doc_id}, 쿼리 시간: {query_time:.4f}초")
                     
                 except Exception as e:
+                    # 오류 수집하여 나중에 분석
+                    errors.append({"doc_id": doc_id, "error": str(e)})
                     print(f"[DUPLICATION_CHECK] 오류: doc_id={doc_id} 검사 실패: {str(e)}")
             
             total_time = time.time() - start_time
-            print(f"[DUPLICATION_CHECK] 완료: 총 {len(doc_ids)}개 문서 중 {len(duplicates)}개 중복 발견")
+            print(f"[DUPLICATION_CHECK] 완료: 총 {len(doc_ids)}개 문서 중 {len(duplicates)}개 중복 발견, {len(errors)}개 검사 실패")
             print(f"[DUPLICATION_CHECK] 성능: 총 소요시간 {total_time:.2f}초, 문서당 평균 {total_time/len(doc_ids):.4f}초")
+            
+            # 에러가 있는 경우 상세 로깅
+            if errors:
+                print(f"[DUPLICATION_CHECK] 오류 상세: {errors[:5]}" + ("..." if len(errors) > 5 else ""))
             
             # 중복 문서 목록 출력 (최대 50개)
             if duplicates:
@@ -1416,4 +1560,6 @@ class InteractManager:
             
         except Exception as e:
             print(f"[DUPLICATION_CHECK] 심각한 오류: 중복 체크 실패: {str(e)}")
+            import traceback
+            print(f"[DUPLICATION_CHECK] 스택 트레이스: {traceback.format_exc()}")
             return []
