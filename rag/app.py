@@ -571,11 +571,23 @@ def insert_data():
                 
                 if doc_hashes:
                     try:
-                        # interact_manager의 check_duplicates 함수 사용
-                        existing_doc_ids = interact_manager.check_duplicates(doc_hashes, domain)
-                        logger.info(f"[DUPLICATION_CHECK] 완료: 총 {len(doc_hashes)}개 문서 중 {len(existing_doc_ids)}개 중복 발견")
+                        # doc_id 해시 재확인 - 모든 ID가 올바른 형식인지 검사
+                        valid_doc_hashes = []
+                        for doc_id in doc_hashes:
+                            # 올바른 해시 형식 확인 (최소 길이와 16진수 문자만 포함)
+                            if doc_id and len(doc_id) >= 32 and all(c in '0123456789abcdef' for c in doc_id.lower()):
+                                valid_doc_hashes.append(doc_id)
+                            else:
+                                logger.warning(f"[DUPLICATION_CHECK] 잘못된 doc_id 형식: {doc_id}")
                         
-                        # 중복 목록 출력
+                        if len(valid_doc_hashes) < len(doc_hashes):
+                            logger.warning(f"[DUPLICATION_CHECK] 일부 doc_id가 필터링됨: 총 {len(doc_hashes)}개 중 {len(valid_doc_hashes)}개만 유효함")
+                        
+                        # interact_manager의 check_duplicates 함수 사용
+                        existing_doc_ids = interact_manager.check_duplicates(valid_doc_hashes, domain)
+                        logger.info(f"[DUPLICATION_CHECK] 완료: 총 {len(valid_doc_hashes)}개 문서 중 {len(existing_doc_ids)}개 중복 발견")
+                        
+                        # 중복 ID가 있다면 로그에 명확하게 표시
                         if existing_doc_ids:
                             if len(existing_doc_ids) <= 50:
                                 logger.info(f"[DUPLICATION_CHECK] 중복 문서 ID 전체 목록: {existing_doc_ids}")
@@ -588,6 +600,8 @@ def insert_data():
                             logger.info(f"[DUPLICATION_CHECK] 중복 문서 없음")
                     except Exception as e:
                         logger.error(f"[DUPLICATION_CHECK] 심각한 오류: 중복 체크 실패: {str(e)}")
+                        import traceback
+                        logger.error(f"[DUPLICATION_CHECK] 상세 오류: {traceback.format_exc()}")
                         existing_doc_ids = []
                 else:
                     existing_doc_ids = []
@@ -686,7 +700,14 @@ def insert_data():
                                 if chunks:
                                     # 각 청크에 문서 정보 추가
                                     for chunk in chunks:
-                                        chunk_data = {'id': chunk[1], 'text': chunk[0], '_doc': doc}
+                                        # 청크 데이터에 doc_id 필드 직접 추가 (누락 방지)
+                                        chunk_data = {
+                                            'id': chunk[1], 
+                                            'text': chunk[0], 
+                                            'doc_id': doc['_hashed_doc_id'],  # 해시된 doc_id 직접 전달
+                                            'raw_doc_id': doc['_raw_doc_id'],  # 원본 doc_id도 전달
+                                            '_doc': doc
+                                        }
                                         all_chunks.append(chunk_data)
                                         chunk_to_doc_map[chunk[1]] = doc
                             except Exception as e:

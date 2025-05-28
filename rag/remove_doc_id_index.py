@@ -39,7 +39,7 @@ def load_config():
                 logger.info(f"설정 파일 로드 성공: {parent_config_path}")
         
         # 환경 변수에서 IP 주소 가져오기 (db_config.json에는 ip_addr이 없음)
-        ip_addr = os.environ.get('ip_addr', 'milvus-server')  # localhost 대신 milvus-server를 기본값으로 사용
+        ip_addr = os.environ.get('ip_addr', 'milvus-standalone')  # localhost 대신 milvus-standalone을 기본값으로 사용
         logger.info(f"Milvus 서버 IP: {ip_addr} (환경 변수에서 로드)")
         
         # config에 ip_addr 추가

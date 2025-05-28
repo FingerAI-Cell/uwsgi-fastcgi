@@ -1311,22 +1311,62 @@ class InteractManager:
             chunk_id = chunk.get('id')
             chunk_text = chunk.get('text')
             doc_id = chunk.get('doc_id')
+            
+            # _doc 필드에서 doc_id를 가져오는 로직 추가
+            if not doc_id and '_doc' in chunk:
+                doc = chunk.get('_doc')
+                if doc and isinstance(doc, dict):
+                    # 해시된 doc_id를 직접 가져오기
+                    doc_id = doc.get('_hashed_doc_id')
+                    print(f"[DEBUG] _doc에서 doc_id 추출: {doc_id}")
+                    
+                    if not doc_id:
+                        # 해시된 doc_id가 없으면 원본 doc_id 사용하여 해시 생성
+                        orig_doc_id = doc.get('doc_id')
+                        if orig_doc_id:
+                            doc_id = self.data_p.hash_text(orig_doc_id, hash_type='blake')
+                            print(f"[INFO] doc_id를 원본 ID에서 생성: {orig_doc_id} -> {doc_id}")
+            
             raw_doc_id = chunk.get('raw_doc_id')
+            # raw_doc_id도 _doc에서 가져오기
+            if not raw_doc_id and '_doc' in chunk:
+                doc = chunk.get('_doc')
+                if doc and isinstance(doc, dict):
+                    raw_doc_id = doc.get('_raw_doc_id', doc.get('doc_id', ''))
+                    print(f"[DEBUG] _doc에서 raw_doc_id 추출: {raw_doc_id}")
+            
             passage_id = chunk.get('passage_id', chunk_id)
             title = chunk.get('title', '')
             author = chunk.get('author', '')
             info = chunk.get('info', {})
             tags = chunk.get('tags', {})
             
+            # _doc에서 제목과 작성자 정보도 가져오기
+            if '_doc' in chunk:
+                doc = chunk.get('_doc')
+                if doc and isinstance(doc, dict):
+                    if not title:
+                        title = doc.get('title', '')
+                    if not author:
+                        author = doc.get('author', '')
+                    if not info or info == {}:
+                        info = doc.get('info', {})
+                    if not tags or tags == {}:
+                        tags = doc.get('tags', {})
+                        
             # 필수 필드 확인
             if not chunk_text:
                 raise ValueError(f"청크 {chunk_id}에 텍스트가 없습니다")
             
             if not doc_id:
-                raise ValueError(f"청크 {chunk_id}에 doc_id가 없습니다")
+                # 심각한 오류: doc_id가 없음
+                error_msg = f"청크 {chunk_id}에 doc_id가 없습니다. 이는 심각한 오류입니다. chunk={chunk}"
+                print(f"[ERROR] {error_msg}")
+                raise ValueError(error_msg)
             
             # 청크 ID와 문서 ID로 고유 식별자 생성
             passage_uid = f"{doc_id}_{passage_id}"
+            print(f"[DEBUG] passage_uid 생성: {passage_uid} (doc_id: {doc_id}, passage_id: {passage_id})")
             
             # 텍스트 길이 체크
             chunk_bytes = len(chunk_text.encode('utf-8'))
@@ -1347,17 +1387,18 @@ class InteractManager:
                 try:
                     # 임베딩 생성
                     text_emb = self.emb_model.bge_embed_data(chunk_text)
+                    if not text_emb or len(text_emb) == 0:
+                        raise ValueError(f"청크 {chunk_id}에 대한 빈 임베딩이 생성되었습니다")
                 except Exception as e:
                     print(f"[ERROR] 청크 {chunk_id} 임베딩 생성 실패: {str(e)}")
                     # 임베딩 재시도
                     try:
                         print(f"[INFO] 청크 {chunk_id} 임베딩 재시도...")
                         text_emb = self.emb_model.bge_embed_data(chunk_text)
+                        if not text_emb or len(text_emb) == 0:
+                            raise ValueError(f"청크 {chunk_id}에 대한 빈 임베딩이 재시도 후에도 생성되었습니다")
                     except Exception as retry_error:
                         raise ValueError(f"청크 {chunk_id} 임베딩 재시도 실패: {str(retry_error)}")
-            
-            if not text_emb or len(text_emb) == 0:
-                raise ValueError(f"청크 {chunk_id}에 대한 빈 임베딩이 생성되었습니다")
             
             # 데이터 구성
             data = {
@@ -1374,6 +1415,7 @@ class InteractManager:
                 "tags": tags
             }
             
+            print(f"[INFO] 청크 {chunk_id} 임베딩 및 준비 완료: doc_id={doc_id}, passage_id={passage_id}")
             return data
             
         except Exception as e:
@@ -1483,6 +1525,8 @@ class InteractManager:
                 print(f"[DUPLICATION_CHECK] 검사할 doc_id 샘플: {sample_ids}")
                 
             start_time = time.time()
+            duplicates = []  # 중복된 문서 ID 저장 리스트
+            errors = []      # 오류 정보 저장 리스트
             
             # 컬렉션 얻기
             try:
@@ -1493,49 +1537,81 @@ class InteractManager:
                     print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}'이 비어 있습니다. 중복 문서가 없습니다.")
                     return []
                 print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}' 로드 완료, 총 문서 수: {stats.get('row_count', '알 수 없음')}")
+
+                # 디버깅: 기존 문서의 doc_id 샘플 확인
+                try:
+                    sample_docs = collection.query(
+                        expr="",  # 모든 문서
+                        output_fields=["doc_id"],
+                        limit=10,
+                        offset=0
+                    )
+                    if sample_docs:
+                        print(f"[DUPLICATION_CHECK] 기존 문서 doc_id 샘플 (10개): {[doc.get('doc_id', 'unknown') for doc in sample_docs]}")
+                except Exception as e:
+                    print(f"[DUPLICATION_CHECK] 기존 문서 샘플 확인 실패: {str(e)}")
+                
+                # 실제 중복 체크 로직 추가
+                batch_size = 100  # 한 번에 처리할 최대 문서 수
+                
+                # 효율성을 위해 배치 단위로 처리
+                for i in range(0, len(doc_ids), batch_size):
+                    batch = doc_ids[i:i + batch_size]
+                    if not batch:
+                        continue
+                        
+                    # IN 연산자를 사용하여 배치로 쿼리
+                    # 작은 따옴표로 각 ID를 감싸고 쉼표로 구분
+                    ids_str = '", "'.join(batch)
+                    expr = f'doc_id in ("{ids_str}")'
+                    
+                    try:
+                        # 존재하는 doc_id 가져오기
+                        results = collection.query(
+                            expr=expr,
+                            output_fields=["doc_id", "passage_id"],
+                            limit=10000  # 충분히 큰 값으로 설정
+                        )
+                        
+                        # 결과에서 중복 doc_id 추출
+                        found_doc_ids = set()
+                        for result in results:
+                            doc_id = result.get('doc_id')
+                            if doc_id and doc_id not in found_doc_ids:
+                                found_doc_ids.add(doc_id)
+                                if doc_id not in duplicates:
+                                    duplicates.append(doc_id)
+                                    
+                        print(f"[DUPLICATION_CHECK] 배치 {i//batch_size + 1} 처리 완료: {len(found_doc_ids)}개 중복 발견")
+                    except Exception as e:
+                        print(f"[DUPLICATION_CHECK] 배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
+                
+                # 개별 체크 (배치 처리에서 누락된 경우를 대비)
+                for doc_id in doc_ids:
+                    # 이미 중복으로 확인된 ID는 건너뛰기
+                    if doc_id in duplicates:
+                        continue
+                    
+                    try:
+                        # 개별 doc_id 쿼리
+                        expr = f'doc_id == "{doc_id}"'
+                        results = collection.query(
+                            expr=expr,
+                            output_fields=["passage_id"],
+                            limit=1  # 존재 여부만 확인하면 됨
+                        )
+                        
+                        if results:
+                            # 문서가 존재하면 중복으로 표시
+                            duplicates.append(doc_id)
+                            print(f"[DUPLICATION_CHECK] 개별 확인: doc_id={doc_id}는 중복됨")
+                    except Exception as e:
+                        # 오류 수집하여 나중에 분석
+                        errors.append({"doc_id": doc_id, "error": str(e)})
+                        print(f"[DUPLICATION_CHECK] 오류: doc_id={doc_id} 검사 실패: {str(e)}")
             except Exception as e:
                 print(f"[DUPLICATION_CHECK] 컬렉션 로드 오류: {str(e)}")
-                # 컬렉션 로드 실패 시 빈 결과 반환
                 return []
-            
-            duplicates = []
-            errors = []
-            
-            # 각 doc_id에 대해 직접 확인 (간단하고 확실한 방법)
-            for i, doc_id in enumerate(doc_ids):
-                try:
-                    # 로깅 - 진행 상황 (10개마다 또는 처음/마지막)
-                    if i == 0 or i == len(doc_ids)-1 or (i+1) % 10 == 0:
-                        print(f"[DUPLICATION_CHECK] 진행: {i+1}/{len(doc_ids)} 문서 검사 중... (doc_id: {doc_id})")
-                    
-                    # doc_id로 직접 쿼리 - 정확한 일치 조건 사용
-                    expr = f'doc_id == "{doc_id}"'
-                    query_start = time.time()
-                    results = collection.query(
-                        expr=expr,
-                        output_fields=["doc_id"],
-                        limit=1  # 존재 여부만 확인하면 됨
-                    )
-                    query_time = time.time() - query_start
-                    
-                    # 결과가 있으면 중복
-                    if results and len(results) > 0:
-                        found_doc_id = results[0].get("doc_id", "")
-                        # 정확히 일치하는 경우만 중복으로 처리
-                        if found_doc_id == doc_id:
-                            duplicates.append(doc_id)
-                            print(f"[DUPLICATION_CHECK] 중복 발견: doc_id={doc_id}, 쿼리 시간: {query_time:.4f}초")
-                        else:
-                            print(f"[DUPLICATION_CHECK] 비슷한 ID 발견 (중복 아님): 검색={doc_id}, 발견={found_doc_id}")
-                    else:
-                        # 결과가 없는 경우도 로깅 (5개마다 또는 처음/마지막)
-                        if i == 0 or i == len(doc_ids)-1 or (i+1) % 5 == 0:
-                            print(f"[DUPLICATION_CHECK] 중복 없음: doc_id={doc_id}, 쿼리 시간: {query_time:.4f}초")
-                    
-                except Exception as e:
-                    # 오류 수집하여 나중에 분석
-                    errors.append({"doc_id": doc_id, "error": str(e)})
-                    print(f"[DUPLICATION_CHECK] 오류: doc_id={doc_id} 검사 실패: {str(e)}")
             
             total_time = time.time() - start_time
             print(f"[DUPLICATION_CHECK] 완료: 총 {len(doc_ids)}개 문서 중 {len(duplicates)}개 중복 발견, {len(errors)}개 검사 실패")
