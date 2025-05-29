@@ -13,7 +13,8 @@ class MilVus:
     
     def __init__(self, db_config):
         self.db_config = db_config 
-        self.ip_addr = db_config['ip_addr'] 
+        # ip_addr이 없을 경우 기본값 'milvus-standalone' 사용
+        self.ip_addr = db_config.get('ip_addr', 'milvus-standalone')
         self.port = db_config['port']
         self.set_env()
 

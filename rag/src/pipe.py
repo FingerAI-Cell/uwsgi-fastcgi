@@ -26,10 +26,21 @@ class EnvManager():
         print(f"EnvManager - 로그 디렉토리: {self.log_dir}")
         
     def set_config(self):
+        # 설정 파일에서 기본 설정 로드
         with open(os.path.join(self.args['config_path'], self.args['db_config'])) as f:
             self.db_config = json.load(f)
         with open(os.path.join(self.args['config_path'], self.args['llm_config'])) as f:
             self.llm_config = json.load(f)
+            
+        # args에서 전달된 값들을 db_config에 추가
+        # 특히 환경 변수에서 가져온 ip_addr을 db_config에 추가
+        if 'ip_addr' in self.args and self.args['ip_addr']:
+            self.db_config['ip_addr'] = self.args['ip_addr']
+            print(f"[CONFIG] Using ip_addr from environment: {self.args['ip_addr']}")
+        else:
+            # ip_addr이 없는 경우 기본값 설정
+            self.db_config.setdefault('ip_addr', 'milvus-standalone')
+            print(f"[CONFIG] Using default ip_addr: {self.db_config['ip_addr']}")
     
     def set_processors(self):
         self.data_p = DataProcessor()
