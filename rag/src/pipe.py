@@ -1738,7 +1738,9 @@ class InteractManager:
                     ids_str = ", ".join([f'"{id}"' for id in batch])
                     expr = f'doc_id in [{ids_str}]'  # 올바른 IN 연산자 형식 사용: doc_id in ["id1", "id2", ...]
                     
-                    duplication_logger.debug(f"배치 {i//batch_size + 1} 쿼리: {expr[:100]}{'...' if len(expr) > 100 else ''}")
+                    # 쿼리 표현식을 INFO 레벨로 변경하여 항상 로그에 표시되도록 함
+                    duplication_logger.info(f"배치 {i//batch_size + 1} 쿼리 실행: {expr[:100]}{'...' if len(expr) > 100 else ''}")
+                    print(f"[DUPLICATION_CHECK] 배치 {i//batch_size + 1} 쿼리 실행 중")
                     
                     try:
                         # 존재하는 doc_id 가져오기
@@ -1747,6 +1749,16 @@ class InteractManager:
                             output_fields=["doc_id", "passage_id"],
                             limit=10000  # 충분히 큰 값으로 설정
                         )
+                        
+                        # 쿼리 결과 정보 추가 로깅
+                        duplication_logger.info(f"배치 {i//batch_size + 1} 쿼리 결과: {len(results)}개 항목 반환됨")
+                        print(f"[DUPLICATION_CHECK] 배치 {i//batch_size + 1} 쿼리 결과: {len(results)}개 항목")
+                        
+                        # 결과 샘플 로깅 (최대 3개)
+                        if results:
+                            sample_results = results[:3]
+                            duplication_logger.info(f"결과 샘플: {sample_results}")
+                            print(f"[DUPLICATION_CHECK] 결과 샘플: {sample_results}")
                         
                         # 결과에서 중복 doc_id 추출
                         found_doc_ids = set()
