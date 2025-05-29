@@ -1402,6 +1402,12 @@ class InteractManager:
             # 텍스트 추출 및 처리
             chunk_text = chunk_data.get('text', '')
             
+            # 청크가 튜플인 경우 처리 (청킹 알고리즘이 (text, chunk_no) 튜플을 반환)
+            if isinstance(chunk_text, tuple) and len(chunk_text) >= 1:
+                self.insert_logger.info(f"[Thread-{thread_id}] 튜플 형태의 청크 텍스트 변환: {chunk_id} (문서: {doc_id})")
+                # 튜플의 첫 번째 요소(텍스트)만 사용
+                chunk_text = chunk_text[0]
+                
             # 텍스트가 비어있으면 처리하지 않음
             if not chunk_text or len(chunk_text.strip()) == 0:
                 self.insert_logger.warning(f"[Thread-{thread_id}] 빈 청크 건너뛰기: {chunk_id} (문서: {doc_id})")
