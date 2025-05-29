@@ -1598,14 +1598,8 @@ class InteractManager:
             # 컬렉션 얻기
             try:
                 collection = self.get_collection(domain)
-                # 컬렉션이 비어있는지 확인
-                stats = collection.get_statistics()
-                if stats.get('row_count', 0) == 0:
-                    print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}'이 비어 있습니다. 중복 문서가 없습니다.")
-                    duplication_logger.info(f"컬렉션 '{domain}'이 비어 있음, 중복 없음")
-                    return []
-                print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}' 로드 완료, 총 문서 수: {stats.get('row_count', '알 수 없음')}")
-                duplication_logger.info(f"컬렉션 '{domain}' 로드 완료, 총 문서 수: {stats.get('row_count', '알 수 없음')}")
+                print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}' 로드 완료")
+                duplication_logger.info(f"컬렉션 '{domain}' 로드 완료")
 
                 # 디버깅: 기존 문서의 doc_id 샘플 확인
                 try:
@@ -1619,12 +1613,17 @@ class InteractManager:
                         doc_id_samples = [doc.get('doc_id', 'unknown') for doc in sample_docs]
                         print(f"[DUPLICATION_CHECK] 기존 문서 doc_id 샘플 (10개): {doc_id_samples}")
                         duplication_logger.info(f"기존 문서 doc_id 샘플 (10개): {doc_id_samples}")
+                    else:
+                        # 컬렉션이 비어있음
+                        print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}'이 비어 있습니다. 중복 문서가 없습니다.")
+                        duplication_logger.info(f"컬렉션 '{domain}'이 비어 있음, 중복 없음")
+                        return []
                 except Exception as e:
                     print(f"[DUPLICATION_CHECK] 기존 문서 샘플 확인 실패: {str(e)}")
                     duplication_logger.error(f"기존 문서 샘플 확인 실패: {str(e)}")
                 
                 # 실제 중복 체크 로직 추가
-                batch_size = 100  # 한 번에 처리할 최대 문서 수
+                batch_size = 100
                 
                 # 효율성을 위해 배치 단위로 처리
                 for i in range(0, len(doc_ids), batch_size):
