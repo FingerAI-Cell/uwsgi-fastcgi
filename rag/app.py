@@ -801,12 +801,18 @@ def insert_data():
                             embedding_start = time.time()
                             
                             # GPU 세마포어 상태 확인
-                            if hasattr(interact_manager.emb_model, '_gpu_semaphore'):
-                                gpu_sem = interact_manager.emb_model._gpu_semaphore
-                                sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
-                                max_workers = interact_manager.emb_model.max_gpu_workers
-                                active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
-                                insert_logger.info(f"임베딩 시작 전 GPU 세마포어: {active_workers}/{max_workers} 사용 중 (Thread: {thread_id})")
+                            if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
+                                try:
+                                    # InteractManager에서 세마포어 정보 가져오기
+                                    gpu_sem = InteractManager.get_gpu_semaphore()
+                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
+                                    max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
+                                    active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
+                                    
+                                    # 간소화된 로그 - 중요 정보만 출력
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hash})")
+                                except Exception as e:
+                                    insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
                             # 청크별 임베딩 생성을 병렬화
                             max_chunk_threads = int(os.getenv('INSERT_CHUNK_THREADS', '10'))  # 동시 청크 처리 수 제한
@@ -882,12 +888,18 @@ def insert_data():
                             insert_start = time.time()
                             
                             # GPU 세마포어 상태 확인 - 중요 정보이므로 유지
-                            if hasattr(interact_manager.emb_model, '_gpu_semaphore'):
-                                gpu_sem = interact_manager.emb_model._gpu_semaphore
-                                sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
-                                max_workers = interact_manager.emb_model.max_gpu_workers
-                                active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
-                                insert_logger.info(f"GPU 세마포어 상태: {active_workers}/{max_workers} 사용 중 (Thread: {thread_id})")
+                            if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
+                                try:
+                                    # InteractManager에서 세마포어 정보 가져오기
+                                    gpu_sem = InteractManager.get_gpu_semaphore()
+                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
+                                    max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
+                                    active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
+                                    
+                                    # 간소화된 로그 - 중요 정보만 출력
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hash})")
+                                except Exception as e:
+                                    insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
                             # 배치 삽입 수행
                             if doc_prepared_chunks:
@@ -963,9 +975,9 @@ def insert_data():
                     chunking_start = time.time()
                     
                     # 전체 GPU 세마포어 상태 확인
-                    if hasattr(interact_manager.emb_model, 'gpu_semaphore'):
+                    if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                         try:
-                            gpu_sem = interact_manager.emb_model.gpu_semaphore
+                            gpu_sem = interact_manager.emb_model.get_gpu_semaphore
                             # 더 안전한 세마포어 값 확인 방법
                             sem_value = '알 수 없음'
                             if hasattr(gpu_sem, '_value'):  # threading.Semaphore 내부 구현
@@ -984,9 +996,9 @@ def insert_data():
                         total_chunks = sum(future_results)
                     
                     # 전체 GPU 세마포어 상태 확인
-                    if hasattr(interact_manager.emb_model, 'gpu_semaphore'):
+                    if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                         try:
-                            gpu_sem = interact_manager.emb_model.gpu_semaphore
+                            gpu_sem = interact_manager.emb_model.get_gpu_semaphore
                             # 더 안전한 세마포어 값 확인 방법
                             sem_value = '알 수 없음'
                             if hasattr(gpu_sem, '_value'):  # threading.Semaphore 내부 구현

@@ -11,6 +11,18 @@ import time
 import concurrent.futures
 import threading
 import logging
+import unicodedata
+import traceback
+import uuid
+from collections import defaultdict
+from queue import Queue
+from typing import List, Dict, Any, Optional, Tuple
+
+# 전역 GPU 세마포어 설정 - 모든 임베딩 처리에서 공유
+GPU_WORKERS = int(os.getenv('MAX_GPU_WORKERS', '50'))
+_GPU_SEMAPHORE = threading.Semaphore(GPU_WORKERS)
+GPU_TASKS_ACTIVE = 0
+GPU_TASK_LOCK = threading.Lock()
 
 class EnvManager():
     def __init__(self, args):
@@ -59,6 +71,30 @@ class EnvManager():
 
 
 class InteractManager:
+    # 클래스 변수로 세마포어 공유
+    _gpu_semaphore = _GPU_SEMAPHORE
+    _active_tasks = 0
+    _task_lock = GPU_TASK_LOCK
+    
+    @classmethod
+    def get_gpu_semaphore(cls):
+        """모든 인스턴스에서 공유하는 GPU 세마포어를 반환합니다."""
+        return cls._gpu_semaphore
+    
+    @classmethod
+    def increment_active_tasks(cls):
+        """활성 GPU 작업 수를 증가시킵니다."""
+        with cls._task_lock:
+            cls._active_tasks += 1
+            return cls._active_tasks
+    
+    @classmethod
+    def decrement_active_tasks(cls):
+        """활성 GPU 작업 수를 감소시킵니다."""
+        with cls._task_lock:
+            cls._active_tasks = max(0, cls._active_tasks - 1)
+            return cls._active_tasks
+            
     def __init__(self, data_p=None, vectorenv=None, vectordb=None, emb_model=None, response_model=None, logger=None):
         '''
         vectordb = MilvusData - insert data, set search params, search data 
@@ -1344,133 +1380,76 @@ class InteractManager:
                     # 락 해제 상태에서 삽입 수행
                     self._execute_batch_insert(data_to_insert, domain)
 
-    def embed_and_prepare_chunk(self, chunk, domain):
-        """
-        청크를 임베딩하고 DB 삽입을 위한 데이터를 준비합니다.
+    def embed_and_prepare_chunk(self, chunk_data):
+        """청크 데이터에 임베딩을 추가하고 DB 삽입을 위한 데이터로 변환합니다."""
+        thread_id = threading.get_ident()
+        chunk_id = chunk_data.get('id', 'unknown')
+        doc_info = chunk_data.get('doc_id', 'unknown')
+        start_time = time.time()
         
-        Args:
-            chunk (dict): 청크 정보가 담긴 딕셔너리 (id, text, doc_id, raw_doc_id 등 포함)
-            domain (str): 도메인 이름
-            
-        Returns:
-            dict: 삽입 준비가 완료된 데이터 딕셔너리
-        """
         try:
-            # 청크 정보 추출
-            chunk_id = chunk.get('id')
-            chunk_text = chunk.get('text')
-            doc_id = chunk.get('doc_id')
+            # 텍스트 추출 및 처리
+            chunk_text = chunk_data.get('text', '')
             
-            # _doc 필드에서 doc_id를 가져오는 로직 추가
-            if not doc_id and '_doc' in chunk:
-                doc = chunk.get('_doc')
-                if doc and isinstance(doc, dict):
-                    # 해시된 doc_id를 직접 가져오기
-                    doc_id = doc.get('_hashed_doc_id')
-                    print(f"[DEBUG] _doc에서 doc_id 추출: {doc_id}")
-                    
-                    if not doc_id:
-                        # 해시된 doc_id가 없으면 원본 doc_id 사용하여 해시 생성
-                        orig_doc_id = doc.get('doc_id')
-                        if orig_doc_id:
-                            doc_id = self.data_p.hash_text(orig_doc_id, hash_type='blake')
-                            print(f"[INFO] doc_id를 원본 ID에서 생성: {orig_doc_id} -> {doc_id}")
+            # 텍스트가 비어있으면 처리하지 않음
+            if not chunk_text or len(chunk_text.strip()) == 0:
+                self.insert_logger.warning(f"[Thread-{thread_id}] 빈 청크 건너뛰기: {chunk_id} (문서: {doc_info})")
+                return None
             
-            raw_doc_id = chunk.get('raw_doc_id')
-            # raw_doc_id도 _doc에서 가져오기
-            if not raw_doc_id and '_doc' in chunk:
-                doc = chunk.get('_doc')
-                if doc and isinstance(doc, dict):
-                    raw_doc_id = doc.get('_raw_doc_id', doc.get('doc_id', ''))
-                    print(f"[DEBUG] _doc에서 raw_doc_id 추출: {raw_doc_id}")
+            # 세마포어 획득 시작 시간
+            sem_wait_start = time.time()
             
-            passage_id = chunk.get('passage_id', chunk_id)
-            title = chunk.get('title', '')
-            author = chunk.get('author', '')
-            info = chunk.get('info', {})
-            tags = chunk.get('tags', {})
-            
-            # _doc에서 제목과 작성자 정보도 가져오기
-            if '_doc' in chunk:
-                doc = chunk.get('_doc')
-                if doc and isinstance(doc, dict):
-                    if not title:
-                        title = doc.get('title', '')
-                    if not author:
-                        author = doc.get('author', '')
-                    if not info or info == {}:
-                        info = doc.get('info', {})
-                    if not tags or tags == {}:
-                        tags = doc.get('tags', {})
-                        
-            # 필수 필드 확인
-            if not chunk_text:
-                raise ValueError(f"청크 {chunk_id}에 텍스트가 없습니다")
-            
-            if not doc_id:
-                # 심각한 오류: doc_id가 없음
-                error_msg = f"청크 {chunk_id}에 doc_id가 없습니다. 이는 심각한 오류입니다. chunk={chunk}"
-                print(f"[ERROR] {error_msg}")
-                raise ValueError(error_msg)
-            
-            # 청크 ID와 문서 ID로 고유 식별자 생성
-            passage_uid = f"{doc_id}_{passage_id}"
-            print(f"[DEBUG] passage_uid 생성: {passage_uid} (doc_id: {doc_id}, passage_id: {passage_id})")
-            
-            # 텍스트 길이 체크
-            chunk_bytes = len(chunk_text.encode('utf-8'))
-            if chunk_bytes > self.MAX_TEXT_LENGTH:
-                print(f"[WARNING] 청크 {chunk_id}의 텍스트가 너무 큽니다: {chunk_bytes} 바이트 (최대: {self.MAX_TEXT_LENGTH}). 분할을 시도합니다.")
-                sub_chunks = self._split_large_chunk(chunk_text)
-                if not sub_chunks:
-                    raise ValueError(f"청크 {chunk_id} 분할 실패")
+            # GPU 세마포어 획득
+            with self.get_gpu_semaphore():
+                # 세마포어 획득 대기 시간 측정
+                sem_wait_time = time.time() - sem_wait_start
                 
-                # 첫 번째 하위 청크만 사용 (나머지는 별도 처리 필요)
-                chunk_text = sub_chunks[0]
-                chunk_bytes = len(chunk_text.encode('utf-8'))
-                print(f"[INFO] 청크 {chunk_id}를 {len(sub_chunks)}개로 분할, 첫 번째 청크 크기: {chunk_bytes} 바이트")
+                # 활성 GPU 작업 수 증가 및 자원 상태 로깅
+                active_tasks = self.increment_active_tasks()
+                sem_value = self._gpu_semaphore._value if hasattr(self._gpu_semaphore, '_value') else 'unknown'
+                self.insert_logger.info(f"[Thread-{thread_id}] GPU 자원 상태: 활성작업={active_tasks}/{GPU_WORKERS}, 세마포어값={sem_value}, 대기시간={sem_wait_time:.4f}초 (청크: {chunk_id}, 문서: {doc_info})")
+                
+                # 임베딩 시작 시간
+                embed_start = time.time()
+                
+                # 임베딩 생성
+                embeddings = self.emb_model.bge_embed_data(chunk_text)
+                
+                # 임베딩 소요 시간
+                embed_time = time.time() - embed_start
+                
+                # 활성 GPU 작업 수 감소
+                active_tasks = self.decrement_active_tasks()
             
-            # GPU 리소스 세마포어 사용
-            gpu_semaphore = self.get_gpu_semaphore()
-            with gpu_semaphore:
-                try:
-                    # 임베딩 생성
-                    text_emb = self.emb_model.bge_embed_data(chunk_text)
-                    if not text_emb or len(text_emb) == 0:
-                        raise ValueError(f"청크 {chunk_id}에 대한 빈 임베딩이 생성되었습니다")
-                except Exception as e:
-                    print(f"[ERROR] 청크 {chunk_id} 임베딩 생성 실패: {str(e)}")
-                    # 임베딩 재시도
-                    try:
-                        print(f"[INFO] 청크 {chunk_id} 임베딩 재시도...")
-                        text_emb = self.emb_model.bge_embed_data(chunk_text)
-                        if not text_emb or len(text_emb) == 0:
-                            raise ValueError(f"청크 {chunk_id}에 대한 빈 임베딩이 재시도 후에도 생성되었습니다")
-                    except Exception as retry_error:
-                        raise ValueError(f"청크 {chunk_id} 임베딩 재시도 실패: {str(retry_error)}")
-            
-            # 데이터 구성
-            data = {
-                "passage_uid": passage_uid,
-                "doc_id": doc_id,
-                "raw_doc_id": raw_doc_id,
-                "passage_id": passage_id,
-                "domain": domain,
-                "title": title,
-                "author": author,
-                "text": chunk_text,
-                "text_emb": text_emb,
-                "info": info,
-                "tags": tags
+            # 결과 데이터 준비
+            prepared_data = {
+                'id': chunk_id,
+                'doc_id': chunk_data.get('doc_id', ''),
+                'embedding': embeddings,
+                'text': chunk_text,
+                'metadata': chunk_data.get('metadata', {})
             }
             
-            print(f"[INFO] 청크 {chunk_id} 임베딩 및 준비 완료: doc_id={doc_id}, passage_id={passage_id}")
-            return data
+            # 성능 로깅
+            end_time = time.time()
+            total_time = end_time - start_time
+            
+            # 비정상적으로 긴 처리 시간 경고 (10초 이상)
+            if total_time > 10:
+                self.insert_logger.warning(f"[Thread-{thread_id}] ⚠️ 비정상적으로 긴 청크 처리 시간: {total_time:.2f}초 (청크: {chunk_id}, 문서: {doc_info})")
+            
+            # 임베딩 완료 로그
+            self.insert_logger.info(f"[Thread-{thread_id}] 청크 임베딩 완료: 총 {total_time:.4f}초, 대기={sem_wait_time:.4f}초, 계산={embed_time:.4f}초 (청크: {chunk_id}, 문서: {doc_info})")
+            
+            return prepared_data
             
         except Exception as e:
-            print(f"[ERROR] 청크 {chunk.get('id', 'unknown')} 임베딩 및 준비 실패: {str(e)}")
-            import traceback
-            print(f"[ERROR] 상세 오류: {traceback.format_exc()}")
+            # 오류 발생 시 활성 GPU 작업 수 감소
+            self.decrement_active_tasks()
+            
+            # 오류 로깅
+            error_trace = traceback.format_exc()
+            self.insert_logger.error(f"[Thread-{thread_id}] 청크 임베딩 오류: {str(e)} (청크: {chunk_id}, 문서: {doc_info})\n{error_trace}")
             return None
 
     def batch_insert_data(self, domain, data_batch):
