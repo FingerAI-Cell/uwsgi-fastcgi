@@ -2,6 +2,7 @@ from flask import Flask, send_file, request, jsonify, Response
 from pymilvus import Collection
 from dotenv import load_dotenv
 from src import EnvManager, InteractManager
+from src.pipe import InteractManager as PipeInteractManager  # 명시적으로 pipe.py의 InteractManager 임포트
 import logging
 import json 
 import os 
@@ -762,11 +763,18 @@ def insert_data():
                         try:
                             doc_process_start = time.time()
                             doc_title = doc.get('title', 'unknown')
-                            doc_hashed_id = doc.get('_hashed_doc_id', 'unknown')
+                            
+                            # 문서 ID 확인 및 설정
+                            if '_hashed_doc_id' in doc:
+                                doc_hashed_id = doc['_hashed_doc_id']
+                            else:
+                                doc_hashed_id = doc.get('id', 'unknown')
+                                
                             thread_id = threading.get_ident()  # 현재 스레드 ID 가져오기
                             
-                            logger.info(f"[TIMING] 문서 처리 시작: {doc_title} (ID: {doc_hashed_id})")
+                            # 문서 처리 시작 로그 개선
                             insert_logger.info(f"문서 처리 시작: {doc_title} (ID: {doc_hashed_id}, Thread: {thread_id})")
+                            logger.info(f"[TIMING] 문서 처리 시작: {doc_title} (ID: {doc_hashed_id})")
                             
                             # 문서 텍스트 추출
                             if isinstance(doc, dict) and 'text' in doc:
@@ -805,13 +813,12 @@ def insert_data():
                                 try:
                                     # InteractManager에서 세마포어 정보 가져오기
                                     gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
-                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
+                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 0
                                     max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
-                                    active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
+                                    active_workers = max_workers - sem_value if isinstance(sem_value, int) else 0
                                     
                                     # 간소화된 로그 - 중요 정보만 출력
-                                    doc_id = doc.get('id', 'unknown')
-                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_id})")
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hashed_id})")
                                 except Exception as e:
                                     insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
@@ -822,6 +829,10 @@ def insert_data():
                             
                             # 각 청크 처리에 필요한 도메인 정보 준비
                             domain = doc.get('domain', 'general')
+                            
+                            # 문서 ID 미리 저장 (문서의 여러 위치에서 일관되게 사용하기 위함)
+                            doc_hashed_id = doc.get('id', 'unknown')
+                            doc_title = doc.get('title', '제목 없음')
                             
                             # 임베딩 생성 함수 정의
                             def process_chunk(chunk, index):
@@ -849,14 +860,23 @@ def insert_data():
                                         if field in doc:
                                             chunk_data['metadata'][field] = doc[field]
                                     
-                                    # 임베딩 생성 전 GPU 세마포어 상태 추적 - 로그 제거
+                                    # 임베딩 생성 전 GPU 세마포어 상태 추적
+                                    thread_id = threading.get_ident()
+                                    insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 시작 (텍스트 길이: {len(chunk)})")
                                     
                                     # 임베딩 생성
                                     embedding_time_start = time.time()
                                     chunk_data = interact_manager.prepare_data_with_embedding(chunk_data)
                                     embedding_time_end = time.time()
+                                    embedding_duration = embedding_time_end - embedding_time_start
                                     
-                                    # 임베딩 성능 로깅 제거 (과도한 로그 방지)
+                                    # 임베딩 벡터 확인 로그
+                                    if 'text_emb' in chunk_data:
+                                        emb_length = len(chunk_data['text_emb'])
+                                        emb_sample = str(chunk_data['text_emb'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
+                                        insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 완료: 벡터 크기={emb_length}, 샘플={emb_sample}, 소요시간={embedding_duration:.4f}초")
+                                    else:
+                                        insert_logger.warning(f"[Thread-{thread_id}] 청크 {index} 임베딩 누락됨!")
                                     
                                     chunk_end = time.time()
                                     return chunk_data
@@ -893,13 +913,12 @@ def insert_data():
                                 try:
                                     # InteractManager에서 세마포어 정보 가져오기
                                     gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
-                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
+                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 0
                                     max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
-                                    active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
+                                    active_workers = max_workers - sem_value if isinstance(sem_value, int) else 0
                                     
                                     # 간소화된 로그 - 중요 정보만 출력
-                                    doc_id = doc.get('id', 'unknown')
-                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_id})")
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hashed_id})")
                                 except Exception as e:
                                     insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
@@ -982,12 +1001,17 @@ def insert_data():
                         try:
                             gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
                             # 더 안전한 세마포어 값 확인 방법
-                            sem_value = '알 수 없음'
+                            sem_value = 0
                             if hasattr(gpu_sem, '_value'):  # threading.Semaphore 내부 구현
                                 sem_value = gpu_sem._value
                             elif hasattr(gpu_sem, '_sem') and hasattr(gpu_sem._sem, '_value'):  # BoundedSemaphore 구현
                                 sem_value = gpu_sem._sem._value
-                            insert_logger.info(f"문서 처리 시작 전 GPU 세마포어 상태: {sem_value}")
+                                
+                            # 최대 워커 수와 현재 사용 중인 워커 수 계산
+                            max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
+                            active_workers = max_workers - sem_value
+                            
+                            insert_logger.info(f"문서 처리 시작 전 GPU 세마포어 상태: {sem_value}/{max_workers} (사용 중: {active_workers})")
                         except Exception as sem_err:
                             insert_logger.warning(f"GPU 세마포어 확인 실패 (무시됨): {str(sem_err)}")
                     
@@ -1011,12 +1035,17 @@ def insert_data():
                         try:
                             gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
                             # 더 안전한 세마포어 값 확인 방법
-                            sem_value = '알 수 없음'
+                            sem_value = 0
                             if hasattr(gpu_sem, '_value'):  # threading.Semaphore 내부 구현
                                 sem_value = gpu_sem._value
                             elif hasattr(gpu_sem, '_sem') and hasattr(gpu_sem._sem, '_value'):  # BoundedSemaphore 구현
                                 sem_value = gpu_sem._sem._value
-                            insert_logger.info(f"문서 처리 완료 후 GPU 세마포어 상태: {sem_value}")
+                                
+                            # 최대 워커 수와 현재 사용 중인 워커 수 계산
+                            max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
+                            active_workers = max_workers - sem_value
+                            
+                            insert_logger.info(f"문서 처리 완료 후 GPU 세마포어 상태: {sem_value}/{max_workers} (사용 중: {active_workers})")
                         except Exception as sem_err:
                             insert_logger.warning(f"GPU 세마포어 확인 실패 (무시됨): {str(sem_err)}")
                     

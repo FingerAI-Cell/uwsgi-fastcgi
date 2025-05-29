@@ -1451,6 +1451,59 @@ class InteractManager:
             error_trace = traceback.format_exc()
             self.insert_logger.error(f"[Thread-{thread_id}] 청크 임베딩 오류: {str(e)} (청크: {chunk_id}, 문서: {doc_info})\n{error_trace}")
             return None
+            
+    def prepare_data_with_embedding(self, chunk_data):
+        """
+        app.py에서 호출하는 청크 임베딩 생성 함수
+        내부적으로 embed_and_prepare_chunk를 호출하여 임베딩 작업 수행
+        
+        Args:
+            chunk_data (dict): 청크 데이터 (id, doc_id, text 등 포함)
+            
+        Returns:
+            dict: 임베딩이 추가된 청크 데이터 (text_emb 필드 포함)
+        """
+        # 로깅 설정
+        if not hasattr(self, 'insert_logger'):
+            import logging
+            self.insert_logger = logging.getLogger('insert')
+            if not self.insert_logger.handlers:
+                log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
+                os.makedirs(log_dir, exist_ok=True)
+                insert_handler = logging.FileHandler(os.path.join(log_dir, 'insert.log'))
+                insert_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                insert_handler.setFormatter(insert_formatter)
+                self.insert_logger.setLevel(logging.INFO)
+                self.insert_logger.addHandler(insert_handler)
+                self.insert_logger.propagate = False
+        
+        thread_id = threading.get_ident()
+        chunk_id = chunk_data.get('id', 'unknown')
+        doc_id = chunk_data.get('doc_id', 'unknown')
+        
+        # 디버그 로그
+        self.insert_logger.info(f"[Thread-{thread_id}] prepare_data_with_embedding 호출됨 (청크: {chunk_id}, 문서: {doc_id})")
+        
+        # embed_and_prepare_chunk 호출하여 임베딩 생성
+        prepared_data = self.embed_and_prepare_chunk(chunk_data)
+        
+        if prepared_data:
+            # 'embedding' 필드를 'text_emb'로 변환
+            if 'embedding' in prepared_data:
+                prepared_data['text_emb'] = prepared_data.pop('embedding')
+                
+            # 나머지 필드 복사
+            for key in chunk_data:
+                if key not in prepared_data and key != 'text':
+                    prepared_data[key] = chunk_data[key]
+                    
+            # 성공 로그
+            self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 변환 완료: {chunk_id}")
+            return prepared_data
+        else:
+            # 실패 시 원본 데이터 반환
+            self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 생성 실패, 원본 데이터 반환: {chunk_id}")
+            return chunk_data
 
     def batch_insert_data(self, domain, data_batch):
         """
