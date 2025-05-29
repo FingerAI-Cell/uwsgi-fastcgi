@@ -54,7 +54,7 @@ args['config_path'] = "./config"
 args['llm_config'] = "llm_config.json"
 args['db_config'] = "db_config.json"
 args['collection_name'] = "congress"
-args['ip_addr'] = os.getenv('ip_addr')   
+args['ip_addr'] = os.getenv('MILVUS_HOST')   
 
 env_manager = EnvManager(args)
 env_manager.set_processors()
