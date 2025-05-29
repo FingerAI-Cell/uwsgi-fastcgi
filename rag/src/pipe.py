@@ -10,13 +10,20 @@ import ast
 import time
 import concurrent.futures
 import threading
+import logging
 
 class EnvManager():
     def __init__(self, args):
         self.args = args
         self.set_config()
-        self.cohere_api = os.getenv('COHERE_API_KEY')   
-        self.db_config['ip_addr'] = self.args['ip_addr']
+        self.set_processors()
+        self.set_vectordb()
+        self.set_emb_model()
+        
+        # 로그 디렉토리 확인 및 생성
+        self.log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
+        os.makedirs(self.log_dir, exist_ok=True)
+        print(f"EnvManager - 로그 디렉토리: {self.log_dir}")
         
     def set_config(self):
         with open(os.path.join(self.args['config_path'], self.args['db_config'])) as f:
@@ -985,8 +992,23 @@ class InteractManager:
             import logging
             timing_logger = logging.getLogger('timing')
             
+            # raw_insert 전용 로거 설정
+            raw_insert_logger = logging.getLogger('raw_insert')
+            if not raw_insert_logger.handlers:
+                # 로그 디렉토리 확인
+                log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
+                os.makedirs(log_dir, exist_ok=True)
+                
+                raw_handler = logging.FileHandler(os.path.join(log_dir, 'raw_insert.log'))
+                raw_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                raw_handler.setFormatter(raw_formatter)
+                raw_insert_logger.setLevel(logging.INFO)
+                raw_insert_logger.addHandler(raw_handler)
+                raw_insert_logger.propagate = False  # 다른 로거로 전파 방지
+            
             raw_start_time = time.time()
             timing_logger.info(f"RAW_INSERT_START - doc_id: {doc_id}, passage_id: {passage_id}")
+            raw_insert_logger.info(f"=== RAW_INSERT_START - doc_id: {doc_id}, passage_id: {passage_id} ===")
             
             # DB 세마포어 및 배치 처리 락 초기화 (한 번만)
             if self.__class__.db_semaphore is None:
@@ -1000,6 +1022,7 @@ class InteractManager:
             # 도메인이 없으면 생성
             if domain not in self.vectorenv.get_list_collection():
                 print(f"[DEBUG] Creating new collection: {domain}")
+                raw_insert_logger.info(f"Creating new collection: {domain}")
                 self.create_domain(domain)
                 print(f"[DEBUG] Collection created successfully")
             
@@ -1010,6 +1033,7 @@ class InteractManager:
             
             hashed_doc_id = self.data_p.hash_text(doc_id, hash_type='blake')
             print(f"[DEBUG] Raw doc_id: {raw_doc_id}, Hashed doc_id: {hashed_doc_id}")
+            raw_insert_logger.info(f"Raw doc_id: {raw_doc_id}, Hashed doc_id: {hashed_doc_id}")
             
             # 컬렉션 로드
             collection = Collection(domain)
@@ -1018,48 +1042,76 @@ class InteractManager:
             
             # passage_uid 생성 (해시된 doc_id 사용)
             passage_uid = f"{hashed_doc_id}-p{passage_id}"
+            raw_insert_logger.info(f"생성된 passage_uid: {passage_uid}")
             
             # 중복 체크 - check_duplicates 함수 활용
             duplicate_results = self.check_duplicates([hashed_doc_id], domain)
+            raw_insert_logger.info(f"중복 체크 결과: 타입={type(duplicate_results)}, 값={duplicate_results}")
             print(f"[DEBUG] 중복 체크 결과: {duplicate_results}")
             
-            # 추가로 passage_id 일치 여부 확인
+            # 수정된 중복 처리 로직 - 단순화 및 버그 수정
             is_update = False
+            # duplicate_results는 리스트 형태로 반환됨
             if duplicate_results and hashed_doc_id in duplicate_results:
-                # passage_id가 일치하는 항목이 있는지 확인
-                matching_passages = [p for p in duplicate_results.get(hashed_doc_id, []) if p.get('passage_id') == passage_id]
-                if matching_passages:
-                    if ignore:
-                        print(f"[DEBUG] Skipping insert due to ignore=True")
-                        timing_logger.info(f"RAW_INSERT_SKIPPED - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
-                        return "skipped"
-                    else:
-                        print(f"[DEBUG] Deleting existing document due to ignore=False")
-                        timing_logger.info(f"RAW_DELETE_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
-                        
-                        # 삭제 작업 시작
-                        delete_start = time.time()
-                        try:
-                            # passage_uid 기반 삭제가 doc_id & passage_id 쿼리보다 효율적
-                            del_expr = f'passage_uid == "{passage_uid}"'
-                            collection.delete(del_expr)
+                raw_insert_logger.info(f"문서 ID {hashed_doc_id}가 중복 발견됨")
+                
+                # 중복 문서의 passage_id 직접 확인
+                try:
+                    passage_query = f'doc_id == "{hashed_doc_id}"'
+                    passage_results = collection.query(
+                        expr=passage_query,
+                        output_fields=["passage_id", "passage_uid"],
+                        limit=100  # 충분한 결과 확보
+                    )
+                    
+                    raw_insert_logger.info(f"중복 문서의 passage 정보: {passage_results}")
+                    
+                    # 같은 passage_id가 있는지 확인
+                    matching_passages = [p for p in passage_results if p.get('passage_id') == passage_id]
+                    raw_insert_logger.info(f"일치하는 passage: {matching_passages}")
+                    
+                    if matching_passages:
+                        if ignore:
+                            print(f"[DEBUG] Skipping insert due to ignore=True")
+                            raw_insert_logger.info(f"ignore=True로 인해 삽입 건너뜀")
+                            timing_logger.info(f"RAW_INSERT_SKIPPED - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
+                            return "skipped"
+                        else:
+                            print(f"[DEBUG] Deleting existing document due to ignore=False")
+                            raw_insert_logger.info(f"ignore=False로 인해 기존 문서 삭제 후 재삽입")
+                            timing_logger.info(f"RAW_DELETE_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
                             
-                            delete_end = time.time()
-                            delete_duration = delete_end - delete_start
-                            timing_logger.info(f"RAW_DELETE_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s")
-                            print(f"[DEBUG] Successfully deleted existing document in {delete_duration:.4f}s")
-                            
-                            is_update = True
-                        except Exception as delete_error:
-                            delete_error_time = time.time()
-                            delete_duration = delete_error_time - delete_start
-                            timing_logger.error(f"RAW_DELETE_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s, error: {str(delete_error)}")
-                            print(f"[ERROR] Failed to delete existing document: {str(delete_error)}")
-                            raise Exception(f"Raw delete operation failed: {str(delete_error)}")
+                            # 삭제 작업 시작
+                            delete_start = time.time()
+                            try:
+                                # passage_uid 기반 삭제가 doc_id & passage_id 쿼리보다 효율적
+                                del_expr = f'passage_uid == "{passage_uid}"'
+                                raw_insert_logger.info(f"삭제 쿼리: {del_expr}")
+                                
+                                deleted = collection.delete(del_expr)
+                                raw_insert_logger.info(f"삭제 결과: {deleted}개 항목 삭제됨")
+                                
+                                delete_end = time.time()
+                                delete_duration = delete_end - delete_start
+                                timing_logger.info(f"RAW_DELETE_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s")
+                                print(f"[DEBUG] Successfully deleted existing document in {delete_duration:.4f}s")
+                                
+                                is_update = True
+                            except Exception as delete_error:
+                                delete_error_time = time.time()
+                                delete_duration = delete_error_time - delete_start
+                                timing_logger.error(f"RAW_DELETE_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s, error: {str(delete_error)}")
+                                raw_insert_logger.error(f"삭제 실패: {str(delete_error)}")
+                                print(f"[ERROR] Failed to delete existing document: {str(delete_error)}")
+                                raise Exception(f"Raw delete operation failed: {str(delete_error)}")
+                except Exception as query_error:
+                    raw_insert_logger.error(f"passage 쿼리 오류: {str(query_error)}")
+                    print(f"[ERROR] Error querying passages: {str(query_error)}")
             
             # 텍스트 임베딩
             embed_start = time.time()
             timing_logger.info(f"RAW_EMBED_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}, text_length: {len(text)}")
+            raw_insert_logger.info(f"임베딩 시작 - 텍스트 길이: {len(text)}")
             
             # GPU 세마포어를 사용하여 임베딩 생성
             with self.__class__.get_gpu_semaphore():
@@ -1068,6 +1120,7 @@ class InteractManager:
             embed_end = time.time()
             embed_duration = embed_end - embed_start
             timing_logger.info(f"RAW_EMBED_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {embed_duration:.4f}s")
+            raw_insert_logger.info(f"임베딩 완료 - 소요시간: {embed_duration:.4f}초, 임베딩 벡터 길이: {len(text_emb)}")
             print(f"[DEBUG] Generated embedding, length: {len(text_emb)}")
             
             # info와 tags가 문자열인 경우 파싱
@@ -1094,6 +1147,7 @@ class InteractManager:
             # 배치 처리 메커니즘 사용
             insert_start = time.time()
             timing_logger.info(f"RAW_DB_INSERT_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
+            raw_insert_logger.info(f"DB 삽입 시작 - passage_uid: {passage_uid}")
             print(f"[DEBUG] Preparing data with passage_uid: {passage_uid} for insert")
             
             # 배치에 추가하고 필요시 삽입
@@ -1102,31 +1156,37 @@ class InteractManager:
                 
                 if batch_inserted:
                     print(f"[DEBUG] Data triggered a batch insert")
+                    raw_insert_logger.info("배치 삽입 발생")
                 else:
                     print(f"[DEBUG] Data added to batch (will be inserted later)")
+                    raw_insert_logger.info("데이터가 배치에 추가됨 (나중에 삽입)")
                 
                 insert_end = time.time()
                 insert_duration = insert_end - insert_start
                 timing_logger.info(f"RAW_DB_INSERT_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s")
+                raw_insert_logger.info(f"DB 삽입 완료 - 소요시간: {insert_duration:.4f}초")
                 
-                # 업데이트 된 경우 즉시 flush하여 변경사항 적용 (배치 처리로 변경하면서 주석 처리)
-                # 개별 문서마다 flush하는 것은 성능에 영향을 줄 수 있음
-                # if is_update:
-                #     flush_start = time.time()
-                #     collection.flush()
-                #     flush_end = time.time()
-                #     timing_logger.info(f"RAW_FLUSH - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {(flush_end - flush_start):.4f}s")
-                #     print(f"[DEBUG] Collection flushed for update")
+                # 업데이트 된 경우 즉시 flush하여 변경사항 적용
+                if is_update:
+                    flush_start = time.time()
+                    raw_insert_logger.info("업데이트로 인한 flush 시작")
+                    collection.flush()
+                    flush_end = time.time()
+                    timing_logger.info(f"RAW_FLUSH - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {(flush_end - flush_start):.4f}s")
+                    raw_insert_logger.info(f"Flush 완료 - 소요시간: {(flush_end - flush_start):.4f}초")
+                    print(f"[DEBUG] Collection flushed for update")
             except Exception as insert_error:
                 insert_error_time = time.time()
                 insert_duration = insert_error_time - insert_start
                 timing_logger.error(f"RAW_DB_INSERT_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s, error: {str(insert_error)}")
+                raw_insert_logger.error(f"DB 삽입 오류: {str(insert_error)}")
                 print(f"[ERROR] Failed to insert data: {str(insert_error)}")
                 raise
             
             # 인덱스가 있는지 확인하고 없으면 생성 (첫 삽입 시에만 필요)
             if not collection.has_index():
                 print(f"[DEBUG] Creating index for collection")
+                raw_insert_logger.info("컬렉션에 인덱스 생성")
                 self.vectorenv.create_index(collection, field_name='text_emb')
                 print(f"[DEBUG] Index created successfully")
                 
@@ -1137,14 +1197,21 @@ class InteractManager:
             raw_end_time = time.time()
             raw_duration = raw_end_time - raw_start_time
             timing_logger.info(f"RAW_INSERT_TOTAL - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {raw_duration:.4f}s, status: {'updated' if is_update else 'success'}")
+            raw_insert_logger.info(f"=== RAW_INSERT_END - 총 소요시간: {raw_duration:.4f}초, 상태: {'updated' if is_update else 'success'} ===")
             print(f"[DEBUG] Raw insert completed in {raw_duration:.4f}s")
             
             return "updated" if is_update else "success"
             
         except Exception as e:
             print(f"Error in raw_insert_data: {str(e)}")
+            # 예외 발생 시에도 로그 기록
+            import logging
+            raw_insert_logger = logging.getLogger('raw_insert')
+            raw_insert_logger.error(f"심각한 오류: {str(e)}")
+            import traceback
+            raw_insert_logger.error(f"스택 트레이스: {traceback.format_exc()}")
             raise
-
+    
     # 배치 삽입 처리 메소드 (새로 추가)
     def _add_to_batch_and_insert(self, data, domain):
         """
@@ -1480,12 +1547,30 @@ class InteractManager:
         return chunks
 
     def check_duplicates(self, doc_ids, domain):
-        """중복 문서 체크"""
+        """중복 문서 체크 - 리스트 형태로 중복된 doc_id만 반환"""
         try:
             if not doc_ids:
                 print(f"[DUPLICATION_CHECK] 경고: 검사할 문서가 없습니다 (도메인: {domain})")
                 return []
                 
+            # 중복 검사 전용 로깅 설정
+            import logging
+            duplication_logger = logging.getLogger('duplication')
+            if not duplication_logger.handlers:
+                # 로그 디렉토리 확인 - 상위 클래스 또는 전역 변수 활용
+                log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
+                os.makedirs(log_dir, exist_ok=True)
+                
+                duplication_handler = logging.FileHandler(os.path.join(log_dir, 'duplication.log'))
+                duplication_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                duplication_handler.setFormatter(duplication_formatter)
+                duplication_logger.setLevel(logging.INFO)
+                duplication_logger.addHandler(duplication_handler)
+                duplication_logger.propagate = False  # 다른 로거로 전파 방지
+            
+            duplication_logger.info(f"중복 검사 시작: 총 {len(doc_ids)}개 문서 ID, 도메인: {domain}")
+            duplication_logger.debug(f"검사할 doc_ids: {doc_ids[:5]}{'...' if len(doc_ids) > 5 else ''}")
+            
             print(f"[DUPLICATION_CHECK] 시작: 총 {len(doc_ids)}개 문서 ID 중복 검사 (도메인: {domain})")
             
             # 전체 doc_id 목록 로깅 (50개 미만일 경우)
@@ -1506,8 +1591,10 @@ class InteractManager:
                 stats = collection.get_statistics()
                 if stats.get('row_count', 0) == 0:
                     print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}'이 비어 있습니다. 중복 문서가 없습니다.")
+                    duplication_logger.info(f"컬렉션 '{domain}'이 비어 있음, 중복 없음")
                     return []
                 print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}' 로드 완료, 총 문서 수: {stats.get('row_count', '알 수 없음')}")
+                duplication_logger.info(f"컬렉션 '{domain}' 로드 완료, 총 문서 수: {stats.get('row_count', '알 수 없음')}")
 
                 # 디버깅: 기존 문서의 doc_id 샘플 확인
                 try:
@@ -1518,9 +1605,12 @@ class InteractManager:
                         offset=0
                     )
                     if sample_docs:
-                        print(f"[DUPLICATION_CHECK] 기존 문서 doc_id 샘플 (10개): {[doc.get('doc_id', 'unknown') for doc in sample_docs]}")
+                        doc_id_samples = [doc.get('doc_id', 'unknown') for doc in sample_docs]
+                        print(f"[DUPLICATION_CHECK] 기존 문서 doc_id 샘플 (10개): {doc_id_samples}")
+                        duplication_logger.info(f"기존 문서 doc_id 샘플 (10개): {doc_id_samples}")
                 except Exception as e:
                     print(f"[DUPLICATION_CHECK] 기존 문서 샘플 확인 실패: {str(e)}")
+                    duplication_logger.error(f"기존 문서 샘플 확인 실패: {str(e)}")
                 
                 # 실제 중복 체크 로직 추가
                 batch_size = 100  # 한 번에 처리할 최대 문서 수
@@ -1535,6 +1625,8 @@ class InteractManager:
                     # 작은 따옴표로 각 ID를 감싸고 쉼표로 구분
                     ids_str = '", "'.join(batch)
                     expr = f'doc_id in ("{ids_str}")'
+                    
+                    duplication_logger.debug(f"배치 {i//batch_size + 1} 쿼리: {expr[:100]}{'...' if len(expr) > 100 else ''}")
                     
                     try:
                         # 존재하는 doc_id 가져오기
@@ -1553,9 +1645,15 @@ class InteractManager:
                                 if doc_id not in duplicates:
                                     duplicates.append(doc_id)
                                     
+                        duplication_logger.info(f"배치 {i//batch_size + 1} 처리 완료: {len(found_doc_ids)}개 중복 발견")
                         print(f"[DUPLICATION_CHECK] 배치 {i//batch_size + 1} 처리 완료: {len(found_doc_ids)}개 중복 발견")
+                        
+                        # 중복 발견 항목 상세 로깅
+                        if found_doc_ids:
+                            duplication_logger.debug(f"배치 {i//batch_size + 1} 중복 ID: {list(found_doc_ids)[:10]}{'...' if len(found_doc_ids) > 10 else ''}")
                     except Exception as e:
                         print(f"[DUPLICATION_CHECK] 배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
+                        duplication_logger.error(f"배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
                 
                 # 개별 체크 (배치 처리에서 누락된 경우를 대비)
                 for doc_id in doc_ids:
@@ -1576,32 +1674,45 @@ class InteractManager:
                             # 문서가 존재하면 중복으로 표시
                             duplicates.append(doc_id)
                             print(f"[DUPLICATION_CHECK] 개별 확인: doc_id={doc_id}는 중복됨")
+                            duplication_logger.info(f"개별 확인: doc_id={doc_id}는 중복됨")
                     except Exception as e:
                         # 오류 수집하여 나중에 분석
                         errors.append({"doc_id": doc_id, "error": str(e)})
                         print(f"[DUPLICATION_CHECK] 오류: doc_id={doc_id} 검사 실패: {str(e)}")
+                        duplication_logger.error(f"오류: doc_id={doc_id} 검사 실패: {str(e)}")
             except Exception as e:
                 print(f"[DUPLICATION_CHECK] 컬렉션 로드 오류: {str(e)}")
+                duplication_logger.error(f"컬렉션 로드 오류: {str(e)}")
                 return []
             
             total_time = time.time() - start_time
             print(f"[DUPLICATION_CHECK] 완료: 총 {len(doc_ids)}개 문서 중 {len(duplicates)}개 중복 발견, {len(errors)}개 검사 실패")
             print(f"[DUPLICATION_CHECK] 성능: 총 소요시간 {total_time:.2f}초, 문서당 평균 {total_time/len(doc_ids):.4f}초")
+            duplication_logger.info(f"완료: 총 {len(doc_ids)}개 문서 중 {len(duplicates)}개 중복 발견, {len(errors)}개 검사 실패")
+            duplication_logger.info(f"성능: 총 소요시간 {total_time:.2f}초, 문서당 평균 {total_time/len(doc_ids):.4f}초")
             
             # 에러가 있는 경우 상세 로깅
             if errors:
                 print(f"[DUPLICATION_CHECK] 오류 상세: {errors[:5]}" + ("..." if len(errors) > 5 else ""))
+                duplication_logger.error(f"오류 상세: {errors[:5]}" + ("..." if len(errors) > 5 else ""))
             
             # 중복 문서 목록 출력 (최대 50개)
             if duplicates:
                 if len(duplicates) <= 50:
                     print(f"[DUPLICATION_CHECK] 중복 문서 ID 전체 목록: {duplicates}")
+                    duplication_logger.info(f"중복 문서 ID 전체 목록: {duplicates}")
                 else:
                     display_dupes = duplicates[:20]
                     more_count = len(duplicates) - len(display_dupes)
                     print(f"[DUPLICATION_CHECK] 중복 문서 ID 일부: {display_dupes} 외 {more_count}개")
+                    duplication_logger.info(f"중복 문서 ID 일부: {display_dupes} 외 {more_count}개")
             else:
                 print(f"[DUPLICATION_CHECK] 중복 문서 없음")
+                duplication_logger.info(f"중복 문서 없음")
+            
+            # 중요: 반환 값 유형 명확하게 로깅
+            print(f"[DUPLICATION_CHECK] 반환 값 유형: {type(duplicates)}, 값: {duplicates[:5] if len(duplicates) > 5 else duplicates}")
+            duplication_logger.info(f"반환 값 유형: {type(duplicates)}, 값: {duplicates[:5] if len(duplicates) > 5 else duplicates}")
             
             return duplicates
             
@@ -1609,4 +1720,11 @@ class InteractManager:
             print(f"[DUPLICATION_CHECK] 심각한 오류: 중복 체크 실패: {str(e)}")
             import traceback
             print(f"[DUPLICATION_CHECK] 스택 트레이스: {traceback.format_exc()}")
+            
+            # 중복 검사 로그에도 기록
+            import logging
+            duplication_logger = logging.getLogger('duplication')
+            duplication_logger.error(f"심각한 오류: 중복 체크 실패: {str(e)}")
+            duplication_logger.error(f"스택 트레이스: {traceback.format_exc()}")
+            
             return []

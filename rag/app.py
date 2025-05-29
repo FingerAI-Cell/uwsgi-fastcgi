@@ -16,25 +16,30 @@ import signal
 import concurrent.futures
 import threading
 
-# 시간 로깅 전용 로거 설정
-timing_logger = logging.getLogger('timing')
-timing_logger.setLevel(logging.INFO)
-timing_handler = logging.FileHandler('/var/log/rag/timing.log')
-timing_formatter = logging.Formatter('%(asctime)s - %(message)s')
-timing_handler.setFormatter(timing_formatter)
-timing_logger.addHandler(timing_handler)
-timing_logger.propagate = False  # 다른 로거로 전파 방지
-
 # 로깅 설정
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("/var/log/rag/app.log") if os.path.exists("/var/log/rag") else logging.FileHandler("app.log")
+        logging.FileHandler("/var/log/rag/app.log") if os.path.exists("/var/log/rag") else logging.FileHandler("logs/app.log")
     ]
 )
 logger = logging.getLogger("rag-backend")
+
+# 로그 디렉토리 확인 및 생성
+log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "logs"
+os.makedirs(log_dir, exist_ok=True)
+print(f"로그 디렉토리: {log_dir}")
+
+# 시간 로깅 전용 로거 설정
+timing_logger = logging.getLogger('timing')
+timing_logger.setLevel(logging.INFO)
+timing_handler = logging.FileHandler(os.path.join(log_dir, 'timing.log'))
+timing_formatter = logging.Formatter('%(asctime)s - %(message)s')
+timing_handler.setFormatter(timing_formatter)
+timing_logger.addHandler(timing_handler)
+timing_logger.propagate = False  # 다른 로거로 전파 방지
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
@@ -438,21 +443,37 @@ def insert_data():
     api_start_time = time.time()
     logger.info("=== INSERT API START ===")
     
+    # insert API 전용 로거 설정
+    insert_logger = logging.getLogger('insert')
+    if not insert_logger.handlers:
+        log_path = os.path.join(log_dir, 'insert.log')
+        insert_handler = logging.FileHandler(log_path)
+        insert_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        insert_handler.setFormatter(insert_formatter)
+        insert_logger.setLevel(logging.INFO)
+        insert_logger.addHandler(insert_handler)
+        insert_logger.propagate = False  # 다른 로거로 전파 방지
+    
+    insert_logger.info("=== INSERT API START ===")
+    
     try:
         request_data = request.json
         if not request_data:
+            insert_logger.error("요청 본문이 비어있습니다.")
             return jsonify({
                 "result_code": "F000001",
                 "message": "요청 본문이 비어있습니다."
             }), 400
 
         if "documents" not in request_data:
+            insert_logger.error("documents 필드는 필수입니다.")
             return jsonify({
                 "result_code": "F000002",
                 "message": "documents 필드는 필수입니다."
             }), 400
 
         if not isinstance(request_data["documents"], list) or len(request_data["documents"]) == 0:
+            insert_logger.error("documents는 최소 1개 이상의 문서를 포함해야 합니다.")
             return jsonify({
                 "result_code": "F000003",
                 "message": "documents는 최소 1개 이상의 문서를 포함해야 합니다."
@@ -460,6 +481,7 @@ def insert_data():
 
         # ignore 옵션 처리 (기본값: True)
         ignore = request_data.get('ignore', True)
+        insert_logger.info(f"중복 문서 처리 모드: ignore={ignore}")
 
         # 필수 필드 검증
         required_fields = ['domain', 'title', 'author', 'text', 'tags']
@@ -499,6 +521,7 @@ def insert_data():
             
         validation_end = time.time()
         logger.info(f"[TIMING] 문서 유효성 검사 완료: {len(valid_documents)}/{len(request_data['documents'])} 유효, 소요시간: {validation_end - validation_start:.4f}초")
+        insert_logger.info(f"문서 유효성 검사 완료: {len(valid_documents)}/{len(request_data['documents'])} 유효")
         
         # 상태별 카운터 초기화
         status_counts = {
@@ -522,15 +545,19 @@ def insert_data():
                 domain_documents[domain] = []
             domain_documents[domain].append(doc)
         
+        insert_logger.info(f"도메인별 문서 분류: {', '.join([f'{domain}({len(docs)}개)' for domain, docs in domain_documents.items()])}")
+        
         # 각 도메인별 처리
         for domain, docs in domain_documents.items():
             domain_start = time.time()
             logger.info(f"[TIMING] 도메인 '{domain}' 처리 시작: {len(docs)}개 문서")
+            insert_logger.info(f"도메인 '{domain}' 처리 시작: {len(docs)}개 문서")
             
             try:
                 # 도메인 생성 (없는 경우에만)
                 if domain not in milvus_db.get_list_collection():
                     logger.info(f"Creating new domain: {domain}")
+                    insert_logger.info(f"새 도메인 생성: {domain}")
                     interact_manager.create_domain(domain)
                     # 새로 생성된 컬렉션 로드
                     collection = Collection(domain)
@@ -553,6 +580,8 @@ def insert_data():
                     doc_hashes.append(hashed_doc_id)
                     doc_hash_map[hashed_doc_id] = doc
                 
+                insert_logger.info(f"문서 ID 해시 계산 완료: {len(doc_hashes)}개")
+                
                 # 컬렉션 로드
                 collection = Collection(domain)
                 collection.load()
@@ -562,13 +591,16 @@ def insert_data():
                 
                 # 개선된 방식으로 중복 체크 - pipe.py의 check_duplicates 함수 사용
                 logger.info(f"[DUPLICATION_CHECK] 시작: 총 {len(doc_hashes)}개 문서 ID 중복 검사 (도메인: {domain}, ignore={ignore})")
+                insert_logger.info(f"중복 검사 시작: 총 {len(doc_hashes)}개 문서 ID (도메인: {domain}, ignore={ignore})")
                 
                 # 전체 doc_id 목록 로깅 (50개 미만일 경우)
                 if len(doc_hashes) <= 50:
                     logger.info(f"[DUPLICATION_CHECK] 검사할 모든 doc_id 목록: {doc_hashes}")
+                    insert_logger.info(f"검사할 모든 doc_id 목록: {doc_hashes}")
                 else:
                     sample_ids = doc_hashes[:5] + ['...'] + doc_hashes[-5:]
                     logger.info(f"[DUPLICATION_CHECK] 검사할 doc_id 샘플: {sample_ids}")
+                    insert_logger.info(f"검사할 doc_id 샘플: {sample_ids[:5]} ... {sample_ids[-5:]}")
                 
                 if doc_hashes:
                     try:
@@ -580,33 +612,47 @@ def insert_data():
                                 valid_doc_hashes.append(doc_id)
                             else:
                                 logger.warning(f"[DUPLICATION_CHECK] 잘못된 doc_id 형식: {doc_id}")
+                                insert_logger.warning(f"잘못된 doc_id 형식: {doc_id}")
                         
                         if len(valid_doc_hashes) < len(doc_hashes):
                             logger.warning(f"[DUPLICATION_CHECK] 일부 doc_id가 필터링됨: 총 {len(doc_hashes)}개 중 {len(valid_doc_hashes)}개만 유효함")
+                            insert_logger.warning(f"일부 doc_id가 필터링됨: 총 {len(doc_hashes)}개 중 {len(valid_doc_hashes)}개만 유효함")
                         
                         # interact_manager의 check_duplicates 함수 사용
                         existing_doc_ids = interact_manager.check_duplicates(valid_doc_hashes, domain)
+                        
+                        # 디버깅: 중복 검사 결과 상세 로깅
+                        insert_logger.info(f"중복 검사 결과 - 타입: {type(existing_doc_ids)}, 값: {existing_doc_ids}")
+                        
                         logger.info(f"[DUPLICATION_CHECK] 완료: 총 {len(valid_doc_hashes)}개 문서 중 {len(existing_doc_ids)}개 중복 발견")
+                        insert_logger.info(f"중복 검사 완료: 총 {len(valid_doc_hashes)}개 문서 중 {len(existing_doc_ids)}개 중복 발견")
                         
                         # 중복 ID가 있다면 로그에 명확하게 표시
                         if existing_doc_ids:
                             if len(existing_doc_ids) <= 50:
                                 logger.info(f"[DUPLICATION_CHECK] 중복 문서 ID 전체 목록: {existing_doc_ids}")
+                                insert_logger.info(f"중복 문서 ID 전체 목록: {existing_doc_ids}")
                             else:
                                 display_dupes = existing_doc_ids[:20]
                                 more_count = len(existing_doc_ids) - len(display_dupes)
                                 logger.info(f"[DUPLICATION_CHECK] 중복 문서 ID 일부: {display_dupes} 외 {more_count}개")
+                                insert_logger.info(f"중복 문서 ID 일부: {display_dupes} 외 {more_count}개")
                             logger.info(f"[DUPLICATION_CHECK] 처리 방식: {'건너뛰기 (ignore=true)' if ignore else '삭제 후 재삽입 (ignore=false)'}")
+                            insert_logger.info(f"중복 처리 방식: {'건너뛰기 (ignore=true)' if ignore else '삭제 후 재삽입 (ignore=false)'}")
                         else:
                             logger.info(f"[DUPLICATION_CHECK] 중복 문서 없음")
+                            insert_logger.info(f"중복 문서 없음")
                     except Exception as e:
                         logger.error(f"[DUPLICATION_CHECK] 심각한 오류: 중복 체크 실패: {str(e)}")
+                        insert_logger.error(f"중복 체크 심각한 오류: {str(e)}")
                         import traceback
                         logger.error(f"[DUPLICATION_CHECK] 상세 오류: {traceback.format_exc()}")
+                        insert_logger.error(f"상세 오류: {traceback.format_exc()}")
                         existing_doc_ids = []
                 else:
                     existing_doc_ids = []
                     logger.warning(f"[DUPLICATION_CHECK] 경고: 검사할 문서가 없습니다 (도메인: {domain})")
+                    insert_logger.warning(f"경고: 검사할 문서가 없습니다 (도메인: {domain})")
                 
                 duplicate_check_end = time.time()
                 logger.info(f"[TIMING] 중복 문서 체크 완료: {len(existing_doc_ids)}/{len(doc_hashes)}개 중복, 소요시간: {duplicate_check_end - duplicate_check_start:.4f}초")
@@ -618,27 +664,36 @@ def insert_data():
                 
                 for doc_id in doc_hashes:
                     doc = doc_hash_map[doc_id]
-                    if doc_id in existing_doc_ids:
+                    # 디버깅: 각 문서의 중복 여부 확인 로깅
+                    is_duplicate = doc_id in existing_doc_ids
+                    insert_logger.info(f"문서 중복 여부 확인: ID={doc_id}, 중복={is_duplicate}")
+                    
+                    if is_duplicate:
                         if ignore:
                             # 중복이고 ignore=true면 건너뜀
                             docs_to_skip.append(doc)
                             logger.info(f"[DUPLICATION_CHECK] 문서 건너뛰기: {doc_id} (ignore=true)")
+                            insert_logger.info(f"문서 건너뛰기: {doc_id} (ignore=true)")
                         else:
                             # 중복이지만 ignore=false면 삭제 후 재삽입
                             docs_to_delete.append(doc)
                             docs_to_insert.append(doc)
                             logger.info(f"[DUPLICATION_CHECK] 문서 재삽입: {doc_id} (ignore=false)")
+                            insert_logger.info(f"문서 재삽입: {doc_id} (ignore=false)")
                     else:
                         # 중복이 아니면 삽입
                         docs_to_insert.append(doc)
+                        insert_logger.info(f"새 문서 삽입: {doc_id}")
                 
                 # 주요 동작 결과 요약 로그
                 logger.info(f"[DUPLICATION_CHECK] 결과 요약: 총 {len(doc_hashes)}개 문서 중 {len(docs_to_skip)}개 건너뛰기, {len(docs_to_delete)}개 재삽입, {len(docs_to_insert) - len(docs_to_delete)}개 신규 삽입")
+                insert_logger.info(f"결과 요약: 총 {len(doc_hashes)}개 문서 중 {len(docs_to_skip)}개 건너뛰기, {len(docs_to_delete)}개 재삽입, {len(docs_to_insert) - len(docs_to_delete)}개 신규 삽입")
                 
                 # 4. 중복 문서 일괄 삭제 (ignore=false인 경우)
                 if not ignore and docs_to_delete:
                     delete_start = time.time()
                     delete_ids = [doc['_hashed_doc_id'] for doc in docs_to_delete]
+                    insert_logger.info(f"삭제할 문서 ID 목록: {delete_ids[:5]}{'...' if len(delete_ids) > 5 else ''}")
                     
                     # 배치 단위로 삭제 (쿼리 크기 제한 고려)
                     delete_batch_size = 500
@@ -653,11 +708,14 @@ def insert_data():
                             deleted_count = collection.delete(expr)
                             total_deleted += deleted_count
                             logger.info(f"[TIMING] 배치 삭제 완료 ({i//delete_batch_size + 1}/{(len(delete_ids)+delete_batch_size-1)//delete_batch_size}): {deleted_count}개 항목")
+                            insert_logger.info(f"배치 삭제 완료 ({i//delete_batch_size + 1}/{(len(delete_ids)+delete_batch_size-1)//delete_batch_size}): {deleted_count}개 항목")
                         except Exception as e:
                             logger.error(f"배치 삭제 오류 (배치 {i//delete_batch_size + 1}): {str(e)}")
+                            insert_logger.error(f"배치 삭제 오류 (배치 {i//delete_batch_size + 1}): {str(e)}")
                     
                     # 삭제 후 즉시 flush하여 변경사항 적용
                     collection.flush()
+                    insert_logger.info(f"삭제 후 flush 완료")
                     
                     delete_end = time.time()
                     logger.info(f"[TIMING] 문서 일괄 삭제 완료: {total_deleted}개 항목, 소요시간: {delete_end - delete_start:.4f}초")
