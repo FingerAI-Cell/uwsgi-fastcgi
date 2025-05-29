@@ -1394,8 +1394,7 @@ class InteractManager:
     def embed_and_prepare_chunk(self, chunk_data):
         """청크 데이터에 임베딩을 추가하고 DB 삽입을 위한 데이터로 변환합니다."""
         thread_id = threading.get_ident()
-        chunk_id = chunk_data.get('id', 'unknown')
-        doc_id = chunk_data.get('doc_id', 'unknown')
+        chunk_index = chunk_data.get('chunk_index', -1)  # 청크 인덱스 정보 추출
         start_time = time.time()
         
         try:
@@ -1403,14 +1402,17 @@ class InteractManager:
             chunk_text = chunk_data.get('text', '')
             
             # 청크가 튜플인 경우 처리 (청킹 알고리즘이 (text, chunk_no) 튜플을 반환)
+            chunk_no = None
             if isinstance(chunk_text, tuple) and len(chunk_text) >= 1:
-                self.insert_logger.info(f"[Thread-{thread_id}] 튜플 형태의 청크 텍스트 변환: {chunk_id} (문서: {doc_id})")
+                if len(chunk_text) > 1:
+                    chunk_no = chunk_text[1]  # 튜플의 두 번째 요소는 청크 번호
                 # 튜플의 첫 번째 요소(텍스트)만 사용
                 chunk_text = chunk_text[0]
-                
+                self.insert_logger.info(f"[Thread-{thread_id}] 튜플 형태의 청크 텍스트 변환: 청크#{chunk_no if chunk_no is not None else chunk_index}")
+            
             # 텍스트가 비어있으면 처리하지 않음
             if not chunk_text or len(chunk_text.strip()) == 0:
-                self.insert_logger.warning(f"[Thread-{thread_id}] 빈 청크 건너뛰기: {chunk_id} (문서: {doc_id})")
+                self.insert_logger.warning(f"[Thread-{thread_id}] 빈 청크 건너뛰기: 청크#{chunk_no if chunk_no is not None else chunk_index}")
                 return None
             
             # 세마포어 획득 시작 시간
@@ -1427,7 +1429,7 @@ class InteractManager:
                 sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
                 max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
                 
-                self.insert_logger.info(f"[Thread-{thread_id}] GPU 자원 상태: 활성작업={active_tasks}/{max_workers}, 세마포어값={sem_value}, 대기시간={sem_wait_time:.4f}초 (청크: {chunk_id}, 문서: {doc_id})")
+                self.insert_logger.info(f"[Thread-{thread_id}] GPU 자원 상태: 활성작업={active_tasks}/{max_workers}, 세마포어값={sem_value}, 대기시간={sem_wait_time:.4f}초 (청크#{chunk_no if chunk_no is not None else chunk_index})")
                 
                 # 임베딩 시작 시간
                 embed_start = time.time()
@@ -1441,13 +1443,15 @@ class InteractManager:
                 # 활성 GPU 작업 수 감소
                 active_tasks = self.decrement_active_tasks()
             
-            # 결과 데이터 준비
+            # 결과 데이터 준비 - 원본 데이터의 ID 정보 유지
             prepared_data = {
-                'id': chunk_id,
-                'doc_id': doc_id,
+                'id': chunk_data.get('id', f'chunk_{chunk_index}'),  # 원본 ID 유지 또는 생성
+                'doc_id': chunk_data.get('doc_id', ''),
                 'embedding': embeddings,
                 'text': chunk_text,
-                'metadata': chunk_data.get('metadata', {})
+                'metadata': chunk_data.get('metadata', {}),
+                'chunk_index': chunk_index,  # 청크 인덱스 정보 전달
+                'chunk_no': chunk_no  # 청크 번호 정보 전달
             }
             
             # 성능 로깅
@@ -1456,10 +1460,10 @@ class InteractManager:
             
             # 비정상적으로 긴 처리 시간 경고 (10초 이상)
             if total_time > 10:
-                self.insert_logger.warning(f"[Thread-{thread_id}] ⚠️ 비정상적으로 긴 청크 처리 시간: {total_time:.2f}초 (청크: {chunk_id}, 문서: {doc_id})")
+                self.insert_logger.warning(f"[Thread-{thread_id}] ⚠️ 비정상적으로 긴 청크 처리 시간: {total_time:.2f}초 (청크#{chunk_no if chunk_no is not None else chunk_index})")
             
             # 임베딩 완료 로그
-            self.insert_logger.info(f"[Thread-{thread_id}] 청크 임베딩 완료: 총 {total_time:.4f}초, 대기={sem_wait_time:.4f}초, 계산={embed_time:.4f}초 (청크: {chunk_id}, 문서: {doc_id})")
+            self.insert_logger.info(f"[Thread-{thread_id}] 청크 임베딩 완료: 총 {total_time:.4f}초, 대기={sem_wait_time:.4f}초, 계산={embed_time:.4f}초 (청크#{chunk_no if chunk_no is not None else chunk_index})")
             
             return prepared_data
             
@@ -1469,7 +1473,7 @@ class InteractManager:
             
             # 오류 로깅
             error_trace = traceback.format_exc()
-            self.insert_logger.error(f"[Thread-{thread_id}] 청크 임베딩 오류: {str(e)} (청크: {chunk_id}, 문서: {doc_id})\n{error_trace}")
+            self.insert_logger.error(f"[Thread-{thread_id}] 청크 임베딩 오류: {str(e)} (청크#{chunk_no if 'chunk_no' in locals() and chunk_no is not None else chunk_index})\n{error_trace}")
             return None
 
     def prepare_data_with_embedding(self, chunk_data):
@@ -1498,11 +1502,16 @@ class InteractManager:
                 self.insert_logger.propagate = False
         
         thread_id = threading.get_ident()
-        chunk_id = chunk_data.get('id', 'unknown')
-        doc_id = chunk_data.get('doc_id', 'unknown')
+        
+        # 청크 인덱스 생성 (없을 경우)
+        if 'chunk_index' not in chunk_data:
+            chunk_data['chunk_index'] = getattr(self, '_chunk_index_counter', 0)
+            setattr(self, '_chunk_index_counter', chunk_data['chunk_index'] + 1)
+        
+        chunk_index = chunk_data.get('chunk_index', -1)
         
         # 디버그 로그
-        self.insert_logger.info(f"[Thread-{thread_id}] prepare_data_with_embedding 호출됨 (청크: {chunk_id}, 문서: {doc_id})")
+        # self.insert_logger.info(f"[Thread-{thread_id}] prepare_data_with_embedding 호출됨 (청크#{chunk_index})")
         
         # 먼저 원본 데이터 복사본 생성
         result_data = chunk_data.copy()
@@ -1519,12 +1528,16 @@ class InteractManager:
             if 'text' in prepared_data:
                 result_data['text'] = prepared_data['text']
                 
+            # 청크 번호 정보 업데이트
+            if 'chunk_no' in prepared_data and prepared_data['chunk_no'] is not None:
+                result_data['chunk_no'] = prepared_data['chunk_no']
+                
             # 성공 로그
-            self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 변환 완료: {chunk_id}, 문서: {doc_id}")
+            # self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 변환 완료: 청크#{chunk_index}")
             return result_data
         else:
             # 실패 시 원본 데이터 반환
-            self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 생성 실패, 원본 데이터 반환: {chunk_id}, 문서: {doc_id}")
+            self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 생성 실패, 원본 데이터 반환: 청크#{chunk_index}")
             return result_data
 
     def batch_insert_data(self, domain, data_batch):
