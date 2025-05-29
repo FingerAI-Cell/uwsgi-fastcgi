@@ -71,9 +71,12 @@ class EmbModel(Model):
         }
         self._model_loaded = False  # 모델 로드 상태 추적
         # GPU 동시 접근 제한 (환경변수로 설정 가능)
-        # Insert 작업: 3개 청크 처리 스레드 × 2 GPU 세마포어 = 최대 6회 gpu접근 (안전)
-        self.max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '2'))
+        # MAX_GPU_WORKERS 환경변수로 GPU 동시 접근 수 제한
+        self.max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '10'))
         self._gpu_semaphore = threading.Semaphore(self.max_gpu_workers)
+        # 활성 작업 수 추적을 위한 변수
+        self._active_gpu_tasks = 0
+        self._task_lock = threading.Lock()
         logging.info(f"GPU 동시 작업 제한: {self.max_gpu_workers}개")
     
     def set_embbeding_config(self, batch_size=None, max_length=1024):
@@ -192,7 +195,7 @@ class EmbModel(Model):
         오류 발생 시 안전한 임베딩 처리를 제공합니다.
         """
         start_time = time.time()
-        print(f"[TIMING] 임베딩 시작 - 텍스트 길이: {len(text)}")
+        thread_id = threading.get_ident()  # 현재 스레드 ID 가져오기
         
         # 모델 로드 확인
         if not self._model_loaded:
@@ -204,32 +207,34 @@ class EmbModel(Model):
             logging.warning("Empty text provided for embedding")
             # 빈 텍스트에 대해 0으로 채워진 임베딩 반환
             return [0.0] * 1024
-            
-        # 메모리 상태 확인
-        if torch.cuda.is_available() and self.gpu_initialized:
-            try:
-                before_memory = torch.cuda.memory_allocated()/1024**2
-                logging.info(f"GPU Memory before embedding: {before_memory:.2f}MB")
-                # 메모리 정리
-                torch.cuda.empty_cache()
-            except Exception as e:
-                logging.warning(f"Failed to check GPU memory: {str(e)}")
+        
+        # 세마포어 획득 시작 시간
+        sem_wait_start = time.time()
         
         # 임베딩 계산 (GPU 접근 제한)
-        with self._gpu_semaphore:  # 최대 7개 동시 GPU 접근
-            # GPU 사용량 모니터링
+        with self._gpu_semaphore:
+            # 세마포어 획득 대기 시간 측정
+            sem_wait_time = time.time() - sem_wait_start
+            if sem_wait_time > 0.5:  # 의미 있는 대기 시간일 경우만 로깅 (0.5초 이상)
+                logging.info(f"[Thread-{thread_id}] GPU 세마포어 획득 대기 시간: {sem_wait_time:.4f}초")
+            
+            # 활성 GPU 작업 수 증가
+            with self._task_lock:
+                self._active_gpu_tasks += 1
+                active_count = self._active_gpu_tasks
+            
+            # GPU 사용량 모니터링 - 중요 정보만 로깅
             if torch.cuda.is_available():
-                current_memory = torch.cuda.memory_allocated()/1024**2
-                reserved_memory = torch.cuda.memory_reserved()/1024**2
-                total_memory = torch.cuda.get_device_properties(0).total_memory/1024**2
-                active_count = self.max_gpu_workers - self._gpu_semaphore._value  # 현재 활성 GPU 작업 수
-                print(f"[GPU] 활성작업: {active_count}/{self.max_gpu_workers}, 사용메모리: {current_memory:.2f}MB, 예약메모리: {reserved_memory:.2f}MB, 총메모리: {total_memory:.1f}MB")
+                sem_value = self._gpu_semaphore._value if hasattr(self._gpu_semaphore, '_value') else 'unknown'
+                logging.info(f"[Thread-{thread_id}] GPU 자원 상태: 활성작업={active_count}/{self.max_gpu_workers}, 세마포어값={sem_value}")
             
             try:
+                # 임베딩 시작 시간
+                embed_start = time.time()
+                
                 with torch.no_grad():  # 그래디언트 계산 비활성화
                     # 텍스트가 너무 길면 잘라내기
                     if len(text) > 5000:  # 안전을 위한 최대 길이 제한
-                        logging.warning(f"Text too long ({len(text)} chars), truncating to 5000 chars")
                         text = text[:5000]
                     
                     # 모드에 따라 적절한 최대 길이 설정
@@ -238,48 +243,46 @@ class EmbModel(Model):
                     
                     # 임베딩 생성
                     embeddings = self.bge_emb.encode(text, max_length=max_length)['dense_vecs']
-                    
-                    # 임베딩 형태 확인 및 처리
-                    if isinstance(embeddings, list) and len(embeddings) > 0:
-                        return embeddings[0]  # 첫 번째 임베딩 반환
-                    elif isinstance(embeddings, (np.ndarray, torch.Tensor)):
-                        # numpy 배열 또는 tensor인 경우
-                        return embeddings.tolist() if isinstance(embeddings, torch.Tensor) else embeddings.tolist()
-                    else:
-                        logging.warning(f"Unexpected embedding format: {type(embeddings)}")
-                        return embeddings  # 원본 반환
-                        
-            except Exception as e:
-                logging.error(f"Error during embedding generation: {str(e)}")
-                # 오류 발생 시 fallback 전략 (CPU로 전환)
-                if torch.cuda.is_available() and self.gpu_initialized:
-                    try:
-                        logging.warning("GPU error encountered. Trying with CPU...")
-                        with torch.device('cpu'):
-                            embeddings = self.bge_emb.encode(text, max_length=512)['dense_vecs']
-                            if isinstance(embeddings, list) and len(embeddings) > 0:
-                                return embeddings[0]
-                            return embeddings
-                    except Exception as fallback_error:
-                        logging.error(f"CPU fallback also failed: {str(fallback_error)}")
                 
-                # 모든 방법이 실패한 경우 빈 임베딩 반환
-                logging.error("Returning zero embedding due to errors")
+                # 임베딩 소요 시간
+                embed_time = time.time() - embed_start
+                
+                # 활성 GPU 작업 수 감소
+                with self._task_lock:
+                    self._active_gpu_tasks -= 1
+                
+                # 임베딩 형태 확인 및 처리
+                if isinstance(embeddings, list) and len(embeddings) > 0:
+                    result = embeddings[0]  # 첫 번째 임베딩 반환
+                elif isinstance(embeddings, (np.ndarray, torch.Tensor)):
+                    # numpy 배열 또는 tensor인 경우
+                    result = embeddings.tolist() if isinstance(embeddings, torch.Tensor) else embeddings.tolist()
+                else:
+                    logging.warning(f"Unexpected embedding format: {type(embeddings)}")
+                    result = [0.0] * 1024  # 기본 임베딩 반환
+                
+                # 임베딩 완료 로그 - 핵심 정보만 유지
+                end_time = time.time()
+                total_time = end_time - start_time
+                
+                # 비정상적으로 긴 처리 시간 경고 (45초 이상)
+                if total_time > 45:
+                    logging.warning(f"[Thread-{thread_id}] ⚠️ 비정상적으로 긴 임베딩 총 처리 시간: {total_time:.2f}초")
+                
+                # 성능 요약 로그
+                logging.info(f"[Thread-{thread_id}] 임베딩 완료: 총 {total_time:.4f}초, 대기={sem_wait_time:.4f}초, 계산={embed_time:.4f}초")
+                
+                return result
+                
+            except Exception as e:
+                # 오류 발생 시 활성 GPU 작업 수 감소
+                with self._task_lock:
+                    self._active_gpu_tasks -= 1
+                
+                logging.error(f"임베딩 생성 오류: {str(e)}")
+                # 오류 시 기본 임베딩 반환
                 return [0.0] * 1024
             
-            finally:
-                # 메모리 정리
-                if torch.cuda.is_available():
-                    try:
-                        torch.cuda.empty_cache()
-                        end_memory = torch.cuda.memory_allocated()/1024**2
-                        logging.info(f"GPU Memory after embedding: {end_memory:.2f}MB")
-                    except Exception as e:
-                        logging.warning(f"Failed to check GPU memory: {str(e)}")
-                
-                end_time = time.time()
-                logging.info(f"[TIMING] 임베딩 완료: {end_time - start_time:.4f}초")
-        
     def calc_emb_similarity(self, emb1, emb2, metric='L2'):
         if metric == 'L2':   # Euclidean distance
             l2_distance = np.linalg.norm(emb1 - emb2)
