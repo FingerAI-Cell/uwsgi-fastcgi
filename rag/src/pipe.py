@@ -1699,9 +1699,9 @@ class InteractManager:
                         continue
                         
                     # IN 연산자를 사용하여 배치로 쿼리
-                    # 작은 따옴표로 각 ID를 감싸고 쉼표로 구분
-                    ids_str = '", "'.join(batch)
-                    expr = f'doc_id in ("{ids_str}")'
+                    # 각 ID를 대괄호 형식으로 올바르게 묶음
+                    ids_str = ", ".join([f'"{id}"' for id in batch])  # 쉼표와 큰따옴표로 각 ID 구분
+                    expr = f'doc_id in [{ids_str}]'  # 올바른 IN 연산자 형식 사용: doc_id in ["id1", "id2", ...]
                     
                     duplication_logger.debug(f"배치 {i//batch_size + 1} 쿼리: {expr[:100]}{'...' if len(expr) > 100 else ''}")
                     

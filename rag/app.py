@@ -716,8 +716,8 @@ def insert_data():
                     
                     for i in range(0, len(delete_ids), delete_batch_size):
                         batch_ids = delete_ids[i:i+delete_batch_size]
-                        ids_list = '", "'.join(batch_ids)
-                        expr = f'doc_id in ("{ids_list}")'
+                        ids_list = ", ".join([f'"{id}"' for id in batch_ids])  # 각 ID를 큰따옴표로 묶고 쉼표로 구분
+                        expr = f'doc_id in [{ids_list}]'  # 올바른 IN 연산자 형식 사용: doc_id in ["id1", "id2", ...]
                         
                         try:
                             deleted_count = collection.delete(expr)
