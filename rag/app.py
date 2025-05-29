@@ -19,22 +19,36 @@ import threading
 # 로깅 설정
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("/var/log/rag/app.log") if os.path.exists("/var/log/rag") else logging.FileHandler("logs/app.log")
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger("rag-backend")
 
 # 로그 디렉토리 확인 및 생성
 log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "logs"
 os.makedirs(log_dir, exist_ok=True)
 print(f"로그 디렉토리: {log_dir}")
 
+# 메인 로거 설정
+logger = logging.getLogger("rag-backend")
+logger.setLevel(logging.INFO)
+logger.handlers = []  # 기존 핸들러 제거
+
+# 스트림 핸들러 추가
+stream_handler = logging.StreamHandler()
+stream_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+stream_handler.setFormatter(stream_formatter)
+logger.addHandler(stream_handler)
+
+# 파일 핸들러 추가
+file_handler = logging.FileHandler(os.path.join(log_dir, 'app.log'))
+file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)
+logger.propagate = False  # 루트 로거로 전파 방지
+
 # 시간 로깅 전용 로거 설정
 timing_logger = logging.getLogger('timing')
 timing_logger.setLevel(logging.INFO)
+timing_logger.handlers = []  # 기존 핸들러 제거
 timing_handler = logging.FileHandler(os.path.join(log_dir, 'timing.log'))
 timing_formatter = logging.Formatter('%(asctime)s - %(message)s')
 timing_handler.setFormatter(timing_formatter)
