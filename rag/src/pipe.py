@@ -302,7 +302,18 @@ class InteractManager:
                 
                 try:
                     # 단일 삭제 표현식으로 모든 항목 삭제
-                    deleted_count = collection.delete(delete_expr)
+                    deleted_result = collection.delete(delete_expr)
+                    
+                    # MutationResult 객체에서 삭제된 항목 수 추출
+                    if hasattr(deleted_result, 'delete_count'):
+                        deleted_count = deleted_result.delete_count
+                    else:
+                        # 객체 자체가 정수일 경우 (이전 버전 호환) 또는 속성명이 다를 경우 대비
+                        try:
+                            deleted_count = int(deleted_result)
+                        except (TypeError, ValueError):
+                            # 다른 가능한 속성 이름 시도
+                            deleted_count = getattr(deleted_result, 'num_deleted', 0) or getattr(deleted_result, 'count', 0)
                     
                     # 즉시 변경사항 적용
                     collection.flush()
@@ -344,7 +355,19 @@ class InteractManager:
                             
                             if passage_ids:
                                 batch_expr = " || ".join(passage_ids)
-                                batch_deleted = collection.delete(batch_expr)
+                                batch_result = collection.delete(batch_expr)
+                                
+                                # MutationResult 객체에서 삭제된 항목 수 추출
+                                if hasattr(batch_result, 'delete_count'):
+                                    batch_deleted = batch_result.delete_count
+                                else:
+                                    # 객체 자체가 정수일 경우 (이전 버전 호환) 또는 속성명이 다를 경우 대비
+                                    try:
+                                        batch_deleted = int(batch_result)
+                                    except (TypeError, ValueError):
+                                        # 다른 가능한 속성 이름 시도
+                                        batch_deleted = getattr(batch_result, 'num_deleted', 0) or getattr(batch_result, 'count', 0)
+                                
                                 total_deleted += batch_deleted
                                 
                                 if (i + 1) % 5 == 0 or not items:  # 5번째 배치마다 flush
@@ -1146,8 +1169,20 @@ class InteractManager:
                                 del_expr = f'passage_uid == "{passage_uid}"'
                                 raw_insert_logger.info(f"삭제 쿼리: {del_expr}")
                                 
-                                deleted = collection.delete(del_expr)
-                                raw_insert_logger.info(f"삭제 결과: {deleted}개 항목 삭제됨")
+                                deleted_result = collection.delete(del_expr)
+                                
+                                # MutationResult 객체에서 삭제된 항목 수 추출
+                                if hasattr(deleted_result, 'delete_count'):
+                                    deleted_count = deleted_result.delete_count
+                                else:
+                                    # 객체 자체가 정수일 경우 (이전 버전 호환) 또는 속성명이 다를 경우 대비
+                                    try:
+                                        deleted_count = int(deleted_result)
+                                    except (TypeError, ValueError):
+                                        # 다른 가능한 속성 이름 시도
+                                        deleted_count = getattr(deleted_result, 'num_deleted', 0) or getattr(deleted_result, 'count', 0)
+                                
+                                raw_insert_logger.info(f"삭제 결과: {deleted_count}개 항목 삭제됨")
                                 
                                 delete_end = time.time()
                                 delete_duration = delete_end - delete_start
@@ -1699,9 +1734,9 @@ class InteractManager:
                         continue
                         
                     # IN 연산자를 사용하여 배치로 쿼리
-                    # 각 ID를 대괄호 형식으로 올바르게 묶음
-                    ids_str = ", ".join([f'"{id}"' for id in batch])  # 쉼표와 큰따옴표로 각 ID 구분
-                    expr = f'doc_id in [{ids_str}]'  # 올바른 IN 연산자 형식 사용: doc_id in ["id1", "id2", ...]
+                    # 작은 따옴표로 각 ID를 감싸고 쉼표로 구분
+                    ids_str = '", "'.join(batch)
+                    expr = f'doc_id in ("{ids_str}")'
                     
                     duplication_logger.debug(f"배치 {i//batch_size + 1} 쿼리: {expr[:100]}{'...' if len(expr) > 100 else ''}")
                     

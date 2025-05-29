@@ -720,7 +720,18 @@ def insert_data():
                         expr = f'doc_id in [{ids_list}]'  # 올바른 IN 연산자 형식 사용: doc_id in ["id1", "id2", ...]
                         
                         try:
-                            deleted_count = collection.delete(expr)
+                            deleted_result = collection.delete(expr)
+                            # MutationResult 객체에서 삭제된 항목 수 추출
+                            if hasattr(deleted_result, 'delete_count'):
+                                deleted_count = deleted_result.delete_count
+                            else:
+                                # 객체 자체가 정수일 경우 (이전 버전 호환) 또는 속성명이 다를 경우 대비
+                                try:
+                                    deleted_count = int(deleted_result)
+                                except (TypeError, ValueError):
+                                    # 다른 가능한 속성 이름 시도
+                                    deleted_count = getattr(deleted_result, 'num_deleted', 0) or getattr(deleted_result, 'count', 0)
+                                    
                             total_deleted += deleted_count
                             logger.info(f"[TIMING] 배치 삭제 완료 ({i//delete_batch_size + 1}/{(len(delete_ids)+delete_batch_size-1)//delete_batch_size}): {deleted_count}개 항목")
                             insert_logger.info(f"배치 삭제 완료 ({i//delete_batch_size + 1}/{(len(delete_ids)+delete_batch_size-1)//delete_batch_size}): {deleted_count}개 항목")
