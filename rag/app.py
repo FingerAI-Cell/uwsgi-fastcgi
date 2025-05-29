@@ -813,12 +813,20 @@ def insert_data():
                                 try:
                                     # InteractManager에서 세마포어 정보 가져오기
                                     gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
-                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 0
-                                    max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
-                                    active_workers = max_workers - sem_value if isinstance(sem_value, int) else 0
+                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
+                                    
+                                    # 새로운 메서드 사용
+                                    if hasattr(interact_manager.emb_model, 'get_active_workers') and hasattr(interact_manager.emb_model, 'get_max_workers'):
+                                        active_workers = interact_manager.emb_model.get_active_workers()
+                                        max_workers = interact_manager.emb_model.get_max_workers()
+                                    else:
+                                        # 이전 방식 (fallback)
+                                        max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
+                                        active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
                                     
                                     # 간소화된 로그 - 중요 정보만 출력
-                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hashed_id})")
+                                    doc_id = doc.get('id', 'unknown')
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_id})")
                                 except Exception as e:
                                     insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
@@ -870,16 +878,18 @@ def insert_data():
                                     embedding_time_end = time.time()
                                     embedding_duration = embedding_time_end - embedding_time_start
                                     
-                                    # 임베딩 벡터 확인 로그
+                                    # 임베딩 벡터 확인 로그 및 성공 여부 판단
                                     if 'text_emb' in chunk_data:
                                         emb_length = len(chunk_data['text_emb'])
                                         emb_sample = str(chunk_data['text_emb'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
                                         insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 완료: 벡터 크기={emb_length}, 샘플={emb_sample}, 소요시간={embedding_duration:.4f}초")
+                                        chunk_success = True
+                                        prepared_chunks.append(chunk_data)
                                     else:
-                                        insert_logger.warning(f"[Thread-{thread_id}] 청크 {index} 임베딩 누락됨!")
+                                        chunk_success = False
+                                        chunk_errors.append(f"청크 {index}의 임베딩 생성 실패")
                                     
-                                    chunk_end = time.time()
-                                    return chunk_data
+                                    return chunk_success, embedding_duration
                                 except Exception as e:
                                     logger.error(f"청크 처리 오류: {str(e)}")
                                     chunk_end = time.time()
@@ -913,12 +923,20 @@ def insert_data():
                                 try:
                                     # InteractManager에서 세마포어 정보 가져오기
                                     gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
-                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 0
-                                    max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
-                                    active_workers = max_workers - sem_value if isinstance(sem_value, int) else 0
+                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
+                                    
+                                    # 새로운 메서드 사용
+                                    if hasattr(interact_manager.emb_model, 'get_active_workers') and hasattr(interact_manager.emb_model, 'get_max_workers'):
+                                        active_workers = interact_manager.emb_model.get_active_workers()
+                                        max_workers = interact_manager.emb_model.get_max_workers()
+                                    else:
+                                        # 이전 방식 (fallback)
+                                        max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
+                                        active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
                                     
                                     # 간소화된 로그 - 중요 정보만 출력
-                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hashed_id})")
+                                    doc_id = doc.get('id', 'unknown')
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_id})")
                                 except Exception as e:
                                     insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
@@ -1007,13 +1025,18 @@ def insert_data():
                             elif hasattr(gpu_sem, '_sem') and hasattr(gpu_sem._sem, '_value'):  # BoundedSemaphore 구현
                                 sem_value = gpu_sem._sem._value
                                 
-                            # 최대 워커 수와 현재 사용 중인 워커 수 계산
-                            max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
-                            active_workers = max_workers - sem_value
-                            
-                            insert_logger.info(f"문서 처리 시작 전 GPU 세마포어 상태: {sem_value}/{max_workers} (사용 중: {active_workers})")
+                            # 최대 워커 수와 현재 사용 중인 워커 수 계산 (새로운 메서드 사용)
+                            if hasattr(interact_manager.emb_model, 'get_active_workers') and hasattr(interact_manager.emb_model, 'get_max_workers'):
+                                active_workers = interact_manager.emb_model.get_active_workers()
+                                max_workers = interact_manager.emb_model.get_max_workers()
+                            else:
+                                # 이전 방식 (fallback)
+                                max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
+                                active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
+                                
+                            insert_logger.info(f"문서 처리 시작 전 GPU 세마포어 상태: 활성작업={active_workers}/{max_workers}, 세마포어값={sem_value}")
                         except Exception as sem_err:
-                            insert_logger.warning(f"GPU 세마포어 확인 실패 (무시됨): {str(sem_err)}")
+                            insert_logger.warning(f"GPU 세마포어 상태 확인 실패: {str(sem_err)}")
                     
                     # 총 처리 결과 초기화
                     total_chunks = 0
@@ -1041,13 +1064,18 @@ def insert_data():
                             elif hasattr(gpu_sem, '_sem') and hasattr(gpu_sem._sem, '_value'):  # BoundedSemaphore 구현
                                 sem_value = gpu_sem._sem._value
                                 
-                            # 최대 워커 수와 현재 사용 중인 워커 수 계산
-                            max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
-                            active_workers = max_workers - sem_value
-                            
-                            insert_logger.info(f"문서 처리 완료 후 GPU 세마포어 상태: {sem_value}/{max_workers} (사용 중: {active_workers})")
+                            # 최대 워커 수와 현재 사용 중인 워커 수 계산 (새로운 메서드 사용)
+                            if hasattr(interact_manager.emb_model, 'get_active_workers') and hasattr(interact_manager.emb_model, 'get_max_workers'):
+                                active_workers = interact_manager.emb_model.get_active_workers()
+                                max_workers = interact_manager.emb_model.get_max_workers()
+                            else:
+                                # 이전 방식 (fallback)
+                                max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
+                                active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
+                                
+                            insert_logger.info(f"문서 처리 완료 후 GPU 세마포어 상태: 활성작업={active_workers}/{max_workers}, 세마포어값={sem_value}")
                         except Exception as sem_err:
-                            insert_logger.warning(f"GPU 세마포어 확인 실패 (무시됨): {str(sem_err)}")
+                            insert_logger.warning(f"GPU 세마포어 상태 확인 실패: {str(sem_err)}")
                     
                     chunking_end = time.time()
                     logger.info(f"[TIMING] 문서 처리 완료: {len(docs_to_insert)}개 문서 -> {total_chunks}개 청크 성공, 소요시간: {chunking_end - chunking_start:.4f}초")
