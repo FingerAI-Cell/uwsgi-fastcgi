@@ -800,17 +800,18 @@ def insert_data():
                             # 2. 청크 임베딩 처리 단계 시간 측정
                             embedding_start = time.time()
                             
-                            # GPU 세마포어 상태 확인
+                            # GPU 세마포어 상태 확인 - 중요 정보이므로 유지
                             if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                                 try:
                                     # InteractManager에서 세마포어 정보 가져오기
-                                    gpu_sem = InteractManager.get_gpu_semaphore()
+                                    gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
                                     sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
                                     max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
                                     active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
                                     
                                     # 간소화된 로그 - 중요 정보만 출력
-                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hash})")
+                                    doc_id = doc.get('id', 'unknown')
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_id})")
                                 except Exception as e:
                                     insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
@@ -891,17 +892,19 @@ def insert_data():
                             if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                                 try:
                                     # InteractManager에서 세마포어 정보 가져오기
-                                    gpu_sem = InteractManager.get_gpu_semaphore()
+                                    gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
                                     sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
                                     max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
                                     active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
                                     
                                     # 간소화된 로그 - 중요 정보만 출력
-                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hash})")
+                                    doc_id = doc.get('id', 'unknown')
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_id})")
                                 except Exception as e:
                                     insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
                             # 배치 삽입 수행
+                            chunk_success = 0  # 성공적으로 삽입된 청크 수 초기화
                             if doc_prepared_chunks:
                                 # 불필요한 로그 제거
                                 
@@ -909,7 +912,6 @@ def insert_data():
                                 semaphore_wait_start = time.time()
                                 
                                 # 청크를 배치로 나누어 삽입
-                                chunk_success = 0
                                 for i in range(0, len(doc_prepared_chunks), chunk_batch_size):
                                     batch = doc_prepared_chunks[i:i + chunk_batch_size]
                                     
@@ -942,6 +944,7 @@ def insert_data():
                                                 single_batch = [item]
                                                 interact_manager.batch_insert_data(domain, single_batch)
                                                 logger.info(f"[RECOVERY] 문서 '{doc_title}' 개별 항목 삽입 성공: batch_index={i+j}")
+                                                chunk_success += 1
                                             except Exception as single_error:
                                                 logger.error(f"[ERROR] 문서 '{doc_title}' 개별 항목 삽입 실패: batch_index={i+j}, 오류={str(single_error)}")
                             
@@ -977,7 +980,7 @@ def insert_data():
                     # 전체 GPU 세마포어 상태 확인
                     if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                         try:
-                            gpu_sem = interact_manager.emb_model.get_gpu_semaphore
+                            gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
                             # 더 안전한 세마포어 값 확인 방법
                             sem_value = '알 수 없음'
                             if hasattr(gpu_sem, '_value'):  # threading.Semaphore 내부 구현
@@ -988,17 +991,25 @@ def insert_data():
                         except Exception as sem_err:
                             insert_logger.warning(f"GPU 세마포어 확인 실패 (무시됨): {str(sem_err)}")
                     
+                    # 총 처리 결과 초기화
+                    total_chunks = 0
+                    
                     # 문서 처리를 병렬로 수행
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_document_threads) as doc_executor:
-                        # 각 문서에 대한 처리 작업 제출
-                        future_results = list(doc_executor.map(process_document, docs_to_insert))
-                        # 총 성공 청크 수 계산
-                        total_chunks = sum(future_results)
+                    try:
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=max_document_threads) as doc_executor:
+                            # 각 문서에 대한 처리 작업 제출
+                            future_results = list(doc_executor.map(process_document, docs_to_insert))
+                            # 총 성공 청크 수 계산
+                            total_chunks = sum(future_results)
+                    except Exception as exec_error:
+                        logger.error(f"문서 병렬 처리 중 오류 발생: {str(exec_error)}")
+                        insert_logger.error(f"문서 병렬 처리 중 오류 발생: {str(exec_error)}")
+                        return jsonify({"error": f"문서 처리 오류: {str(exec_error)}"}), 500
                     
                     # 전체 GPU 세마포어 상태 확인
                     if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                         try:
-                            gpu_sem = interact_manager.emb_model.get_gpu_semaphore
+                            gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
                             # 더 안전한 세마포어 값 확인 방법
                             sem_value = '알 수 없음'
                             if hasattr(gpu_sem, '_value'):  # threading.Semaphore 내부 구현
