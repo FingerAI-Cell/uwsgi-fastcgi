@@ -711,13 +711,15 @@ def insert_data():
                     insert_logger.info(f"삭제할 문서 ID 목록: {delete_ids[:5]}{'...' if len(delete_ids) > 5 else ''}")
                     
                     # 배치 단위로 삭제 (쿼리 크기 제한 고려)
-                    delete_batch_size = 500
+                    delete_batch_size = 20  # 더 작은 배치 크기로 수정
                     total_deleted = 0
                     
                     for i in range(0, len(delete_ids), delete_batch_size):
                         batch_ids = delete_ids[i:i+delete_batch_size]
-                        ids_list = ", ".join([f'"{id}"' for id in batch_ids])  # 각 ID를 큰따옴표로 묶고 쉼표로 구분
-                        expr = f'doc_id in [{ids_list}]'  # 올바른 IN 연산자 형식 사용: doc_id in ["id1", "id2", ...]
+                        
+                        # IN 연산자 대신 OR 연산자 사용 (더 안정적인 방법)
+                        condition_list = [f'doc_id == "{id}"' for id in batch_ids]
+                        expr = " || ".join(condition_list)  # OR 연산자 사용
                         
                         try:
                             deleted_result = collection.delete(expr)

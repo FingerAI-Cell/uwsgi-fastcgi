@@ -1725,7 +1725,7 @@ class InteractManager:
                     duplication_logger.error(f"A기존 문서 샘플 확인 실패: {str(e)}")
                 
                 # 실제 중복 체크 로직 추가
-                batch_size = 100
+                batch_size = 20  # 더 작은 배치 크기 사용 (쿼리 복잡도 감소)
                 
                 # 효율성을 위해 배치 단위로 처리
                 for i in range(0, len(doc_ids), batch_size):
@@ -1733,14 +1733,16 @@ class InteractManager:
                     if not batch:
                         continue
                         
-                    # IN 연산자를 사용하여 배치로 쿼리
-                    # 각 ID를 큰따옴표로 묶고 쉼표로 구분
-                    ids_str = ", ".join([f'"{id}"' for id in batch])
-                    expr = f'doc_id in [{ids_str}]'  # 올바른 IN 연산자 형식 사용: doc_id in ["id1", "id2", ...]
+                    # IN 연산자 대신 OR 연산자 사용 (더 안정적인 방법)
+                    # 각 ID에 대해 doc_id == "id" 조건을 OR로 연결
+                    condition_list = [f'doc_id == "{id}"' for id in batch]
+                    expr = " || ".join(condition_list)  # OR 연산자 사용
                     
                     # 쿼리 표현식을 INFO 레벨로 변경하여 항상 로그에 표시되도록 함
-                    duplication_logger.info(f"A배치 {i//batch_size + 1} 쿼리 실행: {expr[:100]}{'...' if len(expr) > 100 else ''}")
-                    print(f"[DUPLICATION_CHECK] A배치 {i//batch_size + 1} 쿼리 실행 중")
+                    # 실제 쿼리 앞부분 로깅 (오류 디버깅용)
+                    prefix = expr[:min(200, len(expr))]
+                    duplication_logger.info(f"A배치 {i//batch_size + 1} 쿼리 실행 (OR 방식): {prefix}{'...' if len(expr) > 200 else ''}")
+                    print(f"[DUPLICATION_CHECK] A배치 {i//batch_size + 1} 쿼리 실행 중: OR 조건 {len(batch)}개")
                     
                     try:
                         # 존재하는 doc_id 가져오기
@@ -1778,6 +1780,27 @@ class InteractManager:
                     except Exception as e:
                         print(f"[DUPLICATION_CHECK] A배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
                         duplication_logger.error(f"A배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
+                        
+                        # 개별 항목 처리로 전환 (배치 처리 실패 시)
+                        duplication_logger.info(f"개별 항목 처리로 전환합니다 (배치 {i//batch_size + 1})")
+                        for single_id in batch:
+                            try:
+                                # 단일 doc_id 쿼리
+                                single_expr = f'doc_id == "{single_id}"'
+                                single_results = collection.query(
+                                    expr=single_expr,
+                                    output_fields=["passage_id"],
+                                    limit=1  # 존재 여부만 확인하면 됨
+                                )
+                                
+                                if single_results:
+                                    # 문서가 존재하면 중복으로 표시
+                                    if single_id not in duplicates:
+                                        duplicates.append(single_id)
+                                    duplication_logger.info(f"개별 확인: doc_id={single_id}는 중복됨")
+                            except Exception as single_error:
+                                errors.append({"doc_id": single_id, "error": str(single_error)})
+                                duplication_logger.error(f"개별 항목 처리 오류 (doc_id={single_id}): {str(single_error)}")
                 
                 # 개별 체크 (배치 처리에서 누락된 경우를 대비)
                 for doc_id in doc_ids:
