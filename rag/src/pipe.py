@@ -1551,6 +1551,7 @@ class InteractManager:
             
         Returns:
             dict: 임베딩이 추가된 청크 데이터 (text_emb 필드 포함)
+            None: 임베딩 생성에 실패한 경우
         """
         # 로깅 설정
         if not hasattr(self, 'insert_logger'):
@@ -1584,42 +1585,42 @@ class InteractManager:
         # embed_and_prepare_chunk 호출하여 임베딩 생성
         prepared_data = self.embed_and_prepare_chunk(chunk_data)
         
-        if prepared_data:
-            # 'embedding' 필드를 'text_emb'로 변환하여 결과 데이터에 추가
-            if 'embedding' in prepared_data:
-                result_data['text_emb'] = prepared_data['embedding']
-                
-                # 임베딩 데이터 검증 로그
-                emb_length = len(prepared_data['embedding'])
-                emb_sample = str(prepared_data['embedding'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
-                self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 생성 성공: 벡터 길이={emb_length}, 샘플={emb_sample} (청크#{chunk_index})")
-                
-                # passage_uid 생성 (필수 필드)
-                if 'passage_uid' not in result_data:
-                    # doc_id와 passage_id를 조합하여 생성
-                    doc_id = result_data.get('doc_id', '')
-                    passage_id = result_data.get('passage_id', chunk_index)
-                    result_data['passage_uid'] = f"{doc_id}_{passage_id}"
-                    self.insert_logger.info(f"[Thread-{thread_id}] passage_uid 생성: {result_data['passage_uid']} (청크#{chunk_index})")
-            else:
-                self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 필드 누락: embedding 필드가 없음 (청크#{chunk_index})")
-                return None  # 임베딩이 없으면 None 반환
-                
-            # text 필드 업데이트 (필요한 경우)
-            if 'text' in prepared_data:
-                result_data['text'] = prepared_data['text']
-                
-            # 청크 번호 정보 업데이트
-            if 'chunk_no' in prepared_data and prepared_data['chunk_no'] is not None:
-                result_data['chunk_no'] = prepared_data['chunk_no']
-                
-            # 성공 로그
-            self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 변환 완료: 청크#{chunk_index}")
-            return result_data
-        else:
-            # 실패 시 None 반환 (더 이상 원본 데이터 반환하지 않음)
-            self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 생성 실패, None 반환: 청크#{chunk_index}")
+        # prepared_data가 None인 경우 즉시 None 반환
+        if prepared_data is None:
+            self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 생성 실패: embed_and_prepare_chunk가 None 반환 (청크#{chunk_index})")
             return None
+        
+        # 'embedding' 필드를 'text_emb'로 변환하여 결과 데이터에 추가
+        if 'embedding' in prepared_data:
+            result_data['text_emb'] = prepared_data['embedding']
+            
+            # 임베딩 데이터 검증 로그
+            emb_length = len(prepared_data['embedding'])
+            emb_sample = str(prepared_data['embedding'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
+            self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 생성 성공: 벡터 길이={emb_length}, 샘플={emb_sample} (청크#{chunk_index})")
+            
+            # passage_uid 생성 (필수 필드)
+            if 'passage_uid' not in result_data:
+                # doc_id와 passage_id를 조합하여 생성
+                doc_id = result_data.get('doc_id', '')
+                passage_id = result_data.get('passage_id', chunk_index)
+                result_data['passage_uid'] = f"{doc_id}_{passage_id}"
+                self.insert_logger.info(f"[Thread-{thread_id}] passage_uid 생성: {result_data['passage_uid']} (청크#{chunk_index})")
+        else:
+            self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 필드 누락: embedding 필드가 없음 (청크#{chunk_index})")
+            return None  # 임베딩이 없으면 None 반환
+            
+        # text 필드 업데이트 (필요한 경우)
+        if 'text' in prepared_data:
+            result_data['text'] = prepared_data['text']
+            
+        # 청크 번호 정보 업데이트
+        if 'chunk_no' in prepared_data and prepared_data['chunk_no'] is not None:
+            result_data['chunk_no'] = prepared_data['chunk_no']
+            
+        # 성공 로그
+        self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 변환 완료: 청크#{chunk_index}")
+        return result_data
 
     def batch_insert_data(self, domain, data_batch):
         """

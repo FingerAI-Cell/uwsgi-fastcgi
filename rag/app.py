@@ -857,6 +857,7 @@ def insert_data():
                             # 임베딩 생성 함수 정의
                             def process_chunk(chunk, index):
                                 chunk_start = time.time()
+                                logger.info(f"process_chunk 호출: 청크 {index}")  # 함수 호출 로그 추가
                                 try:
                                     # 청크 ID 생성
                                     chunk_id = f"{doc_hashed_id}_chunk_{index}"
@@ -891,21 +892,17 @@ def insert_data():
                                     embedding_duration = embedding_time_end - embedding_time_start
                                     
                                     # 임베딩 벡터 확인 로그 및 성공 여부 판단
-                                    if 'text_emb' in chunk_data:
+                                    if chunk_data and 'text_emb' in chunk_data:  # chunk_data가 None이 아닌지 먼저 확인
                                         emb_length = len(chunk_data['text_emb'])
                                         emb_sample = str(chunk_data['text_emb'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
                                         insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 완료: 벡터 크기={emb_length}, 샘플={emb_sample}, 소요시간={embedding_duration:.4f}초")
-                                        chunk_success = True
-                                        return chunk_data  # prepared_chunks.append(chunk_data) 대신 chunk_data 반환
+                                        return chunk_data  # 성공한 경우 chunk_data 반환
                                     else:
-                                        chunk_success = False
-                                        # chunk_errors.append(f"청크 {index}의 임베딩 생성 실패")
-                                        logger.warning(f"청크 {index}의 임베딩 생성 실패")
-                                        return None
+                                        logger.warning(f"청크 {index}의 임베딩 생성 실패: prepare_data_with_embedding이 None을 반환함")
+                                        return None  # 실패한 경우 None 반환
                                     
                                 except Exception as e:
                                     logger.error(f"청크 처리 오류: {str(e)}")
-                                    chunk_end = time.time()
                                     return None
                             
                             # 청크 병렬 처리
