@@ -1934,6 +1934,69 @@ def index():
     print(f"hello results")
     return jsonify({"message": "Hello, FastCGI is working!"})
 
+@app.route('/rag/test/query', methods=['GET'])
+def test_single_query():
+    """
+    단일 문서 쿼리 테스트 엔드포인트 - 정확한 쿼리문을 사용하여 문서 검색
+    
+    Query Parameters:
+        doc_id: 검색할 문서 ID
+        domain: 검색할 도메인(컬렉션)
+    
+    Returns:
+        JSON: 검색 결과 또는 오류 메시지
+    """
+    doc_id = request.args.get('doc_id')
+    domain = request.args.get('domain')
+    
+    if not doc_id:
+        return jsonify({"error": "doc_id parameter is required"}), 400
+    
+    if not domain:
+        return jsonify({"error": "domain parameter is required"}), 400
+    
+    try:
+        # 직접 테스트 함수 호출
+        result = interact_manager.test_single_query(doc_id, domain)
+        
+        if result:
+            return jsonify({
+                "status": "success",
+                "message": "문서를 찾았습니다",
+                "query": f'doc_id == "{doc_id}"',  # 정확한 쿼리문 반환
+                "document": result
+            })
+        else:
+            # 추가 정보 조회 - 도메인의 문서 샘플 가져오기
+            try:
+                collection = Collection(domain)
+                sample_docs = collection.query(
+                    expr="",
+                    output_fields=["doc_id"],
+                    limit=5
+                )
+                sample_ids = [doc.get('doc_id', 'unknown') for doc in sample_docs]
+            except:
+                sample_ids = []
+            
+            return jsonify({
+                "status": "not_found",
+                "message": "문서를 찾을 수 없습니다",
+                "query": f'doc_id == "{doc_id}"',
+                "domain": domain,
+                "doc_id": doc_id,
+                "sample_docs": sample_ids
+            }), 404
+            
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"쿼리 실행 중 오류가 발생했습니다: {str(e)}",
+            "query": f'doc_id == "{doc_id}"',
+            "domain": domain,
+            "doc_id": doc_id
+        }), 500
+
 if __name__ == "__main__":
     print(f"Start results")
     app.run(host="0.0.0.0", port=5000)

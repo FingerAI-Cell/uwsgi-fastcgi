@@ -1875,3 +1875,102 @@ class InteractManager:
             duplication_logger.error(f"A스택 트레이스: {traceback.format_exc()}")
             
             return []
+
+    def test_single_query(self, doc_id, domain):
+        """
+        단일 문서 쿼리 테스트 함수 - 주어진 doc_id가 컬렉션에 존재하는지 정확히 확인
+        
+        Args:
+            doc_id (str): 검색할 문서 ID
+            domain (str): 검색할 도메인(컬렉션)
+            
+        Returns:
+            dict: 검색 결과 (없으면 None)
+        """
+        try:
+            # 로깅 설정 - 기존 duplication 로그 사용
+            import logging
+            duplication_logger = logging.getLogger('duplication')
+            if not duplication_logger.handlers:
+                log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
+                os.makedirs(log_dir, exist_ok=True)
+                
+                log_handler = logging.FileHandler(os.path.join(log_dir, 'duplication.log'))
+                log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                log_handler.setFormatter(log_formatter)
+                duplication_logger.setLevel(logging.INFO)
+                duplication_logger.addHandler(log_handler)
+                duplication_logger.propagate = False
+            
+            # 시작 로그
+            print(f"[TEST_QUERY] 테스트 쿼리 시작: doc_id={doc_id}, domain={domain}")
+            duplication_logger.info(f"[TEST_QUERY] 테스트 쿼리 시작: doc_id={doc_id}, domain={domain}")
+            
+            # 컬렉션 존재 여부 확인
+            available_collections = utility.list_collections()
+            if domain not in available_collections:
+                error_msg = f"컬렉션 '{domain}'이 존재하지 않습니다."
+                print(f"[TEST_QUERY] {error_msg}")
+                duplication_logger.error(f"[TEST_QUERY] {error_msg}")
+                return None
+            
+            # 컬렉션 로드
+            collection = Collection(domain)
+            collection.load()
+            print(f"[TEST_QUERY] 컬렉션 '{domain}' 로드 완료, 엔티티 수: {collection.num_entities}")
+            duplication_logger.info(f"[TEST_QUERY] 컬렉션 '{domain}' 로드 완료, 엔티티 수: {collection.num_entities}")
+            
+            # 단일 문서 쿼리 실행 - 정확한 쿼리문 출력
+            exact_query = f'doc_id == "{doc_id}"'
+            print(f"[TEST_QUERY] 실행 쿼리문: {exact_query}")
+            duplication_logger.info(f"[TEST_QUERY] 실행 쿼리문: {exact_query}")
+            
+            # 쿼리 실행 시간 측정
+            query_start = time.time()
+            
+            results = collection.query(
+                expr=exact_query,
+                output_fields=["doc_id", "raw_doc_id", "passage_id", "title", "text"],
+                limit=1
+            )
+            
+            query_end = time.time()
+            query_time = query_end - query_start
+            
+            # 결과 출력
+            print(f"[TEST_QUERY] 쿼리 소요시간: {query_time:.4f}초")
+            duplication_logger.info(f"[TEST_QUERY] 쿼리 소요시간: {query_time:.4f}초")
+            
+            if results:
+                print(f"[TEST_QUERY] 문서 발견: {results}")
+                duplication_logger.info(f"[TEST_QUERY] 문서 발견: {results}")
+                return results[0]
+            else:
+                print(f"[TEST_QUERY] 문서를 찾을 수 없음: {doc_id}")
+                duplication_logger.info(f"[TEST_QUERY] 문서를 찾을 수 없음: {doc_id}")
+                
+                # 전체 문서 샘플 확인
+                try:
+                    sample_docs = collection.query(
+                        expr="",
+                        output_fields=["doc_id"],
+                        limit=5
+                    )
+                    if sample_docs:
+                        print(f"[TEST_QUERY] 컬렉션 샘플 문서 (5개): {sample_docs}")
+                        duplication_logger.info(f"[TEST_QUERY] 컬렉션 샘플 문서 (5개): {sample_docs}")
+                    else:
+                        print(f"[TEST_QUERY] 컬렉션이 비어 있습니다.")
+                        duplication_logger.info(f"[TEST_QUERY] 컬렉션이 비어 있습니다.")
+                except Exception as e:
+                    print(f"[TEST_QUERY] 샘플 쿼리 오류: {str(e)}")
+                    duplication_logger.error(f"[TEST_QUERY] 샘플 쿼리 오류: {str(e)}")
+                
+                return None
+                
+        except Exception as e:
+            print(f"[TEST_QUERY] 오류 발생: {str(e)}")
+            import logging
+            duplication_logger = logging.getLogger('duplication')
+            duplication_logger.error(f"[TEST_QUERY] 오류 발생: {str(e)}")
+            return None
