@@ -1375,6 +1375,11 @@ class InteractManager:
                     logger.warning(f"임베딩 벡터 없음, 항목 건너뜀: {item.get('passage_uid', 'unknown')}")
                     continue
                 
+                # 임베딩 벡터 데이터 유형 확인 및 리스트로 변환
+                if isinstance(item['text_emb'], tuple):
+                    item['text_emb'] = list(item['text_emb'])
+                    logger.info(f"임베딩 벡터 튜플을 리스트로 변환: {item.get('passage_uid', 'unknown')}")
+                
                 valid_batch_data.append(item)
             
             # 유효한 데이터가 없으면 종료
@@ -1407,6 +1412,11 @@ class InteractManager:
                                 new_item['passage_id'] = idx
                             # passage_uid 업데이트
                             new_item['passage_uid'] = f"{item['passage_uid']}_{idx}"
+                            
+                            # 임베딩 벡터 유형 확인
+                            if isinstance(new_item['text_emb'], tuple):
+                                new_item['text_emb'] = list(new_item['text_emb'])
+                                
                             final_batch.append(new_item)
                     else:
                         # passage_id가 문자열이면 정수로 변환
@@ -1421,6 +1431,16 @@ class InteractManager:
                 try:
                     # 배치 삽입 시도
                     if final_batch:
+                        # 삽입 전 모든 항목의 text_emb 타입 확인
+                        for idx, item in enumerate(final_batch):
+                            if not isinstance(item['text_emb'], list):
+                                logger.warning(f"항목 {idx}의 text_emb 유형 변환: {type(item['text_emb'])} -> list")
+                                try:
+                                    item['text_emb'] = list(item['text_emb'])
+                                except Exception as e:
+                                    logger.error(f"text_emb 변환 실패: {str(e)}, 항목 제외")
+                                    final_batch.remove(item)
+                        
                         collection.insert(final_batch)
                         total_success += len(final_batch)
                         logger.info(f"배치 {i//max_batch_size + 1} 삽입 성공: {len(final_batch)}개 항목")
@@ -1436,6 +1456,10 @@ class InteractManager:
                     # 개별 삽입 시도
                     for item in final_batch:
                         try:
+                            # 임베딩 벡터 유형 확인
+                            if not isinstance(item['text_emb'], list):
+                                item['text_emb'] = list(item['text_emb'])
+                                
                             collection.insert([item])
                             total_success += 1
                             logger.info(f"개별 항목 삽입 성공: {item.get('passage_uid', 'unknown')}")
@@ -1636,6 +1660,11 @@ class InteractManager:
                     emb_sample = str(emb_vector[:3])[:30] + "..." if emb_length > 0 else "비어있음"
                     insert_logger.info(f"[Thread-{thread_id}] 임베딩 완료: passage_uid={chunk_id}, 벡터 크기={emb_length}, 샘플={emb_sample}, 소요시간={embed_time:.4f}초")
                     
+                    # 임베딩 벡터가 튜플인 경우 리스트로 변환
+                    if isinstance(chunk_data['text_emb'], tuple):
+                        chunk_data['text_emb'] = list(chunk_data['text_emb'])
+                        insert_logger.info(f"[Thread-{thread_id}] 임베딩 벡터를 튜플에서 리스트로 변환: passage_uid={chunk_id}")
+                    
                     # 필수 필드 유효성 검증 - 특히 passage_id
                     if 'passage_id' not in chunk_data or chunk_data['passage_id'] is None:
                         if 'metadata' in chunk_data and 'chunk_index' in chunk_data['metadata']:
@@ -1654,6 +1683,9 @@ class InteractManager:
                             else:
                                 chunk_data['passage_id'] = 0
                                 insert_logger.warning(f"[Thread-{thread_id}] passage_id 추출 실패, 기본값 사용: 0")
+                    
+                    # 최종 검증 로그
+                    insert_logger.info(f"[Thread-{thread_id}] 최종 데이터 검증: passage_id={chunk_data.get('passage_id', 'None')}, 타입={type(chunk_data.get('passage_id', None))}")
                     
                     return chunk_data
                     
