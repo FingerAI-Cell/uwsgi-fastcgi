@@ -2190,7 +2190,8 @@ def test_or_operator():
     {
         "doc_ids": ["id1", "id2", "id3", ...],
         "domain": "도메인명",
-        "batch_size": 20  // 선택적, 기본값은 20
+        "batch_size": 20,  // 선택적, 기본값은 20
+        "use_sample_ids": true  // 선택적, 설정 시 컬렉션에서 샘플 ID를 가져와 테스트
     }
     
     Returns:
@@ -2218,15 +2219,10 @@ def test_or_operator():
         doc_ids = request_data.get("doc_ids")
         domain = request_data.get("domain")
         batch_size = request_data.get("batch_size", 20)  # 기본값 20
+        use_sample_ids = request_data.get("use_sample_ids", False)  # 샘플 ID 사용 여부
         
-        if not doc_ids:
-            return jsonify({"error": "doc_ids 필드는 필수입니다."}), 400
-            
         if not domain:
             return jsonify({"error": "domain 필드는 필수입니다."}), 400
-            
-        if not isinstance(doc_ids, list):
-            doc_ids = [doc_ids]  # 단일 ID를 리스트로 변환
             
         # 도메인 유효성 검증
         available_collections = milvus_db.get_list_collection()
@@ -2235,14 +2231,64 @@ def test_or_operator():
                 "error": f"도메인 '{domain}'이 존재하지 않습니다.",
                 "available_domains": available_collections
             }), 404
-            
-        # 테스트 시작 로깅
-        test_logger.info(f"OR 연산자 테스트 시작: {len(doc_ids)}개 문서, 도메인: {domain}, 배치 크기: {batch_size}")
         
         # 컬렉션 로드
         collection = Collection(domain)
         collection.load()
         test_logger.info(f"컬렉션 '{domain}' 로드 완료")
+        
+        # 컬렉션 스키마 로깅 (디버깅용)
+        schema = collection.schema
+        test_logger.info(f"컬렉션 스키마: {schema}")
+        test_logger.info(f"필드 이름 목록: {[field.name for field in schema.fields]}")
+        
+        # 실제 문서 ID 조회 (요청한 코드 녹임)
+        try:
+            # 데이터베이스에서 실제 문서 ID 5개 샘플링
+            sample_docs = collection.query(
+                expr="",  # 모든 문서
+                output_fields=["doc_id"],
+                limit=5
+            )
+            test_logger.info(f"실제 문서 ID 샘플 (5개): {sample_docs}")
+            
+            if not sample_docs:
+                test_logger.warning(f"컬렉션 '{domain}'에 문서가 없습니다!")
+                return jsonify({
+                    "status": "error",
+                    "message": f"컬렉션 '{domain}'에 문서가 없습니다.",
+                    "domain": domain
+                }), 400
+            
+            # 첫 번째 문서로 단일 조회 테스트 (디버깅용)
+            if sample_docs and len(sample_docs) > 0:
+                first_doc_id = sample_docs[0]["doc_id"]
+                test_logger.info(f"첫 번째 문서 ID: {first_doc_id}")
+                
+                single_test = collection.query(
+                    expr=f'doc_id == "{first_doc_id}"',
+                    output_fields=["doc_id", "passage_id"],
+                    limit=1
+                )
+                test_logger.info(f"단일 ID 조회 테스트 결과: {single_test}")
+            
+            # 샘플 ID 사용 옵션이 켜져 있으면 실제 컬렉션의 ID 사용
+            if use_sample_ids and sample_docs:
+                doc_ids = [doc["doc_id"] for doc in sample_docs if "doc_id" in doc]
+                test_logger.info(f"샘플 ID로 대체: {doc_ids}")
+        except Exception as e:
+            test_logger.error(f"샘플 문서 조회 실패: {str(e)}")
+            
+        # 요청된 doc_ids 확인
+        if not doc_ids and not use_sample_ids:
+            return jsonify({"error": "doc_ids 필드는 필수입니다. 또는 use_sample_ids=true를 설정하세요."}), 400
+            
+        if not isinstance(doc_ids, list):
+            doc_ids = [doc_ids]  # 단일 ID를 리스트로 변환
+            
+        # 테스트 시작 로깅
+        test_logger.info(f"OR 연산자 테스트 시작: {len(doc_ids)}개 문서, 도메인: {domain}, 배치 크기: {batch_size}")
+        test_logger.info(f"테스트할 doc_ids: {doc_ids}")
         
         # 결과 저장 변수
         all_results = []
@@ -2285,6 +2331,10 @@ def test_or_operator():
                     result_doc_ids = {result["doc_id"] for result in results if "doc_id" in result}
                     found_doc_ids.extend(list(result_doc_ids))
                     
+                    # 디버깅: 결과 객체 타입 확인
+                    test_logger.info(f"쿼리 결과 유형: {type(results).__name__}")
+                    test_logger.info(f"결과 첫 항목 샘플 (있는 경우): {results[0] if results else 'N/A'}")
+                    
                     batch_results.append({
                         "batch_index": i//batch_size + 1,
                         "batch_size": len(batch),
@@ -2298,11 +2348,34 @@ def test_or_operator():
                     
                 except Exception as e:
                     test_logger.error(f"배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
+                    test_logger.error(f"오류 발생 쿼리: {expr}")
+                    
+                    # 대체 방법 시도: 개별 쿼리
+                    test_logger.info("대체 방법으로 개별 쿼리 시도...")
+                    
+                    individual_results = []
+                    for doc_id in batch[:3]:  # 처음 3개만 시도
+                        try:
+                            single_expr = f'doc_id == "{doc_id}"'
+                            single_result = collection.query(
+                                expr=single_expr,
+                                output_fields=["doc_id", "passage_id"],
+                                limit=1
+                            )
+                            test_logger.info(f"개별 쿼리 '{single_expr}' 결과: {single_result}")
+                            individual_results.append({
+                                "doc_id": doc_id,
+                                "result": single_result
+                            })
+                        except Exception as single_err:
+                            test_logger.error(f"개별 쿼리 오류: {str(single_err)}")
+                    
                     batch_results.append({
                         "batch_index": i//batch_size + 1,
                         "batch_size": len(batch),
                         "error": str(e),
-                        "status": "error"
+                        "status": "error",
+                        "individual_tests": individual_results
                     })
             
             end_time = time.time()
@@ -2319,11 +2392,13 @@ def test_or_operator():
                 "message": f"{len(doc_ids)}개 문서 중 {len(unique_found_doc_ids)}개 발견",
                 "test_doc_ids": doc_ids,
                 "found_doc_ids": unique_found_doc_ids,
+                "sample_docs": sample_docs,  # 실제 DB에서 조회한 샘플 문서 추가
                 "domain": domain,
                 "batch_size": batch_size,
                 "total_time": total_time,
                 "query_time": total_query_time,
-                "batch_results": batch_results
+                "batch_results": batch_results,
+                "schema_fields": [field.name for field in schema.fields] if 'schema' in locals() else []
             }), 200
             
         except Exception as e:
@@ -2332,7 +2407,8 @@ def test_or_operator():
                 "status": "error",
                 "message": f"OR 연산자 테스트 중 오류 발생: {str(e)}",
                 "test_doc_ids": doc_ids,
-                "domain": domain
+                "domain": domain,
+                "sample_docs": sample_docs if 'sample_docs' in locals() else []  # 조회에 성공했다면 샘플 문서 포함
             }), 500
             
     except Exception as e:
