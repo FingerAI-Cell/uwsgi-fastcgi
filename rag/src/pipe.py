@@ -1352,18 +1352,45 @@ class InteractManager:
             import logging
             logger = logging.getLogger('rag-backend')
             
+            # 로그 추가: 삽입 데이터 확인
+            logger.info(f"배치 삽입 시작: 총 {len(batch_data)}개 항목, 도메인: {domain}")
+            
             collection = self.get_collection(domain)
             max_batch_size = 50  # 한 번에 처리할 최대 레코드 수
             total_success = 0
             
             insert_start = time.time()
             
-            for i in range(0, len(batch_data), max_batch_size):
-                sub_batch = batch_data[i:i + max_batch_size]
+            # 유효한 데이터만 필터링 (중요한 필드와 text_emb가 있는지 확인)
+            valid_batch_data = []
+            for item in batch_data:
+                # 필수 필드 확인
+                required_fields = ['passage_uid', 'doc_id', 'text']
+                if not all(field in item for field in required_fields):
+                    logger.warning(f"필수 필드 누락 항목 건너뜀: {item.get('passage_uid', 'unknown')}")
+                    continue
+                
+                # 임베딩 벡터 확인 (반드시 필요)
+                if 'text_emb' not in item or not item['text_emb'] or len(item['text_emb']) == 0:
+                    logger.warning(f"임베딩 벡터 없음, 항목 건너뜀: {item.get('passage_uid', 'unknown')}")
+                    continue
+                
+                valid_batch_data.append(item)
+            
+            # 유효한 데이터가 없으면 종료
+            if not valid_batch_data:
+                logger.warning(f"유효한 데이터 항목이 없습니다. 삽입 취소. 원본 데이터 개수: {len(batch_data)}")
+                return False
+            
+            logger.info(f"유효한 배치 데이터: {len(valid_batch_data)}/{len(batch_data)}개")
+            
+            for i in range(0, len(valid_batch_data), max_batch_size):
+                sub_batch = valid_batch_data[i:i + max_batch_size]
                 
                 # 각 레코드의 텍스트 길이 검증
-                valid_batch = []
+                final_batch = []
                 for item in sub_batch:
+                    # 텍스트 길이 검증
                     text_length = len(item.get('text', '').encode('utf-8'))
                     if text_length > self.MAX_TEXT_LENGTH:
                         # 텍스트가 너무 긴 경우 분할
@@ -1373,14 +1400,16 @@ class InteractManager:
                             new_item['text'] = sub_chunk
                             new_item['passage_id'] = f"{item['passage_id']}_{idx}"
                             new_item['passage_uid'] = f"{item['passage_uid']}_{idx}"
-                            valid_batch.append(new_item)
+                            final_batch.append(new_item)
                     else:
-                        valid_batch.append(item)
+                        final_batch.append(item)
                 
                 try:
                     # 배치 삽입 시도
-                    collection.insert(valid_batch)
-                    total_success += len(valid_batch)
+                    if final_batch:
+                        collection.insert(final_batch)
+                        total_success += len(final_batch)
+                        logger.info(f"배치 {i//max_batch_size + 1} 삽입 성공: {len(final_batch)}개 항목")
                     
                     # 주기적으로 flush 및 메모리 정리
                     if (i + max_batch_size) % (max_batch_size * 2) == 0:
@@ -1391,12 +1420,13 @@ class InteractManager:
                     logger.warning(f"배치 삽입 실패, 개별 삽입 시도: {str(batch_error)}")
                     
                     # 개별 삽입 시도
-                    for item in valid_batch:
+                    for item in final_batch:
                         try:
                             collection.insert([item])
                             total_success += 1
+                            logger.info(f"개별 항목 삽입 성공: {item.get('passage_uid', 'unknown')}")
                         except Exception as item_error:
-                            logger.error(f"개별 항목 삽입 실패: {str(item_error)}")
+                            logger.error(f"개별 항목 삽입 실패: {str(item_error)}, 항목: {item.get('passage_uid', 'unknown')}")
                             
                     collection.flush()
                     
@@ -1406,7 +1436,7 @@ class InteractManager:
             insert_end = time.time()
             insert_duration = insert_end - insert_start
             
-            logger.info(f"개별 항목 삽입 완료: {total_success}/{len(batch_data)}개 성공, 소요시간: {insert_duration:.4f}초")
+            logger.info(f"배치 삽입 완료: {total_success}/{len(batch_data)}개 성공, 소요시간: {insert_duration:.4f}초")
             
             return total_success > 0
             
@@ -1546,7 +1576,7 @@ class InteractManager:
         chunk_index = chunk_data.get('chunk_index', -1)
         
         # 디버그 로그
-        # self.insert_logger.info(f"[Thread-{thread_id}] prepare_data_with_embedding 호출됨 (청크#{chunk_index})")
+        self.insert_logger.info(f"[Thread-{thread_id}] prepare_data_with_embedding 호출됨 (청크#{chunk_index}) - 텍스트 길이: {len(chunk_data.get('text', ''))}")
         
         # 먼저 원본 데이터 복사본 생성
         result_data = chunk_data.copy()
@@ -1559,6 +1589,22 @@ class InteractManager:
             if 'embedding' in prepared_data:
                 result_data['text_emb'] = prepared_data['embedding']
                 
+                # 임베딩 데이터 검증 로그
+                emb_length = len(prepared_data['embedding'])
+                emb_sample = str(prepared_data['embedding'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
+                self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 생성 성공: 벡터 길이={emb_length}, 샘플={emb_sample} (청크#{chunk_index})")
+                
+                # passage_uid 생성 (필수 필드)
+                if 'passage_uid' not in result_data:
+                    # doc_id와 passage_id를 조합하여 생성
+                    doc_id = result_data.get('doc_id', '')
+                    passage_id = result_data.get('passage_id', chunk_index)
+                    result_data['passage_uid'] = f"{doc_id}_{passage_id}"
+                    self.insert_logger.info(f"[Thread-{thread_id}] passage_uid 생성: {result_data['passage_uid']} (청크#{chunk_index})")
+            else:
+                self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 필드 누락: embedding 필드가 없음 (청크#{chunk_index})")
+                return None  # 임베딩이 없으면 None 반환
+                
             # text 필드 업데이트 (필요한 경우)
             if 'text' in prepared_data:
                 result_data['text'] = prepared_data['text']
@@ -1568,12 +1614,12 @@ class InteractManager:
                 result_data['chunk_no'] = prepared_data['chunk_no']
                 
             # 성공 로그
-            # self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 변환 완료: 청크#{chunk_index}")
+            self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 변환 완료: 청크#{chunk_index}")
             return result_data
         else:
-            # 실패 시 원본 데이터 반환
-            self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 생성 실패, 원본 데이터 반환: 청크#{chunk_index}")
-            return result_data
+            # 실패 시 None 반환 (더 이상 원본 데이터 반환하지 않음)
+            self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 생성 실패, None 반환: 청크#{chunk_index}")
+            return None
 
     def batch_insert_data(self, domain, data_batch):
         """
@@ -1587,28 +1633,57 @@ class InteractManager:
             bool: 삽입 성공 여부
         """
         try:
+            import logging
+            logger = logging.getLogger('rag-backend')
+            
             if not data_batch:
-                print(f"[WARNING] 빈 데이터 배치가 전달되었습니다 (도메인: {domain})")
+                logger.warning(f"빈 데이터 배치가 전달되었습니다 (도메인: {domain})")
                 return False
             
             # None 값 필터링 (임베딩 실패한 항목)
             valid_batch = [item for item in data_batch if item is not None]
-            if len(valid_batch) == 0:
-                print(f"[WARNING] 유효한 데이터 항목이 없습니다 (도메인: {domain})")
-                return False
-                
-            print(f"[DEBUG] 배치 삽입 시작: {len(valid_batch)}/{len(data_batch)}개 유효 항목 (도메인: {domain})")
             
-            # 데이터 배치 처리 (내부적으로 하위 배치로 나누어 처리)
-            return self._execute_batch_insert(valid_batch, domain)
+            # 원본 배치와 유효 배치의 길이 비교 로깅
+            if len(valid_batch) < len(data_batch):
+                logger.warning(f"None 항목 필터링: {len(valid_batch)}/{len(data_batch)}개 유효 항목 (도메인: {domain})")
+            
+            if len(valid_batch) == 0:
+                logger.warning(f"유효한 데이터 항목이 없습니다 (도메인: {domain})")
+                return False
+            
+            # 상세 로깅 - 첫 번째 아이템의 키 확인
+            if valid_batch:
+                sample_item = valid_batch[0]
+                # 중요 필드 확인 로그
+                has_uid = 'passage_uid' in sample_item
+                has_doc_id = 'doc_id' in sample_item
+                has_text = 'text' in sample_item
+                has_text_emb = 'text_emb' in sample_item
+                
+                # 중요 필드 로깅
+                logger.info(f"배치 삽입 검증 - 필수 필드 존재 여부: passage_uid={has_uid}, doc_id={has_doc_id}, text={has_text}, text_emb={has_text_emb}")
+                
+                # 임베딩 벡터 확인
+                if has_text_emb:
+                    emb_length = len(sample_item['text_emb']) if sample_item['text_emb'] else 0
+                    logger.info(f"임베딩 벡터 샘플 길이: {emb_length}")
+            
+            # 배치 삽입 수행
+            logger.info(f"배치 삽입 시작: {len(valid_batch)}개 유효 항목 (도메인: {domain})")
+            insert_result = self._execute_batch_insert(valid_batch, domain)
+            
+            # 삽입 결과 로깅
+            if insert_result:
+                logger.info(f"배치 삽입 성공 (도메인: {domain})")
+            else:
+                logger.warning(f"배치 삽입 실패 (도메인: {domain})")
+            
+            return insert_result
             
         except Exception as e:
-            print(f"[ERROR] 배치 삽입 실패 (도메인: {domain}): {str(e)}")
-            import logging
-            logger = logging.getLogger('rag-backend')
-            logger.error(f"배치 삽입 실패: {str(e)}")
             import traceback
-            print(f"[ERROR] 배치 삽입 상세 오류: {traceback.format_exc()}")
+            error_trace = traceback.format_exc()
+            logger.error(f"배치 삽입 실패 (도메인: {domain}): {str(e)}\n{error_trace}")
             return False
 
     def chunk_document(self, text):

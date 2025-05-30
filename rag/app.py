@@ -16,6 +16,7 @@ import sys
 import signal
 import concurrent.futures
 import threading
+import traceback
 
 # 로깅 설정
 logging.basicConfig(
