@@ -1657,11 +1657,30 @@ class InteractManager:
                 logger.warning(f"유효한 데이터 항목이 없습니다 (도메인: {domain})")
                 return False
             
-            # raw_doc_id 필드 확인 및 추가 - 모든 항목에 대해 확인
+            # 필수 필드 확인 및 추가 - 모든 항목에 대해 확인
             for item in valid_batch:
+                # raw_doc_id 필드 확인 및 추가
                 if 'raw_doc_id' not in item and 'doc_id' in item:
                     item['raw_doc_id'] = item['doc_id']
                     logger.info(f"항목에 raw_doc_id 필드 자동 추가: {item.get('passage_uid', 'unknown')}")
+                
+                # passage_id 필드 확인 및 추가
+                if 'passage_id' not in item:
+                    # passage_uid에서 ID 부분 추출 시도
+                    passage_uid = item.get('passage_uid', '')
+                    if '_' in passage_uid:
+                        # passage_uid가 "doc_id_chunk_index" 형식인 경우, 마지막 부분 추출
+                        try:
+                            item['passage_id'] = int(passage_uid.split('_')[-1])
+                            logger.info(f"항목에 passage_id 필드 자동 추가 (passage_uid에서 추출): {passage_uid} -> {item['passage_id']}")
+                        except (ValueError, IndexError):
+                            # 추출 실패 시 chunk_index 또는 기본값 사용
+                            item['passage_id'] = item.get('chunk_index', 0)
+                            logger.info(f"항목에 passage_id 필드 자동 추가 (기본값): {item['passage_id']}")
+                    else:
+                        # passage_uid에서 추출할 수 없는 경우 chunk_index 또는 기본값 사용
+                        item['passage_id'] = item.get('chunk_index', 0)
+                        logger.info(f"항목에 passage_id 필드 자동 추가 (기본값): {item['passage_id']}")
             
             # 상세 로깅 - 첫 번째 아이템의 키 확인
             if valid_batch:
@@ -1670,11 +1689,12 @@ class InteractManager:
                 has_uid = 'passage_uid' in sample_item
                 has_doc_id = 'doc_id' in sample_item
                 has_raw_doc_id = 'raw_doc_id' in sample_item
+                has_passage_id = 'passage_id' in sample_item
                 has_text = 'text' in sample_item
                 has_text_emb = 'text_emb' in sample_item
                 
                 # 중요 필드 로깅
-                logger.info(f"배치 삽입 검증 - 필수 필드 존재 여부: passage_uid={has_uid}, doc_id={has_doc_id}, raw_doc_id={has_raw_doc_id}, text={has_text}, text_emb={has_text_emb}")
+                logger.info(f"배치 삽입 검증 - 필수 필드 존재 여부: passage_uid={has_uid}, doc_id={has_doc_id}, raw_doc_id={has_raw_doc_id}, passage_id={has_passage_id}, text={has_text}, text_emb={has_text_emb}")
                 
                 # 임베딩 벡터 확인
                 if has_text_emb:

@@ -860,19 +860,25 @@ def insert_data():
                             # 임베딩 생성 함수 정의
                             def process_chunk(chunk, index):
                                 chunk_start = time.time()
-                                logger.info(f"process_chunk 호출: 청크 {index}")  # 함수 호출 로그 추가
+                                logger.info(f"process_chunk 호출: 청크 {index}")
                                 try:
                                     # 청크 ID 생성
                                     chunk_id = f"{doc_hashed_id}_chunk_{index}"
+                                    passage_uid = f"{doc_hashed_id}_{index}"  # passage_uid 생성
                                     
-                                    # 청크 데이터 구성
+                                    # 청크 데이터 구성 - 컬렉션 스키마에 맞게 모든 필드 포함
                                     chunk_data = {
                                         'id': chunk_id,
+                                        'passage_uid': passage_uid,  # passage_uid 필드 추가
                                         'doc_id': doc_hashed_id,
-                                        'raw_doc_id': raw_doc_id,  # raw_doc_id 필드 추가
+                                        'raw_doc_id': raw_doc_id,
+                                        'passage_id': index,  # passage_id 명시적 설정
                                         'text': chunk,
                                         'title': doc.get('title', ''),
+                                        'author': doc.get('author', ''),  # author 필드 추가
                                         'domain': domain,
+                                        'info': doc.get('info', {}),  # info 필드 추가
+                                        'tags': doc.get('tags', {}),  # tags 필드 추가
                                         'metadata': {
                                             'chunk_index': index,
                                             'source': 'api',
@@ -880,27 +886,22 @@ def insert_data():
                                         }
                                     }
                                     
-                                    # 문서의 추가 필드 복사
-                                    for field in ['author', 'info', 'tags']:
-                                        if field in doc:
-                                            chunk_data['metadata'][field] = doc[field]
-                                    
                                     # 임베딩 생성 전 GPU 세마포어 상태 추적
                                     thread_id = threading.get_ident()
                                     insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 시작 (텍스트 길이: {len(chunk)})")
                                     
                                     # 임베딩 생성
                                     embedding_time_start = time.time()
-                                    chunk_data = interact_manager.prepare_data_with_embedding(chunk_data)
+                                    chunk_data_with_embedding = interact_manager.prepare_data_with_embedding(chunk_data)
                                     embedding_time_end = time.time()
                                     embedding_duration = embedding_time_end - embedding_time_start
                                     
                                     # 임베딩 벡터 확인 로그 및 성공 여부 판단
-                                    if chunk_data and 'text_emb' in chunk_data:  # chunk_data가 None이 아닌지 먼저 확인
-                                        emb_length = len(chunk_data['text_emb'])
-                                        emb_sample = str(chunk_data['text_emb'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
+                                    if chunk_data_with_embedding and 'text_emb' in chunk_data_with_embedding:
+                                        emb_length = len(chunk_data_with_embedding['text_emb'])
+                                        emb_sample = str(chunk_data_with_embedding['text_emb'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
                                         insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 완료: 벡터 크기={emb_length}, 샘플={emb_sample}, 소요시간={embedding_duration:.4f}초")
-                                        return chunk_data  # 성공한 경우 chunk_data 반환
+                                        return chunk_data_with_embedding  # 성공한 경우 임베딩이 추가된 데이터 반환
                                     else:
                                         logger.warning(f"청크 {index}의 임베딩 생성 실패: prepare_data_with_embedding이 None을 반환함")
                                         return None  # 실패한 경우 None 반환
