@@ -711,13 +711,15 @@ def insert_data():
                     insert_logger.info(f"삭제할 문서 ID 목록: {delete_ids[:5]}{'...' if len(delete_ids) > 5 else ''}")
                     
                     # 배치 단위로 삭제 (쿼리 크기 제한 고려)
-                    delete_batch_size = 500
+                    delete_batch_size = 20  # 더 작은 배치 크기로 수정
                     total_deleted = 0
                     
                     for i in range(0, len(delete_ids), delete_batch_size):
                         batch_ids = delete_ids[i:i+delete_batch_size]
-                        ids_list = ", ".join([f'"{id}"' for id in batch_ids])  # 각 ID를 큰따옴표로 묶고 쉼표로 구분
-                        expr = f'doc_id in [{ids_list}]'  # 올바른 IN 연산자 형식 사용: doc_id in ["id1", "id2", ...]
+                        
+                        # IN 연산자 대신 OR 연산자 사용 (더 안정적인 방법)
+                        condition_list = [f'doc_id == "{id}"' for id in batch_ids]
+                        expr = " || ".join(condition_list)  # OR 연산자 사용
                         
                         try:
                             deleted_result = collection.delete(expr)
@@ -1931,6 +1933,69 @@ def delete_domains():
 def index():
     print(f"hello results")
     return jsonify({"message": "Hello, FastCGI is working!"})
+
+@app.route('/rag/test/query', methods=['GET'])
+def test_single_query():
+    """
+    단일 문서 쿼리 테스트 엔드포인트 - 정확한 쿼리문을 사용하여 문서 검색
+    
+    Query Parameters:
+        doc_id: 검색할 문서 ID
+        domain: 검색할 도메인(컬렉션)
+    
+    Returns:
+        JSON: 검색 결과 또는 오류 메시지
+    """
+    doc_id = request.args.get('doc_id')
+    domain = request.args.get('domain')
+    
+    if not doc_id:
+        return jsonify({"error": "doc_id parameter is required"}), 400
+    
+    if not domain:
+        return jsonify({"error": "domain parameter is required"}), 400
+    
+    try:
+        # 직접 테스트 함수 호출
+        result = interact_manager.test_single_query(doc_id, domain)
+        
+        if result:
+            return jsonify({
+                "status": "success",
+                "message": "문서를 찾았습니다",
+                "query": f'doc_id == "{doc_id}"',  # 정확한 쿼리문 반환
+                "document": result
+            })
+        else:
+            # 추가 정보 조회 - 도메인의 문서 샘플 가져오기
+            try:
+                collection = Collection(domain)
+                sample_docs = collection.query(
+                    expr="",
+                    output_fields=["doc_id"],
+                    limit=5
+                )
+                sample_ids = [doc.get('doc_id', 'unknown') for doc in sample_docs]
+            except:
+                sample_ids = []
+            
+            return jsonify({
+                "status": "not_found",
+                "message": "문서를 찾을 수 없습니다",
+                "query": f'doc_id == "{doc_id}"',
+                "domain": domain,
+                "doc_id": doc_id,
+                "sample_docs": sample_ids
+            }), 404
+            
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"쿼리 실행 중 오류가 발생했습니다: {str(e)}",
+            "query": f'doc_id == "{doc_id}"',
+            "domain": domain,
+            "doc_id": doc_id
+        }), 500
 
 if __name__ == "__main__":
     print(f"Start results")
