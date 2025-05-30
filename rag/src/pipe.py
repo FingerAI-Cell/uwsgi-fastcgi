@@ -268,7 +268,7 @@ class InteractManager:
             try:
                 # 빠른 개수 체크
                 count_result = collection.query(
-                    expr=f'doc_id == "{hashed_doc_id}"',
+                    filter=f'doc_id == "{hashed_doc_id}"',
                     output_fields=["count(*)"],
                     limit=1
                 )
@@ -277,7 +277,7 @@ class InteractManager:
                 # 개수 쿼리가 실패하면 대체 방법 시도
                 try:
                     items = collection.query(
-                        expr=f'doc_id == "{hashed_doc_id}"',
+                        filter=f'doc_id == "{hashed_doc_id}"',
                         output_fields=["passage_id"],
                         limit=10000  # 안전한 상한값
                     )
@@ -341,7 +341,7 @@ class InteractManager:
                         for i in range(max_iterations):
                             # 삭제할 항목의 ID 검색
                             items = collection.query(
-                                expr=delete_expr,
+                                filter=delete_expr,
                                 output_fields=["passage_id"],
                                 limit=batch_size,
                                 offset=offset
@@ -807,7 +807,7 @@ class InteractManager:
             query_emb, 
             limit=top_k, 
             output_fields=output_fields,
-            expr=expr
+            filter=expr
         )
         print(f"[DEBUG] Search params: {self.vectordb.search_params}")
         
@@ -880,7 +880,7 @@ class InteractManager:
                     print(f"[DEBUG] Searching collection {domain} with expr: {expr}")
                     
                     results = collection.query(
-                        expr=expr,
+                        filter=expr,
                         output_fields=["doc_id", "raw_doc_id", "passage_id", "domain", "title", "author", "text", "info", "tags"]
                     )
                     
@@ -995,7 +995,7 @@ class InteractManager:
                     
                     try:
                         results = collection.query(
-                            expr=expr,
+                            filter=expr,
                             output_fields=["doc_id", "raw_doc_id", "passage_id", "domain", "title", "author", "text", "info", "tags"]
                         )
                         print(f"[DEBUG] Query results count: {len(results) if results else 0}")
@@ -1140,7 +1140,7 @@ class InteractManager:
                 try:
                     passage_query = f'doc_id == "{hashed_doc_id}"'
                     passage_results = collection.query(
-                        expr=passage_query,
+                        filter=passage_query,
                         output_fields=["passage_id", "passage_uid"],
                         limit=100  # 충분한 결과 확보
                     )
@@ -1706,7 +1706,7 @@ class InteractManager:
                 # 디버깅: 기존 문서의 doc_id 샘플 확인
                 try:
                     sample_docs = collection.query(
-                        expr="",  # 모든 문서
+                        filter="",  # 모든 문서
                         output_fields=["doc_id"],
                         limit=10,
                         offset=0
@@ -1745,7 +1745,7 @@ class InteractManager:
                     try:
                         # 존재하는 doc_id 가져오기
                         results = collection.query(
-                            expr=expr,
+                            filter=expr,
                             output_fields=["doc_id", "passage_id"],
                             limit=10000  # 충분히 큰 값으로 설정
                         )
@@ -1789,7 +1789,7 @@ class InteractManager:
                         # 개별 doc_id 쿼리
                         expr = f'doc_id == "{doc_id}"'
                         results = collection.query(
-                            expr=expr,
+                            filter=expr,
                             output_fields=["passage_id"],
                             limit=1  # 존재 여부만 확인하면 됨
                         )
