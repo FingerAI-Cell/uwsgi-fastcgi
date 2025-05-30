@@ -837,8 +837,8 @@ def insert_data():
                                         active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
                                     
                                     # 간소화된 로그 - 중요 정보만 출력
-                                    doc_id = doc.get('id', 'unknown')
-                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_id})")
+                                    # 이미 위에서 설정한 doc_hashed_id 사용
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hashed_id})")
                                 except Exception as e:
                                     insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
@@ -851,7 +851,7 @@ def insert_data():
                             domain = doc.get('domain', 'general')
                             
                             # 문서 ID 미리 저장 (문서의 여러 위치에서 일관되게 사용하기 위함)
-                            doc_hashed_id = doc.get('id', 'unknown')
+                            # 이미 위에서 설정한 doc_hashed_id 재사용 (두 번 설정하지 않음)
                             doc_title = doc.get('title', '제목 없음')
                             
                             # raw_doc_id 준비
@@ -1020,8 +1020,8 @@ def insert_data():
                                         active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
                                     
                                     # 간소화된 로그 - 중요 정보만 출력
-                                    doc_id = doc.get('id', 'unknown')
-                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_id})")
+                                    # 이미 위에서 설정한 doc_hashed_id 사용
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hashed_id})")
                                 except Exception as e:
                                     insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
