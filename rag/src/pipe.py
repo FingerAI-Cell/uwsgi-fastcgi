@@ -1725,7 +1725,7 @@ class InteractManager:
                     duplication_logger.error(f"A기존 문서 샘플 확인 실패: {str(e)}")
                 
                 # 실제 중복 체크 로직 추가
-                batch_size = 20  # 더 작은 배치 크기 사용 (쿼리 복잡도 감소)
+                batch_size = 100
                 
                 # 효율성을 위해 배치 단위로 처리
                 for i in range(0, len(doc_ids), batch_size):
@@ -1733,16 +1733,14 @@ class InteractManager:
                     if not batch:
                         continue
                         
-                    # IN 연산자 대신 OR 연산자 사용 (더 안정적인 방법)
-                    # 각 ID에 대해 doc_id == "id" 조건을 OR로 연결
-                    condition_list = [f'doc_id == "{id}"' for id in batch]
-                    expr = " || ".join(condition_list)  # OR 연산자 사용
+                    # IN 연산자를 사용하여 배치로 쿼리
+                    # 각 ID를 큰따옴표로 묶고 쉼표로 구분
+                    ids_str = ", ".join([f'"{id}"' for id in batch])
+                    expr = f'doc_id in [{ids_str}]'  # 올바른 IN 연산자 형식 사용: doc_id in ["id1", "id2", ...]
                     
                     # 쿼리 표현식을 INFO 레벨로 변경하여 항상 로그에 표시되도록 함
-                    # 실제 쿼리 앞부분 로깅 (오류 디버깅용)
-                    prefix = expr[:min(200, len(expr))]
-                    duplication_logger.info(f"A배치 {i//batch_size + 1} 쿼리 실행 (OR 방식): {prefix}{'...' if len(expr) > 200 else ''}")
-                    print(f"[DUPLICATION_CHECK] A배치 {i//batch_size + 1} 쿼리 실행 중: OR 조건 {len(batch)}개")
+                    duplication_logger.info(f"A배치 {i//batch_size + 1} 쿼리 실행: {expr[:100]}{'...' if len(expr) > 100 else ''}")
+                    print(f"[DUPLICATION_CHECK] A배치 {i//batch_size + 1} 쿼리 실행 중")
                     
                     try:
                         # 존재하는 doc_id 가져오기
@@ -1780,27 +1778,6 @@ class InteractManager:
                     except Exception as e:
                         print(f"[DUPLICATION_CHECK] A배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
                         duplication_logger.error(f"A배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
-                        
-                        # 개별 항목 처리로 전환 (배치 처리 실패 시)
-                        duplication_logger.info(f"개별 항목 처리로 전환합니다 (배치 {i//batch_size + 1})")
-                        for single_id in batch:
-                            try:
-                                # 단일 doc_id 쿼리
-                                single_expr = f'doc_id == "{single_id}"'
-                                single_results = collection.query(
-                                    expr=single_expr,
-                                    output_fields=["passage_id"],
-                                    limit=1  # 존재 여부만 확인하면 됨
-                                )
-                                
-                                if single_results:
-                                    # 문서가 존재하면 중복으로 표시
-                                    if single_id not in duplicates:
-                                        duplicates.append(single_id)
-                                    duplication_logger.info(f"개별 확인: doc_id={single_id}는 중복됨")
-                            except Exception as single_error:
-                                errors.append({"doc_id": single_id, "error": str(single_error)})
-                                duplication_logger.error(f"개별 항목 처리 오류 (doc_id={single_id}): {str(single_error)}")
                 
                 # 개별 체크 (배치 처리에서 누락된 경우를 대비)
                 for doc_id in doc_ids:
@@ -1875,102 +1852,3 @@ class InteractManager:
             duplication_logger.error(f"A스택 트레이스: {traceback.format_exc()}")
             
             return []
-
-    def test_single_query(self, doc_id, domain):
-        """
-        단일 문서 쿼리 테스트 함수 - 주어진 doc_id가 컬렉션에 존재하는지 정확히 확인
-        
-        Args:
-            doc_id (str): 검색할 문서 ID
-            domain (str): 검색할 도메인(컬렉션)
-            
-        Returns:
-            dict: 검색 결과 (없으면 None)
-        """
-        try:
-            # 로깅 설정 - 기존 duplication 로그 사용
-            import logging
-            duplication_logger = logging.getLogger('duplication')
-            if not duplication_logger.handlers:
-                log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
-                os.makedirs(log_dir, exist_ok=True)
-                
-                log_handler = logging.FileHandler(os.path.join(log_dir, 'duplication.log'))
-                log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-                log_handler.setFormatter(log_formatter)
-                duplication_logger.setLevel(logging.INFO)
-                duplication_logger.addHandler(log_handler)
-                duplication_logger.propagate = False
-            
-            # 시작 로그
-            print(f"[TEST_QUERY] 테스트 쿼리 시작: doc_id={doc_id}, domain={domain}")
-            duplication_logger.info(f"[TEST_QUERY] 테스트 쿼리 시작: doc_id={doc_id}, domain={domain}")
-            
-            # 컬렉션 존재 여부 확인
-            available_collections = utility.list_collections()
-            if domain not in available_collections:
-                error_msg = f"컬렉션 '{domain}'이 존재하지 않습니다."
-                print(f"[TEST_QUERY] {error_msg}")
-                duplication_logger.error(f"[TEST_QUERY] {error_msg}")
-                return None
-            
-            # 컬렉션 로드
-            collection = Collection(domain)
-            collection.load()
-            print(f"[TEST_QUERY] 컬렉션 '{domain}' 로드 완료, 엔티티 수: {collection.num_entities}")
-            duplication_logger.info(f"[TEST_QUERY] 컬렉션 '{domain}' 로드 완료, 엔티티 수: {collection.num_entities}")
-            
-            # 단일 문서 쿼리 실행 - 정확한 쿼리문 출력
-            exact_query = f'doc_id == "{doc_id}"'
-            print(f"[TEST_QUERY] 실행 쿼리문: {exact_query}")
-            duplication_logger.info(f"[TEST_QUERY] 실행 쿼리문: {exact_query}")
-            
-            # 쿼리 실행 시간 측정
-            query_start = time.time()
-            
-            results = collection.query(
-                expr=exact_query,
-                output_fields=["doc_id", "raw_doc_id", "passage_id", "title", "text"],
-                limit=1
-            )
-            
-            query_end = time.time()
-            query_time = query_end - query_start
-            
-            # 결과 출력
-            print(f"[TEST_QUERY] 쿼리 소요시간: {query_time:.4f}초")
-            duplication_logger.info(f"[TEST_QUERY] 쿼리 소요시간: {query_time:.4f}초")
-            
-            if results:
-                print(f"[TEST_QUERY] 문서 발견: {results}")
-                duplication_logger.info(f"[TEST_QUERY] 문서 발견: {results}")
-                return results[0]
-            else:
-                print(f"[TEST_QUERY] 문서를 찾을 수 없음: {doc_id}")
-                duplication_logger.info(f"[TEST_QUERY] 문서를 찾을 수 없음: {doc_id}")
-                
-                # 전체 문서 샘플 확인
-                try:
-                    sample_docs = collection.query(
-                        expr="",
-                        output_fields=["doc_id"],
-                        limit=5
-                    )
-                    if sample_docs:
-                        print(f"[TEST_QUERY] 컬렉션 샘플 문서 (5개): {sample_docs}")
-                        duplication_logger.info(f"[TEST_QUERY] 컬렉션 샘플 문서 (5개): {sample_docs}")
-                    else:
-                        print(f"[TEST_QUERY] 컬렉션이 비어 있습니다.")
-                        duplication_logger.info(f"[TEST_QUERY] 컬렉션이 비어 있습니다.")
-                except Exception as e:
-                    print(f"[TEST_QUERY] 샘플 쿼리 오류: {str(e)}")
-                    duplication_logger.error(f"[TEST_QUERY] 샘플 쿼리 오류: {str(e)}")
-                
-                return None
-                
-        except Exception as e:
-            print(f"[TEST_QUERY] 오류 발생: {str(e)}")
-            import logging
-            duplication_logger = logging.getLogger('duplication')
-            duplication_logger.error(f"[TEST_QUERY] 오류 발생: {str(e)}")
-            return None
