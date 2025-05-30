@@ -1663,7 +1663,7 @@ class InteractManager:
         """중복 문서 체크 - 리스트 형태로 중복된 doc_id만 반환"""
         try:
             if not doc_ids:
-                print(f"[DUPLICATION_CHECK] 경고: 검사할 문서가 없습니다 (도메인: {domain})")
+                print(f"[DUPLICATION_CHECK] A경고: 검사할 문서가 없습니다 (도메인: {domain})")
                 return []
                 
             # 중복 검사 전용 로깅 설정
@@ -1681,17 +1681,17 @@ class InteractManager:
                 duplication_logger.addHandler(duplication_handler)
                 duplication_logger.propagate = False  # 다른 로거로 전파 방지
             
-            duplication_logger.info(f"중복 검사 시작: 총 {len(doc_ids)}개 문서 ID, 도메인: {domain}")
-            duplication_logger.debug(f"검사할 doc_ids: {doc_ids[:5]}{'...' if len(doc_ids) > 5 else ''}")
+            duplication_logger.info(f"A중복 검사 시작: 총 {len(doc_ids)}개 문서 ID, 도메인: {domain}")
+            duplication_logger.debug(f"A검사할 doc_ids: {doc_ids[:5]}{'...' if len(doc_ids) > 5 else ''}")
             
-            print(f"[DUPLICATION_CHECK] 시작: 총 {len(doc_ids)}개 문서 ID 중복 검사 (도메인: {domain})")
+            print(f"[DUPLICATION_CHECK] A시작: 총 {len(doc_ids)}개 문서 ID 중복 검사 (도메인: {domain})")
             
             # 전체 doc_id 목록 로깅 (50개 미만일 경우)
             if len(doc_ids) <= 50:
-                print(f"[DUPLICATION_CHECK] 검사할 모든 doc_id 목록: {doc_ids}")
+                print(f"[DUPLICATION_CHECK] A검사할 모든 doc_id 목록: {doc_ids}")
             else:
                 sample_ids = doc_ids[:5] + ['...'] + doc_ids[-5:]
-                print(f"[DUPLICATION_CHECK] 검사할 doc_id 샘플: {sample_ids}")
+                print(f"[DUPLICATION_CHECK] A검사할 doc_id 샘플: {sample_ids}")
                 
             start_time = time.time()
             duplicates = []  # 중복된 문서 ID 저장 리스트
@@ -1700,8 +1700,8 @@ class InteractManager:
             # 컬렉션 얻기
             try:
                 collection = self.get_collection(domain)
-                print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}' 로드 완료")
-                duplication_logger.info(f"컬렉션 '{domain}' 로드 완료")
+                print(f"[DUPLICATION_CHECK] A컬렉션 '{domain}' 로드 완료")
+                duplication_logger.info(f"A컬렉션 '{domain}' 로드 완료")
 
                 # 디버깅: 기존 문서의 doc_id 샘플 확인
                 try:
@@ -1713,16 +1713,16 @@ class InteractManager:
                     )
                     if sample_docs:
                         doc_id_samples = [doc.get('doc_id', 'unknown') for doc in sample_docs]
-                        print(f"[DUPLICATION_CHECK] 기존 문서 doc_id 샘플 (10개): {doc_id_samples}")
-                        duplication_logger.info(f"기존 문서 doc_id 샘플 (10개): {doc_id_samples}")
+                        print(f"[DUPLICATION_CHECK] A기존 문서 doc_id 샘플 (10개): {doc_id_samples}")
+                        duplication_logger.info(f"A기존 문서 doc_id 샘플 (10개): {doc_id_samples}")
                     else:
                         # 컬렉션이 비어있음
-                        print(f"[DUPLICATION_CHECK] 컬렉션 '{domain}'이 비어 있습니다. 중복 문서가 없습니다.")
-                        duplication_logger.info(f"컬렉션 '{domain}'이 비어 있음, 중복 없음")
+                        print(f"[DUPLICATION_CHECK] A컬렉션 '{domain}'이 비어 있습니다. 중복 문서가 없습니다.")
+                        duplication_logger.info(f"A컬렉션 '{domain}'이 비어 있음, 중복 없음")
                         return []
                 except Exception as e:
-                    print(f"[DUPLICATION_CHECK] 기존 문서 샘플 확인 실패: {str(e)}")
-                    duplication_logger.error(f"기존 문서 샘플 확인 실패: {str(e)}")
+                    print(f"[DUPLICATION_CHECK] A기존 문서 샘플 확인 실패: {str(e)}")
+                    duplication_logger.error(f"A기존 문서 샘플 확인 실패: {str(e)}")
                 
                 # 실제 중복 체크 로직 추가
                 batch_size = 100
@@ -1739,8 +1739,8 @@ class InteractManager:
                     expr = f'doc_id in [{ids_str}]'  # 올바른 IN 연산자 형식 사용: doc_id in ["id1", "id2", ...]
                     
                     # 쿼리 표현식을 INFO 레벨로 변경하여 항상 로그에 표시되도록 함
-                    duplication_logger.info(f"배치 {i//batch_size + 1} 쿼리 실행: {expr[:100]}{'...' if len(expr) > 100 else ''}")
-                    print(f"[DUPLICATION_CHECK] 배치 {i//batch_size + 1} 쿼리 실행 중")
+                    duplication_logger.info(f"A배치 {i//batch_size + 1} 쿼리 실행: {expr[:100]}{'...' if len(expr) > 100 else ''}")
+                    print(f"[DUPLICATION_CHECK] A배치 {i//batch_size + 1} 쿼리 실행 중")
                     
                     try:
                         # 존재하는 doc_id 가져오기
@@ -1751,14 +1751,14 @@ class InteractManager:
                         )
                         
                         # 쿼리 결과 정보 추가 로깅
-                        duplication_logger.info(f"배치 {i//batch_size + 1} 쿼리 결과: {len(results)}개 항목 반환됨")
-                        print(f"[DUPLICATION_CHECK] 배치 {i//batch_size + 1} 쿼리 결과: {len(results)}개 항목")
+                        duplication_logger.info(f"A배치 {i//batch_size + 1} 쿼리 결과: {len(results)}개 항목 반환됨")
+                        print(f"[DUPLICATION_CHECK] A배치 {i//batch_size + 1} 쿼리 결과: {len(results)}개 항목")
                         
                         # 결과 샘플 로깅 (최대 3개)
                         if results:
                             sample_results = results[:3]
-                            duplication_logger.info(f"결과 샘플: {sample_results}")
-                            print(f"[DUPLICATION_CHECK] 결과 샘플: {sample_results}")
+                            duplication_logger.info(f"A결과 샘플: {sample_results}")
+                            print(f"[DUPLICATION_CHECK] A결과 샘플: {sample_results}")
                         
                         # 결과에서 중복 doc_id 추출
                         found_doc_ids = set()
@@ -1769,15 +1769,15 @@ class InteractManager:
                                 if doc_id not in duplicates:
                                     duplicates.append(doc_id)
                                     
-                        duplication_logger.info(f"배치 {i//batch_size + 1} 처리 완료: {len(found_doc_ids)}개 중복 발견")
-                        print(f"[DUPLICATION_CHECK] 배치 {i//batch_size + 1} 처리 완료: {len(found_doc_ids)}개 중복 발견")
+                        duplication_logger.info(f"A배치 {i//batch_size + 1} 처리 완료: {len(found_doc_ids)}개 중복 발견")
+                        print(f"[DUPLICATION_CHECK] A배치 {i//batch_size + 1} 처리 완료: {len(found_doc_ids)}개 중복 발견")
                         
                         # 중복 발견 항목 상세 로깅
                         if found_doc_ids:
-                            duplication_logger.debug(f"배치 {i//batch_size + 1} 중복 ID: {list(found_doc_ids)[:10]}{'...' if len(found_doc_ids) > 10 else ''}")
+                            duplication_logger.debug(f"A배치 {i//batch_size + 1} 중복 ID: {list(found_doc_ids)[:10]}{'...' if len(found_doc_ids) > 10 else ''}")
                     except Exception as e:
-                        print(f"[DUPLICATION_CHECK] 배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
-                        duplication_logger.error(f"배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
+                        print(f"[DUPLICATION_CHECK] A배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
+                        duplication_logger.error(f"A배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
                 
                 # 개별 체크 (배치 처리에서 누락된 경우를 대비)
                 for doc_id in doc_ids:
@@ -1797,58 +1797,58 @@ class InteractManager:
                         if results:
                             # 문서가 존재하면 중복으로 표시
                             duplicates.append(doc_id)
-                            print(f"[DUPLICATION_CHECK] 개별 확인: doc_id={doc_id}는 중복됨")
-                            duplication_logger.info(f"개별 확인: doc_id={doc_id}는 중복됨")
+                            print(f"[DUPLICATION_CHECK] A개별 확인: doc_id={doc_id}는 중복됨")
+                            duplication_logger.info(f"A개별 확인: doc_id={doc_id}는 중복됨")
                     except Exception as e:
                         # 오류 수집하여 나중에 분석
                         errors.append({"doc_id": doc_id, "error": str(e)})
-                        print(f"[DUPLICATION_CHECK] 오류: doc_id={doc_id} 검사 실패: {str(e)}")
-                        duplication_logger.error(f"오류: doc_id={doc_id} 검사 실패: {str(e)}")
+                        print(f"[DUPLICATION_CHECK] A오류: doc_id={doc_id} 검사 실패: {str(e)}")
+                        duplication_logger.error(f"A오류: doc_id={doc_id} 검사 실패: {str(e)}")
             except Exception as e:
-                print(f"[DUPLICATION_CHECK] 컬렉션 로드 오류: {str(e)}")
-                duplication_logger.error(f"컬렉션 로드 오류: {str(e)}")
+                print(f"[DUPLICATION_CHECK] A컬렉션 로드 오류: {str(e)}")
+                duplication_logger.error(f"A컬렉션 로드 오류: {str(e)}")
                 return []
             
             total_time = time.time() - start_time
-            print(f"[DUPLICATION_CHECK] 완료: 총 {len(doc_ids)}개 문서 중 {len(duplicates)}개 중복 발견, {len(errors)}개 검사 실패")
-            print(f"[DUPLICATION_CHECK] 성능: 총 소요시간 {total_time:.2f}초, 문서당 평균 {total_time/len(doc_ids):.4f}초")
-            duplication_logger.info(f"완료: 총 {len(doc_ids)}개 문서 중 {len(duplicates)}개 중복 발견, {len(errors)}개 검사 실패")
-            duplication_logger.info(f"성능: 총 소요시간 {total_time:.2f}초, 문서당 평균 {total_time/len(doc_ids):.4f}초")
+            print(f"[DUPLICATION_CHECK] A완료: 총 {len(doc_ids)}개 문서 중 {len(duplicates)}개 중복 발견, {len(errors)}개 검사 실패")
+            print(f"[DUPLICATION_CHECK] A성능: 총 소요시간 {total_time:.2f}초, 문서당 평균 {total_time/len(doc_ids):.4f}초")
+            duplication_logger.info(f"A완료: 총 {len(doc_ids)}개 문서 중 {len(duplicates)}개 중복 발견, {len(errors)}개 검사 실패")
+            duplication_logger.info(f"A성능: 총 소요시간 {total_time:.2f}초, 문서당 평균 {total_time/len(doc_ids):.4f}초")
             
             # 에러가 있는 경우 상세 로깅
             if errors:
-                print(f"[DUPLICATION_CHECK] 오류 상세: {errors[:5]}" + ("..." if len(errors) > 5 else ""))
-                duplication_logger.error(f"오류 상세: {errors[:5]}" + ("..." if len(errors) > 5 else ""))
+                print(f"[DUPLICATION_CHECK] A오류 상세: {errors[:5]}" + ("..." if len(errors) > 5 else ""))
+                duplication_logger.error(f"A오류 상세: {errors[:5]}" + ("..." if len(errors) > 5 else ""))
             
             # 중복 문서 목록 출력 (최대 50개)
             if duplicates:
                 if len(duplicates) <= 50:
-                    print(f"[DUPLICATION_CHECK] 중복 문서 ID 전체 목록: {duplicates}")
-                    duplication_logger.info(f"중복 문서 ID 전체 목록: {duplicates}")
+                    print(f"[DUPLICATION_CHECK] A중복 문서 ID 전체 목록: {duplicates}")
+                    duplication_logger.info(f"A중복 문서 ID 전체 목록: {duplicates}")
                 else:
                     display_dupes = duplicates[:20]
                     more_count = len(duplicates) - len(display_dupes)
-                    print(f"[DUPLICATION_CHECK] 중복 문서 ID 일부: {display_dupes} 외 {more_count}개")
-                    duplication_logger.info(f"중복 문서 ID 일부: {display_dupes} 외 {more_count}개")
+                    print(f"[DUPLICATION_CHECK] A중복 문서 ID 일부: {display_dupes} 외 {more_count}개")
+                    duplication_logger.info(f"A중복 문서 ID 일부: {display_dupes} 외 {more_count}개")
             else:
-                print(f"[DUPLICATION_CHECK] 중복 문서 없음")
-                duplication_logger.info(f"중복 문서 없음")
+                print(f"[DUPLICATION_CHECK] A중복 문서 없음")
+                duplication_logger.info(f"A중복 문서 없음")
             
             # 중요: 반환 값 유형 명확하게 로깅
-            print(f"[DUPLICATION_CHECK] 반환 값 유형: {type(duplicates)}, 값: {duplicates[:5] if len(duplicates) > 5 else duplicates}")
-            duplication_logger.info(f"반환 값 유형: {type(duplicates)}, 값: {duplicates[:5] if len(duplicates) > 5 else duplicates}")
+            print(f"[DUPLICATION_CHECK] A반환 값 유형: {type(duplicates)}, 값: {duplicates[:5] if len(duplicates) > 5 else duplicates}")
+            duplication_logger.info(f"A반환 값 유형: {type(duplicates)}, 값: {duplicates[:5] if len(duplicates) > 5 else duplicates}")
             
             return duplicates
             
         except Exception as e:
-            print(f"[DUPLICATION_CHECK] 심각한 오류: 중복 체크 실패: {str(e)}")
+            print(f"[DUPLICATION_CHECK] A심각한 오류: 중복 체크 실패: {str(e)}")
             import traceback
-            print(f"[DUPLICATION_CHECK] 스택 트레이스: {traceback.format_exc()}")
+            print(f"[DUPLICATION_CHECK] A스택 트레이스: {traceback.format_exc()}")
             
             # 중복 검사 로그에도 기록
             import logging
             duplication_logger = logging.getLogger('duplication')
-            duplication_logger.error(f"심각한 오류: 중복 체크 실패: {str(e)}")
-            duplication_logger.error(f"스택 트레이스: {traceback.format_exc()}")
+            duplication_logger.error(f"A심각한 오류: 중복 체크 실패: {str(e)}")
+            duplication_logger.error(f"A스택 트레이스: {traceback.format_exc()}")
             
             return []
