@@ -872,7 +872,7 @@ def insert_data():
                                         'passage_uid': passage_uid,  # passage_uid 필드 추가
                                         'doc_id': doc_hashed_id,
                                         'raw_doc_id': raw_doc_id,
-                                        'passage_id': index,  # passage_id 명시적 설정
+                                        'passage_id': int(index),  # passage_id 명시적으로 정수형 변환
                                         'text': chunk,
                                         'title': doc.get('title', ''),
                                         'domain': domain,     # domain 필드 확실히 설정
@@ -880,7 +880,7 @@ def insert_data():
                                         'info': doc.get('info', {}),
                                         'tags': doc.get('tags', {}),
                                         'metadata': {
-                                            'chunk_index': index,
+                                            'chunk_index': int(index),  # chunk_index도 정수형으로 설정
                                             'source': 'api',
                                             'timestamp': time.time()
                                         }

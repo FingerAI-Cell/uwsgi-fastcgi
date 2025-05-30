@@ -1398,10 +1398,24 @@ class InteractManager:
                         for idx, sub_chunk in enumerate(sub_chunks):
                             new_item = item.copy()
                             new_item['text'] = sub_chunk
-                            new_item['passage_id'] = f"{item['passage_id']}_{idx}"
+                            # passage_id가 문자열인 경우 정수로 변환 시도
+                            try:
+                                base_passage_id = int(item['passage_id']) if not isinstance(item['passage_id'], int) else item['passage_id']
+                                new_item['passage_id'] = base_passage_id * 100 + idx  # 하위 청크에 대해 고유한 passage_id 생성
+                            except (ValueError, TypeError):
+                                # 변환 실패 시 인덱스 사용
+                                new_item['passage_id'] = idx
+                            # passage_uid 업데이트
                             new_item['passage_uid'] = f"{item['passage_uid']}_{idx}"
                             final_batch.append(new_item)
                     else:
+                        # passage_id가 문자열이면 정수로 변환
+                        if 'passage_id' in item and not isinstance(item['passage_id'], int):
+                            try:
+                                item['passage_id'] = int(item['passage_id'])
+                            except (ValueError, TypeError):
+                                # 변환 실패 시 기본값 사용
+                                item['passage_id'] = 0
                         final_batch.append(item)
                 
                 try:
@@ -1545,99 +1559,120 @@ class InteractManager:
         """
         app.py에서 호출하는 청크 임베딩 생성 함수
         내부적으로 embed_and_prepare_chunk를 호출하여 임베딩 작업 수행
-        
-        Args:
-            chunk_data (dict): 청크 데이터 (id, doc_id, text 등 포함)
-            
-        Returns:
-            dict: 임베딩이 추가된 청크 데이터 (text_emb 필드 포함)
-            None: 임베딩 생성에 실패한 경우
         """
-        # 로깅 설정
-        if not hasattr(self, 'insert_logger'):
+        try:
             import logging
-            self.insert_logger = logging.getLogger('insert')
-            if not self.insert_logger.handlers:
-                log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
-                os.makedirs(log_dir, exist_ok=True)
-                insert_handler = logging.FileHandler(os.path.join(log_dir, 'insert.log'))
-                insert_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-                insert_handler.setFormatter(insert_formatter)
-                self.insert_logger.setLevel(logging.INFO)
-                self.insert_logger.addHandler(insert_handler)
-                self.insert_logger.propagate = False
-        
-        thread_id = threading.get_ident()
-        
-        # 청크 인덱스 생성 (없을 경우)
-        if 'chunk_index' not in chunk_data:
-            chunk_data['chunk_index'] = getattr(self, '_chunk_index_counter', 0)
-            setattr(self, '_chunk_index_counter', chunk_data['chunk_index'] + 1)
-        
-        chunk_index = chunk_data.get('chunk_index', -1)
-        
-        # raw_doc_id 필드 확인 (없으면 doc_id로 설정)
-        if 'raw_doc_id' not in chunk_data and 'doc_id' in chunk_data:
-            chunk_data['raw_doc_id'] = chunk_data['doc_id']
-            self.insert_logger.info(f"[Thread-{thread_id}] raw_doc_id 필드 추가: {chunk_data['raw_doc_id']} (청크#{chunk_index})")
-        
-        # 디버그 로그
-        self.insert_logger.info(f"[Thread-{thread_id}] prepare_data_with_embedding 호출됨 (청크#{chunk_index}) - 텍스트 길이: {len(chunk_data.get('text', ''))}")
-        
-        # 먼저 원본 데이터 복사본 생성
-        result_data = chunk_data.copy()
-        
-        # embed_and_prepare_chunk 호출하여 임베딩 생성
-        prepared_data = self.embed_and_prepare_chunk(chunk_data)
-        
-        # prepared_data가 None인 경우 즉시 None 반환
-        if prepared_data is None:
-            self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 생성 실패: embed_and_prepare_chunk가 None 반환 (청크#{chunk_index})")
-            return None
-        
-        # 'embedding' 필드를 'text_emb'로 변환하여 결과 데이터에 추가
-        if 'embedding' in prepared_data:
-            result_data['text_emb'] = prepared_data['embedding']
+            logger = logging.getLogger('rag-backend')
+            insert_logger = logging.getLogger('insert')
             
-            # 임베딩 데이터 검증 로그
-            emb_length = len(prepared_data['embedding'])
-            emb_sample = str(prepared_data['embedding'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
-            self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 생성 성공: 벡터 길이={emb_length}, 샘플={emb_sample} (청크#{chunk_index})")
+            thread_id = threading.get_ident()
             
-            # passage_uid 생성 (필수 필드)
-            if 'passage_uid' not in result_data:
-                # doc_id와 passage_id를 조합하여 생성
-                doc_id = result_data.get('doc_id', '')
-                passage_id = result_data.get('passage_id', chunk_index)
-                result_data['passage_uid'] = f"{doc_id}_{passage_id}"
-                self.insert_logger.info(f"[Thread-{thread_id}] passage_uid 생성: {result_data['passage_uid']} (청크#{chunk_index})")
+            # 필수 필드 확인
+            required_fields = ['text', 'doc_id', 'passage_uid']
+            missing_fields = [field for field in required_fields if field not in chunk_data]
+            
+            if missing_fields:
+                insert_logger.error(f"[Thread-{thread_id}] 필수 필드 누락: {missing_fields} (passage_uid: {chunk_data.get('passage_uid', 'unknown')})")
+                return None
+            
+            # passage_id 확인 및 정수형 변환
+            if 'passage_id' in chunk_data:
+                if not isinstance(chunk_data['passage_id'], int):
+                    try:
+                        chunk_data['passage_id'] = int(chunk_data['passage_id'])
+                    except (ValueError, TypeError):
+                        # 변환 실패 시 메타데이터에서 chunk_index를 가져오거나 기본값 사용
+                        if 'metadata' in chunk_data and 'chunk_index' in chunk_data['metadata']:
+                            chunk_data['passage_id'] = int(chunk_data['metadata']['chunk_index'])
+                        else:
+                            # 기본값 설정
+                            chunk_data['passage_id'] = 0
+                        insert_logger.warning(f"[Thread-{thread_id}] passage_id 정수 변환 실패, 기본값 사용: {chunk_data['passage_id']}")
+            
+            # GPU 세마포어 획득 시작 시간
+            sem_wait_start = time.time()
+            
+            # GPU 세마포어 획득
+            if self.__class__._gpu_semaphore is None:
+                self.__class__._gpu_semaphore = threading.BoundedSemaphore(int(os.getenv('MAX_GPU_WORKERS', '50')))
                 
-            # domain 필드 확인 (필수 필드)
-            if 'domain' not in result_data:
-                # 원본 데이터에 domain이 있으면 가져오고, 없으면 기본값 설정
-                result_data['domain'] = chunk_data.get('domain', 'general')
-                self.insert_logger.info(f"[Thread-{thread_id}] domain 필드 추가: {result_data['domain']} (청크#{chunk_index})")
-        else:
-            self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 필드 누락: embedding 필드가 없음 (청크#{chunk_index})")
-            return None  # 임베딩이 없으면 None 반환
+            active_workers = 0
+            with self.__class__._task_lock:
+                active_workers = self.__class__._active_tasks
+                
+            max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
             
-        # text 필드 업데이트 (필요한 경우)
-        if 'text' in prepared_data:
-            result_data['text'] = prepared_data['text']
-            
-        # 청크 번호 정보 업데이트
-        if 'chunk_no' in prepared_data and prepared_data['chunk_no'] is not None:
-            result_data['chunk_no'] = prepared_data['chunk_no']
-            
-        # 필수 필드 최종 확인
-        required_fields = ['passage_uid', 'doc_id', 'raw_doc_id', 'passage_id', 'domain', 'text', 'text_emb']
-        missing_fields = [field for field in required_fields if field not in result_data]
-        if missing_fields:
-            self.insert_logger.warning(f"[Thread-{thread_id}] 필수 필드 누락: {missing_fields} (청크#{chunk_index})")
-            
-        # 성공 로그
-        self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 변환 완료: 청크#{chunk_index}")
-        return result_data
+            with self.__class__._gpu_semaphore:
+                # 세마포어 획득 대기 시간
+                sem_wait_time = time.time() - sem_wait_start
+                
+                # 활성 GPU 작업 수 증가
+                with self.__class__._task_lock:
+                    self.__class__._active_tasks += 1
+                    active_workers = self.__class__._active_tasks
+                    
+                try:
+                    # 임베딩 시작 시간
+                    embed_start = time.time()
+                    
+                    # 로그 정보 추가
+                    chunk_text = chunk_data.get('text', '')
+                    chunk_len = len(chunk_text)
+                    chunk_id = chunk_data.get('passage_uid', chunk_data.get('id', 'unknown'))
+                    
+                    insert_logger.info(f"[Thread-{thread_id}] 임베딩 시작: passage_uid={chunk_id}, 텍스트 길이={chunk_len} (대기시간={sem_wait_time:.4f}초)")
+                    
+                    # 임베딩 생성
+                    emb_vector = self.emb_model.bge_embed_data(chunk_text)
+                    
+                    # 임베딩 소요 시간
+                    embed_time = time.time() - embed_start
+                    
+                    # 임베딩 결과 저장
+                    chunk_data['text_emb'] = emb_vector
+                    
+                    # 임베딩 벡터 유효성 확인 로그
+                    emb_length = len(emb_vector) if emb_vector is not None else 0
+                    emb_sample = str(emb_vector[:3])[:30] + "..." if emb_length > 0 else "비어있음"
+                    insert_logger.info(f"[Thread-{thread_id}] 임베딩 완료: passage_uid={chunk_id}, 벡터 크기={emb_length}, 샘플={emb_sample}, 소요시간={embed_time:.4f}초")
+                    
+                    # 필수 필드 유효성 검증 - 특히 passage_id
+                    if 'passage_id' not in chunk_data or chunk_data['passage_id'] is None:
+                        if 'metadata' in chunk_data and 'chunk_index' in chunk_data['metadata']:
+                            chunk_data['passage_id'] = int(chunk_data['metadata']['chunk_index'])
+                            insert_logger.info(f"[Thread-{thread_id}] passage_id 필드 자동 추가 (metadata): {chunk_data['passage_id']}")
+                        else:
+                            # passage_uid에서 추출 시도
+                            passage_uid = chunk_data.get('passage_uid', '')
+                            if '_' in passage_uid:
+                                try:
+                                    chunk_data['passage_id'] = int(passage_uid.split('_')[-1])
+                                    insert_logger.info(f"[Thread-{thread_id}] passage_id 필드 자동 추가 (passage_uid): {chunk_data['passage_id']}")
+                                except (ValueError, IndexError):
+                                    chunk_data['passage_id'] = 0
+                                    insert_logger.warning(f"[Thread-{thread_id}] passage_id 추출 실패, 기본값 사용: 0")
+                            else:
+                                chunk_data['passage_id'] = 0
+                                insert_logger.warning(f"[Thread-{thread_id}] passage_id 추출 실패, 기본값 사용: 0")
+                    
+                    return chunk_data
+                    
+                except Exception as e:
+                    # 오류 로깅
+                    error_trace = traceback.format_exc()
+                    insert_logger.error(f"[Thread-{thread_id}] 임베딩 생성 오류: {str(e)}\n{error_trace}")
+                    return None
+                    
+                finally:
+                    # 활성 GPU 작업 수 감소
+                    with self.__class__._task_lock:
+                        self.__class__._active_tasks = max(0, self.__class__._active_tasks - 1)
+                        
+        except Exception as e:
+            # 예외 처리
+            error_trace = traceback.format_exc()
+            logger.error(f"임베딩 준비 중 오류: {str(e)}\n{error_trace}")
+            return None
 
     def batch_insert_data(self, domain, data_batch):
         """
@@ -1693,12 +1728,22 @@ class InteractManager:
                             logger.info(f"항목에 passage_id 필드 자동 추가 (passage_uid에서 추출): {passage_uid} -> {item['passage_id']}")
                         except (ValueError, IndexError):
                             # 추출 실패 시 chunk_index 또는 기본값 사용
-                            item['passage_id'] = item.get('chunk_index', 0)
+                            item['passage_id'] = int(item.get('chunk_index', 0))
                             logger.info(f"항목에 passage_id 필드 자동 추가 (기본값): {item['passage_id']}")
                     else:
                         # passage_uid에서 추출할 수 없는 경우 chunk_index 또는 기본값 사용
-                        item['passage_id'] = item.get('chunk_index', 0)
+                        item['passage_id'] = int(item.get('chunk_index', 0))
                         logger.info(f"항목에 passage_id 필드 자동 추가 (기본값): {item['passage_id']}")
+                else:
+                    # passage_id가 있지만 정수형이 아닌 경우 변환
+                    if not isinstance(item['passage_id'], int):
+                        try:
+                            item['passage_id'] = int(item['passage_id'])
+                            logger.info(f"항목의 passage_id를 정수형으로 변환: {item['passage_id']}")
+                        except (ValueError, TypeError):
+                            # 변환 실패 시 기본값으로 설정
+                            item['passage_id'] = int(item.get('chunk_index', 0))
+                            logger.warning(f"항목의 passage_id를 정수형으로 변환 실패, 기본값 사용: {item['passage_id']}")
                 
                 # domain 필드가 없으면 현재 도메인 사용
                 if 'domain' not in item:
