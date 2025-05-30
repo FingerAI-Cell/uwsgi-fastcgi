@@ -1611,6 +1611,12 @@ class InteractManager:
                 passage_id = result_data.get('passage_id', chunk_index)
                 result_data['passage_uid'] = f"{doc_id}_{passage_id}"
                 self.insert_logger.info(f"[Thread-{thread_id}] passage_uid 생성: {result_data['passage_uid']} (청크#{chunk_index})")
+                
+            # domain 필드 확인 (필수 필드)
+            if 'domain' not in result_data:
+                # 원본 데이터에 domain이 있으면 가져오고, 없으면 기본값 설정
+                result_data['domain'] = chunk_data.get('domain', 'general')
+                self.insert_logger.info(f"[Thread-{thread_id}] domain 필드 추가: {result_data['domain']} (청크#{chunk_index})")
         else:
             self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 필드 누락: embedding 필드가 없음 (청크#{chunk_index})")
             return None  # 임베딩이 없으면 None 반환
@@ -1622,6 +1628,12 @@ class InteractManager:
         # 청크 번호 정보 업데이트
         if 'chunk_no' in prepared_data and prepared_data['chunk_no'] is not None:
             result_data['chunk_no'] = prepared_data['chunk_no']
+            
+        # 필수 필드 최종 확인
+        required_fields = ['passage_uid', 'doc_id', 'raw_doc_id', 'passage_id', 'domain', 'text', 'text_emb']
+        missing_fields = [field for field in required_fields if field not in result_data]
+        if missing_fields:
+            self.insert_logger.warning(f"[Thread-{thread_id}] 필수 필드 누락: {missing_fields} (청크#{chunk_index})")
             
         # 성공 로그
         self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 변환 완료: 청크#{chunk_index}")
@@ -1657,8 +1669,14 @@ class InteractManager:
                 logger.warning(f"유효한 데이터 항목이 없습니다 (도메인: {domain})")
                 return False
             
+            # 필수 필드 정의
+            required_fields = ['passage_uid', 'doc_id', 'raw_doc_id', 'passage_id', 'domain', 'text', 'text_emb']
+            
             # 필수 필드 확인 및 추가 - 모든 항목에 대해 확인
+            valid_items = []
             for item in valid_batch:
+                missing_fields = []
+                
                 # raw_doc_id 필드 확인 및 추가
                 if 'raw_doc_id' not in item and 'doc_id' in item:
                     item['raw_doc_id'] = item['doc_id']
@@ -1681,10 +1699,38 @@ class InteractManager:
                         # passage_uid에서 추출할 수 없는 경우 chunk_index 또는 기본값 사용
                         item['passage_id'] = item.get('chunk_index', 0)
                         logger.info(f"항목에 passage_id 필드 자동 추가 (기본값): {item['passage_id']}")
+                
+                # domain 필드가 없으면 현재 도메인 사용
+                if 'domain' not in item:
+                    item['domain'] = domain
+                    logger.info(f"항목에 domain 필드 자동 추가: {domain}")
+                
+                # 필수 필드 확인
+                missing_fields = [field for field in required_fields if field not in item]
+                
+                # 임베딩 벡터 유효성 검증 (필드는 있지만 빈 경우)
+                if 'text_emb' in item and (item['text_emb'] is None or len(item['text_emb']) == 0):
+                    missing_fields.append('text_emb (비어있음)')
+                    logger.warning(f"항목 {item.get('passage_uid', 'unknown')}의 text_emb 필드가 비어 있습니다")
+                
+                # 모든 필수 필드가 있는 경우만 유효 항목으로 포함
+                if not missing_fields:
+                    valid_items.append(item)
+                else:
+                    logger.warning(f"필수 필드 누락으로 항목 제외: {item.get('passage_uid', 'unknown')}, 누락 필드: {missing_fields}")
+            
+            # 필수 필드 검증 후 유효 항목 개수 확인
+            if len(valid_items) == 0:
+                logger.warning(f"필수 필드 검증 후 유효한 항목이 없습니다 (도메인: {domain})")
+                return False
+            
+            # 필터링 결과 로깅
+            if len(valid_items) < len(valid_batch):
+                logger.warning(f"필수 필드 검증 결과: {len(valid_items)}/{len(valid_batch)}개 항목만 유효함 (도메인: {domain})")
             
             # 상세 로깅 - 첫 번째 아이템의 키 확인
-            if valid_batch:
-                sample_item = valid_batch[0]
+            if valid_items:
+                sample_item = valid_items[0]
                 # 중요 필드 확인 로그
                 has_uid = 'passage_uid' in sample_item
                 has_doc_id = 'doc_id' in sample_item
@@ -1692,9 +1738,10 @@ class InteractManager:
                 has_passage_id = 'passage_id' in sample_item
                 has_text = 'text' in sample_item
                 has_text_emb = 'text_emb' in sample_item
+                has_domain = 'domain' in sample_item
                 
                 # 중요 필드 로깅
-                logger.info(f"배치 삽입 검증 - 필수 필드 존재 여부: passage_uid={has_uid}, doc_id={has_doc_id}, raw_doc_id={has_raw_doc_id}, passage_id={has_passage_id}, text={has_text}, text_emb={has_text_emb}")
+                logger.info(f"배치 삽입 검증 - 필수 필드 존재 여부: passage_uid={has_uid}, doc_id={has_doc_id}, raw_doc_id={has_raw_doc_id}, passage_id={has_passage_id}, domain={has_domain}, text={has_text}, text_emb={has_text_emb}")
                 
                 # 임베딩 벡터 확인
                 if has_text_emb:
@@ -1702,8 +1749,8 @@ class InteractManager:
                     logger.info(f"임베딩 벡터 샘플 길이: {emb_length}")
             
             # 배치 삽입 수행
-            logger.info(f"배치 삽입 시작: {len(valid_batch)}개 유효 항목 (도메인: {domain})")
-            insert_result = self._execute_batch_insert(valid_batch, domain)
+            logger.info(f"배치 삽입 시작: {len(valid_items)}개 유효 항목 (도메인: {domain})")
+            insert_result = self._execute_batch_insert(valid_items, domain)
             
             # 삽입 결과 로깅
             if insert_result:

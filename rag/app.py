@@ -875,10 +875,10 @@ def insert_data():
                                         'passage_id': index,  # passage_id 명시적 설정
                                         'text': chunk,
                                         'title': doc.get('title', ''),
-                                        'author': doc.get('author', ''),  # author 필드 추가
-                                        'domain': domain,
-                                        'info': doc.get('info', {}),  # info 필드 추가
-                                        'tags': doc.get('tags', {}),  # tags 필드 추가
+                                        'domain': domain,     # domain 필드 확실히 설정
+                                        'author': doc.get('author', ''), 
+                                        'info': doc.get('info', {}),
+                                        'tags': doc.get('tags', {}),
                                         'metadata': {
                                             'chunk_index': index,
                                             'source': 'api',
