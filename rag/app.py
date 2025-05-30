@@ -854,6 +854,9 @@ def insert_data():
                             doc_hashed_id = doc.get('id', 'unknown')
                             doc_title = doc.get('title', '제목 없음')
                             
+                            # raw_doc_id 준비
+                            raw_doc_id = doc.get('_raw_doc_id', doc_hashed_id)
+                            
                             # 임베딩 생성 함수 정의
                             def process_chunk(chunk, index):
                                 chunk_start = time.time()
@@ -866,6 +869,7 @@ def insert_data():
                                     chunk_data = {
                                         'id': chunk_id,
                                         'doc_id': doc_hashed_id,
+                                        'raw_doc_id': raw_doc_id,  # raw_doc_id 필드 추가
                                         'text': chunk,
                                         'title': doc.get('title', ''),
                                         'domain': domain,

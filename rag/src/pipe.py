@@ -1576,6 +1576,11 @@ class InteractManager:
         
         chunk_index = chunk_data.get('chunk_index', -1)
         
+        # raw_doc_id 필드 확인 (없으면 doc_id로 설정)
+        if 'raw_doc_id' not in chunk_data and 'doc_id' in chunk_data:
+            chunk_data['raw_doc_id'] = chunk_data['doc_id']
+            self.insert_logger.info(f"[Thread-{thread_id}] raw_doc_id 필드 추가: {chunk_data['raw_doc_id']} (청크#{chunk_index})")
+        
         # 디버그 로그
         self.insert_logger.info(f"[Thread-{thread_id}] prepare_data_with_embedding 호출됨 (청크#{chunk_index}) - 텍스트 길이: {len(chunk_data.get('text', ''))}")
         
@@ -1652,17 +1657,24 @@ class InteractManager:
                 logger.warning(f"유효한 데이터 항목이 없습니다 (도메인: {domain})")
                 return False
             
+            # raw_doc_id 필드 확인 및 추가 - 모든 항목에 대해 확인
+            for item in valid_batch:
+                if 'raw_doc_id' not in item and 'doc_id' in item:
+                    item['raw_doc_id'] = item['doc_id']
+                    logger.info(f"항목에 raw_doc_id 필드 자동 추가: {item.get('passage_uid', 'unknown')}")
+            
             # 상세 로깅 - 첫 번째 아이템의 키 확인
             if valid_batch:
                 sample_item = valid_batch[0]
                 # 중요 필드 확인 로그
                 has_uid = 'passage_uid' in sample_item
                 has_doc_id = 'doc_id' in sample_item
+                has_raw_doc_id = 'raw_doc_id' in sample_item
                 has_text = 'text' in sample_item
                 has_text_emb = 'text_emb' in sample_item
                 
                 # 중요 필드 로깅
-                logger.info(f"배치 삽입 검증 - 필수 필드 존재 여부: passage_uid={has_uid}, doc_id={has_doc_id}, text={has_text}, text_emb={has_text_emb}")
+                logger.info(f"배치 삽입 검증 - 필수 필드 존재 여부: passage_uid={has_uid}, doc_id={has_doc_id}, raw_doc_id={has_raw_doc_id}, text={has_text}, text_emb={has_text_emb}")
                 
                 # 임베딩 벡터 확인
                 if has_text_emb:
