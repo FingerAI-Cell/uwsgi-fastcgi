@@ -862,6 +862,29 @@ def insert_data():
                                 chunk_start = time.time()
                                 logger.info(f"process_chunk 호출: 청크 {index}")
                                 try:
+                                    # 청크 텍스트 유효성 확인 및 전처리
+                                    if isinstance(chunk, tuple):
+                                        logger.warning(f"청크 {index}가 튜플 형태로 전달됨, 첫 번째 요소만 사용")
+                                        if len(chunk) > 0:
+                                            chunk = chunk[0]  # 튜플의 첫 번째 요소만 사용
+                                        else:
+                                            logger.error(f"청크 {index}가 빈 튜플")
+                                            return None
+                                    
+                                    # 청크가 문자열이 아닌 경우 문자열로 변환
+                                    if not isinstance(chunk, str):
+                                        try:
+                                            chunk = str(chunk)
+                                            logger.warning(f"청크 {index}가 문자열이 아니어서 변환함: {type(chunk)}")
+                                        except Exception as e:
+                                            logger.error(f"청크 {index} 문자열 변환 실패: {str(e)}")
+                                            return None
+                                    
+                                    # 청크가 비어 있는지 확인
+                                    if not chunk or len(chunk.strip()) == 0:
+                                        logger.error(f"청크 {index}가 비어있음")
+                                        return None
+                                    
                                     # 청크 ID 생성
                                     chunk_id = f"{doc_hashed_id}_chunk_{index}"
                                     passage_uid = f"{doc_hashed_id}_{index}"  # passage_uid 생성
@@ -898,9 +921,54 @@ def insert_data():
                                     
                                     # 임베딩 벡터 확인 로그 및 성공 여부 판단
                                     if chunk_data_with_embedding and 'text_emb' in chunk_data_with_embedding:
-                                        emb_length = len(chunk_data_with_embedding['text_emb'])
-                                        emb_sample = str(chunk_data_with_embedding['text_emb'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
-                                        insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 완료: 벡터 크기={emb_length}, 샘플={emb_sample}, 소요시간={embedding_duration:.4f}초")
+                                        # 임베딩 벡터 유형 및 길이 확인
+                                        emb_vector = chunk_data_with_embedding['text_emb']
+                                        emb_type = type(emb_vector)
+                                        
+                                        # 임베딩이 리스트가 아닌 경우 리스트로 변환 시도
+                                        if not isinstance(emb_vector, list):
+                                            try:
+                                                if isinstance(emb_vector, tuple):
+                                                    chunk_data_with_embedding['text_emb'] = list(emb_vector)
+                                                    logger.info(f"청크 {index}의 임베딩 벡터를 튜플에서 리스트로 변환")
+                                                elif isinstance(emb_vector, np.ndarray):
+                                                    chunk_data_with_embedding['text_emb'] = emb_vector.tolist()
+                                                    logger.info(f"청크 {index}의 임베딩 벡터를 numpy 배열에서 리스트로 변환")
+                                                elif hasattr(emb_vector, 'tolist'):
+                                                    chunk_data_with_embedding['text_emb'] = emb_vector.tolist()
+                                                    logger.info(f"청크 {index}의 임베딩 벡터를 tolist() 메서드로 변환")
+                                                else:
+                                                    logger.warning(f"청크 {index}의 임베딩 벡터를 리스트로 변환할 수 없음: {emb_type}")
+                                            except Exception as e:
+                                                logger.error(f"청크 {index}의 임베딩 벡터 변환 실패: {str(e)}")
+                                        
+                                        # 벡터 길이 확인 및 수정
+                                        emb_length = len(chunk_data_with_embedding['text_emb']) if hasattr(chunk_data_with_embedding['text_emb'], '__len__') else 0
+                                        if emb_length != 1024:
+                                            logger.warning(f"청크 {index}의 임베딩 벡터 길이가 1024가 아님: {emb_length}")
+                                            # 길이가 맞지 않으면 0으로 채운 벡터 생성
+                                            if emb_length > 0:
+                                                if emb_length < 1024:
+                                                    # 부족한 경우 0으로 채움
+                                                    padding = [0.0] * (1024 - emb_length)
+                                                    chunk_data_with_embedding['text_emb'] = list(chunk_data_with_embedding['text_emb']) + padding
+                                                    logger.info(f"청크 {index}의 벡터 길이 부족, 0으로 채움: {emb_length} -> 1024")
+                                                else:
+                                                    # 길이가 초과하는 경우 자름
+                                                    chunk_data_with_embedding['text_emb'] = list(chunk_data_with_embedding['text_emb'])[:1024]
+                                                    logger.info(f"청크 {index}의 벡터 길이 초과, 자름: {emb_length} -> 1024")
+                                            else:
+                                                # 벡터가 비어있는 경우 0으로 채운 벡터 생성
+                                                chunk_data_with_embedding['text_emb'] = [0.0] * 1024
+                                                logger.info(f"청크 {index}의 벡터가 비어있어 0으로 채운 벡터 생성")
+                                        
+                                        # 임베딩 벡터 정보 로깅
+                                        try:
+                                            emb_sample = str(chunk_data_with_embedding['text_emb'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
+                                            insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 완료: 벡터 타입={type(chunk_data_with_embedding['text_emb'])}, 벡터 크기={len(chunk_data_with_embedding['text_emb'])}, 샘플={emb_sample}, 소요시간={embedding_duration:.4f}초")
+                                        except Exception as log_error:
+                                            insert_logger.error(f"[Thread-{thread_id}] 청크 {index} 임베딩 로깅 오류: {str(log_error)}")
+                                        
                                         return chunk_data_with_embedding  # 성공한 경우 임베딩이 추가된 데이터 반환
                                     else:
                                         logger.warning(f"청크 {index}의 임베딩 생성 실패: prepare_data_with_embedding이 None을 반환함")
@@ -908,6 +976,8 @@ def insert_data():
                                     
                                 except Exception as e:
                                     logger.error(f"청크 처리 오류: {str(e)}")
+                                    import traceback
+                                    logger.error(f"스택 트레이스: {traceback.format_exc()}")
                                     return None
                             
                             # 청크 병렬 처리

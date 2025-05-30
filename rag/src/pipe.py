@@ -1376,10 +1376,36 @@ class InteractManager:
                     logger.warning(f"임베딩 벡터 없음, 항목 건너뜀: {item.get('passage_uid', 'unknown')}")
                     continue
                 
-                # 임베딩 벡터 데이터 유형 확인 및 리스트로 변환
-                if isinstance(item['text_emb'], tuple):
-                    item['text_emb'] = list(item['text_emb'])
-                    logger.info(f"임베딩 벡터 튜플을 리스트로 변환: {item.get('passage_uid', 'unknown')}")
+                # 벡터 타입 사전 검증 및 변환
+                try:
+                    # 임베딩 벡터 데이터 유형 확인 및 리스트로 변환
+                    emb_vector = item['text_emb']
+                    if not isinstance(emb_vector, list):
+                        logger.info(f"임베딩 벡터 타입 변환 필요: {type(emb_vector)}, passage_uid={item.get('passage_uid', 'unknown')}")
+                        
+                        if isinstance(emb_vector, tuple):
+                            item['text_emb'] = list(emb_vector)
+                            logger.info(f"임베딩 벡터 튜플을 리스트로 변환: passage_uid={item.get('passage_uid', 'unknown')}")
+                        elif isinstance(emb_vector, np.ndarray):
+                            item['text_emb'] = emb_vector.tolist()
+                            logger.info(f"임베딩 벡터 numpy 배열을 리스트로 변환: passage_uid={item.get('passage_uid', 'unknown')}")
+                        elif hasattr(emb_vector, 'tolist'):
+                            item['text_emb'] = emb_vector.tolist()
+                            logger.info(f"임베딩 벡터 객체를 tolist() 메서드로 리스트 변환: passage_uid={item.get('passage_uid', 'unknown')}")
+                        elif hasattr(emb_vector, '__iter__'):
+                            item['text_emb'] = list(emb_vector)
+                            logger.info(f"임베딩 벡터 이터러블 객체를 리스트로 변환: passage_uid={item.get('passage_uid', 'unknown')}")
+                        else:
+                            logger.warning(f"임베딩 벡터를 리스트로 변환할 수 없음, 항목 건너뜀: {item.get('passage_uid', 'unknown')}")
+                            continue
+                except Exception as e:
+                    logger.error(f"임베딩 벡터 처리 중 오류 발생: {str(e)}, 항목 건너뜀: {item.get('passage_uid', 'unknown')}")
+                    continue
+                
+                # 임베딩 벡터 길이 확인
+                if len(item['text_emb']) != 1024:
+                    logger.warning(f"임베딩 벡터 길이가 1024가 아님: {len(item['text_emb'])}, 항목 건너뜀: {item.get('passage_uid', 'unknown')}")
+                    continue
                 
                 valid_batch_data.append(item)
             
@@ -1414,9 +1440,19 @@ class InteractManager:
                             # passage_uid 업데이트
                             new_item['passage_uid'] = f"{item['passage_uid']}_{idx}"
                             
-                            # 임베딩 벡터 유형 확인
-                            if isinstance(new_item['text_emb'], tuple):
-                                new_item['text_emb'] = list(new_item['text_emb'])
+                            # 임베딩 벡터 유형 재확인 및 변환
+                            if not isinstance(new_item['text_emb'], list):
+                                try:
+                                    if isinstance(new_item['text_emb'], tuple):
+                                        new_item['text_emb'] = list(new_item['text_emb'])
+                                    elif isinstance(new_item['text_emb'], np.ndarray):
+                                        new_item['text_emb'] = new_item['text_emb'].tolist()
+                                    else:
+                                        logger.warning(f"하위 청크의 임베딩 벡터를 리스트로 변환할 수 없음, 건너뜀")
+                                        continue
+                                except Exception as e:
+                                    logger.error(f"하위 청크 임베딩 벡터 변환 중 오류: {str(e)}")
+                                    continue
                                 
                             final_batch.append(new_item)
                     else:
@@ -1427,44 +1463,76 @@ class InteractManager:
                             except (ValueError, TypeError):
                                 # 변환 실패 시 기본값 사용
                                 item['passage_id'] = 0
+                                
+                        # 임베딩 벡터 타입 최종 확인
+                        if not isinstance(item['text_emb'], list):
+                            try:
+                                if isinstance(item['text_emb'], tuple):
+                                    item['text_emb'] = list(item['text_emb'])
+                                elif isinstance(item['text_emb'], np.ndarray):
+                                    item['text_emb'] = item['text_emb'].tolist()
+                                else:
+                                    logger.warning(f"최종 임베딩 벡터를 리스트로 변환할 수 없음, 건너뜀")
+                                    continue
+                            except Exception as e:
+                                logger.error(f"최종 임베딩 벡터 변환 중 오류: {str(e)}")
+                                continue
+                        
                         final_batch.append(item)
                 
                 try:
                     # 배치 삽입 시도
                     if final_batch:
-                        # 삽입 전 모든 항목의 text_emb 타입 확인
+                        # 삽입 전 모든 항목의 text_emb 타입 검증 - 최종 안전장치
                         for idx, item in enumerate(final_batch):
+                            # text_emb 필드가 없는 경우는 이미 필터링되었으므로 여기서는 타입만 확인
                             if not isinstance(item['text_emb'], list):
-                                logger.warning(f"항목 {idx}의 text_emb 유형 변환: {type(item['text_emb'])} -> list")
                                 try:
                                     if isinstance(item['text_emb'], tuple):
                                         item['text_emb'] = list(item['text_emb'])
+                                        logger.warning(f"최종 검증에서 튜플 발견 및 변환: 항목 {idx}, passage_uid={item.get('passage_uid', 'unknown')}")
                                     elif isinstance(item['text_emb'], np.ndarray):
                                         item['text_emb'] = item['text_emb'].tolist()
+                                        logger.warning(f"최종 검증에서 numpy 배열 발견 및 변환: 항목 {idx}, passage_uid={item.get('passage_uid', 'unknown')}")
                                     else:
-                                        # 다른 형식인 경우 일단 문자열로 변환 후 리스트로 파싱 시도
-                                        try:
-                                            item['text_emb'] = list(map(float, str(item['text_emb']).strip('()[]').split(',')))
-                                        except:
-                                            logger.error(f"text_emb 변환 실패: 알 수 없는 타입 {type(item['text_emb'])}, 항목 제외")
-                                            final_batch.remove(item)
+                                        logger.error(f"최종 검증에서 변환 불가능한 타입 발견: {type(item['text_emb'])}, 항목 제외")
+                                        final_batch.remove(item)
                                 except Exception as e:
-                                    logger.error(f"text_emb 변환 실패: {str(e)}, 항목 제외")
+                                    logger.error(f"최종 검증 중 변환 실패: {str(e)}, 항목 제외")
                                     final_batch.remove(item)
+                            
+                            # 벡터 길이 최종 확인
+                            if len(item['text_emb']) != 1024:
+                                logger.error(f"최종 검증에서 잘못된 벡터 길이 발견: {len(item['text_emb'])}, 항목 제외")
+                                final_batch.remove(item)
                         
                         # 삽입 직전 최종 확인 로그
-                        logger.info(f"최종 배치 삽입 준비: {len(final_batch)}개 항목, 첫 항목 text_emb 타입: {type(final_batch[0]['text_emb']) if final_batch else 'N/A'}")
-                        
-                        collection.insert(final_batch)
-                        total_success += len(final_batch)
-                        logger.info(f"배치 {i//max_batch_size + 1} 삽입 성공: {len(final_batch)}개 항목")
-                        
-                        # 성공 후 바로 flush 추가
-                        try:
-                            collection.flush()
-                            logger.info(f"배치 {i//max_batch_size + 1} 즉시 flush 성공")
-                        except Exception as flush_error:
-                            logger.warning(f"배치 {i//max_batch_size + 1} 즉시 flush 실패: {str(flush_error)}")
+                        if final_batch:
+                            logger.info(f"최종 배치 삽입 준비: {len(final_batch)}개 항목")
+                            
+                            # 벡터 인코딩 오류 방지를 위해 문자열로 변환하여 로깅
+                            first_item_info = "N/A"
+                            if final_batch:
+                                try:
+                                    first_item = final_batch[0]
+                                    first_emb_type = type(first_item['text_emb'])
+                                    first_emb_len = len(first_item['text_emb']) if hasattr(first_item['text_emb'], '__len__') else 'unknown'
+                                    first_item_info = f"타입: {first_emb_type}, 길이: {first_emb_len}"
+                                except:
+                                    pass
+                            logger.info(f"첫 항목 text_emb 정보: {first_item_info}")
+                            
+                            # 실제 삽입 시도
+                            collection.insert(final_batch)
+                            total_success += len(final_batch)
+                            logger.info(f"배치 {i//max_batch_size + 1} 삽입 성공: {len(final_batch)}개 항목")
+                            
+                            # 성공 후 바로 flush 추가
+                            try:
+                                collection.flush()
+                                logger.info(f"배치 {i//max_batch_size + 1} 즉시 flush 성공")
+                            except Exception as flush_error:
+                                logger.warning(f"배치 {i//max_batch_size + 1} 즉시 flush 실패: {str(flush_error)}")
                     
                     # 주기적으로 flush 및 메모리 정리
                     if (i + max_batch_size) % (max_batch_size * 2) == 0:
@@ -1477,34 +1545,48 @@ class InteractManager:
                     # 개별 삽입 시도
                     for item in final_batch:
                         try:
-                            # 임베딩 벡터 유형 확인
+                            # 임베딩 벡터 유형 최종 확인
                             if not isinstance(item['text_emb'], list):
                                 try:
                                     if isinstance(item['text_emb'], tuple):
                                         item['text_emb'] = list(item['text_emb'])
                                     elif isinstance(item['text_emb'], np.ndarray):
                                         item['text_emb'] = item['text_emb'].tolist()
+                                    elif hasattr(item['text_emb'], 'tolist'):
+                                        item['text_emb'] = item['text_emb'].tolist()
+                                    elif hasattr(item['text_emb'], '__iter__'):
+                                        item['text_emb'] = list(item['text_emb'])
                                     else:
-                                        # 다른 형식인 경우 일단 문자열로 변환 후 리스트로 파싱 시도
-                                        try:
-                                            item['text_emb'] = list(map(float, str(item['text_emb']).strip('()[]').split(',')))
-                                        except:
-                                            logger.error(f"개별 항목 text_emb 변환 실패: 알 수 없는 타입 {type(item['text_emb'])}, 항목 건너뜀")
-                                            continue
+                                        logger.error(f"개별 항목 text_emb 변환 불가: 알 수 없는 타입 {type(item['text_emb'])}, 항목 건너뜀")
+                                        continue
                                 except Exception as e:
                                     logger.error(f"개별 항목 text_emb 변환 실패: {str(e)}, 항목 건너뜀")
                                     continue
+                            
+                            # 벡터 길이 확인
+                            if len(item['text_emb']) != 1024:
+                                logger.error(f"개별 항목 벡터 길이 오류: {len(item['text_emb'])}, 항목 건너뜀")
+                                continue
                                 
+                            # 단일 항목 삽입
                             collection.insert([item])
                             total_success += 1
                             logger.info(f"개별 항목 삽입 성공: {item.get('passage_uid', 'unknown')}")
                         except Exception as item_error:
                             logger.error(f"개별 항목 삽입 실패: {str(item_error)}, 항목: {item.get('passage_uid', 'unknown')}")
                             
-                    collection.flush()
+                    # 개별 삽입 후 flush
+                    try:
+                        collection.flush()
+                    except Exception as flush_error:
+                        logger.warning(f"개별 삽입 후 flush 실패: {str(flush_error)}")
                     
             # 최종 flush
-            collection.flush()
+            try:
+                collection.flush()
+                logger.info("최종 flush 완료")
+            except Exception as final_flush_error:
+                logger.warning(f"최종 flush 실패: {str(final_flush_error)}")
             
             # 추가 검증: flush 후 데이터가 저장되었는지 확인
             try:
@@ -1534,6 +1616,8 @@ class InteractManager:
             
         except Exception as e:
             logger.error(f"배치 삽입 중 예외 발생: {str(e)}")
+            import traceback
+            logger.error(f"스택 트레이스: {traceback.format_exc()}")
             return False
     
     def flush_all_batches(self):
@@ -1653,6 +1737,29 @@ class InteractManager:
                 insert_logger.error(f"[Thread-{thread_id}] 필수 필드 누락: {missing_fields} (passage_uid: {chunk_data.get('passage_uid', 'unknown')})")
                 return None
             
+            # 텍스트 타입 확인 및 처리
+            chunk_text = chunk_data.get('text', '')
+            if isinstance(chunk_text, tuple):
+                insert_logger.warning(f"[Thread-{thread_id}] 텍스트가 튜플 형태: {chunk_data.get('passage_uid', 'unknown')}")
+                if len(chunk_text) > 0:
+                    chunk_data['text'] = chunk_text[0]  # 튜플의 첫 번째 요소만 사용
+                else:
+                    insert_logger.error(f"[Thread-{thread_id}] 빈 튜플 텍스트: {chunk_data.get('passage_uid', 'unknown')}")
+                    return None
+            
+            if not isinstance(chunk_data['text'], str):
+                try:
+                    chunk_data['text'] = str(chunk_data['text'])
+                    insert_logger.warning(f"[Thread-{thread_id}] 텍스트가 문자열이 아니어서 변환함: {chunk_data.get('passage_uid', 'unknown')}")
+                except Exception as e:
+                    insert_logger.error(f"[Thread-{thread_id}] 텍스트 변환 실패: {str(e)}")
+                    return None
+            
+            # 텍스트가 비어 있는지 확인
+            if not chunk_data['text'] or len(chunk_data['text'].strip()) == 0:
+                insert_logger.error(f"[Thread-{thread_id}] 빈 텍스트: {chunk_data.get('passage_uid', 'unknown')}")
+                return None
+            
             # passage_id 확인 및 정수형 변환
             if 'passage_id' in chunk_data:
                 if not isinstance(chunk_data['passage_id'], int):
@@ -1701,23 +1808,89 @@ class InteractManager:
                     insert_logger.info(f"[Thread-{thread_id}] 임베딩 시작: passage_uid={chunk_id}, 텍스트 길이={chunk_len} (대기시간={sem_wait_time:.4f}초)")
                     
                     # 임베딩 생성
-                    emb_vector = self.emb_model.bge_embed_data(chunk_text)
+                    emb_vector = None
+                    try:
+                        emb_vector = self.emb_model.bge_embed_data(chunk_text)
+                    except Exception as emb_error:
+                        insert_logger.error(f"[Thread-{thread_id}] 임베딩 생성 오류: {str(emb_error)}")
+                        # 짧은 텍스트로 재시도
+                        if len(chunk_text) > 200:
+                            short_text = chunk_text[:200] + "..."
+                            insert_logger.info(f"[Thread-{thread_id}] 짧은 텍스트로 재시도: {len(short_text)}자")
+                            try:
+                                emb_vector = self.emb_model.bge_embed_data(short_text)
+                                insert_logger.info(f"[Thread-{thread_id}] 짧은 텍스트로 임베딩 성공")
+                            except Exception as retry_error:
+                                insert_logger.error(f"[Thread-{thread_id}] 재시도 실패: {str(retry_error)}")
+                                return None
+                        else:
+                            return None
                     
                     # 임베딩 소요 시간
                     embed_time = time.time() - embed_start
                     
+                    # 임베딩 벡터 유효성 검사
+                    if emb_vector is None:
+                        insert_logger.error(f"[Thread-{thread_id}] 임베딩 벡터가 None: {chunk_id}")
+                        return None
+                    
                     # 임베딩 결과 저장
                     chunk_data['text_emb'] = emb_vector
                     
-                    # 임베딩 벡터 유효성 확인 로그
-                    emb_length = len(emb_vector) if emb_vector is not None else 0
-                    emb_sample = str(emb_vector[:3])[:30] + "..." if emb_length > 0 else "비어있음"
-                    insert_logger.info(f"[Thread-{thread_id}] 임베딩 완료: passage_uid={chunk_id}, 벡터 크기={emb_length}, 샘플={emb_sample}, 소요시간={embed_time:.4f}초")
+                    # 임베딩 벡터 타입 확인 및 변환
+                    emb_type = type(emb_vector)
                     
-                    # 임베딩 벡터가 튜플인 경우 리스트로 변환
-                    if isinstance(chunk_data['text_emb'], tuple):
-                        chunk_data['text_emb'] = list(chunk_data['text_emb'])
-                        insert_logger.info(f"[Thread-{thread_id}] 임베딩 벡터를 튜플에서 리스트로 변환: passage_uid={chunk_id}")
+                    # 임베딩 벡터가 리스트가 아닌 경우 변환
+                    if not isinstance(emb_vector, list):
+                        try:
+                            if isinstance(emb_vector, tuple):
+                                chunk_data['text_emb'] = list(emb_vector)
+                                insert_logger.info(f"[Thread-{thread_id}] 임베딩 벡터를 튜플에서 리스트로 변환: {emb_type} -> list")
+                            elif isinstance(emb_vector, np.ndarray):
+                                chunk_data['text_emb'] = emb_vector.tolist()
+                                insert_logger.info(f"[Thread-{thread_id}] 임베딩 벡터를 numpy 배열에서 리스트로 변환: {emb_type} -> list")
+                            elif hasattr(emb_vector, 'tolist'):
+                                chunk_data['text_emb'] = emb_vector.tolist()
+                                insert_logger.info(f"[Thread-{thread_id}] 임베딩 벡터를 tolist() 메서드로 변환: {emb_type} -> list")
+                            elif hasattr(emb_vector, '__iter__'):
+                                chunk_data['text_emb'] = list(emb_vector)
+                                insert_logger.info(f"[Thread-{thread_id}] 임베딩 벡터를 이터러블 객체에서 리스트로 변환: {emb_type} -> list")
+                            else:
+                                insert_logger.error(f"[Thread-{thread_id}] 임베딩 벡터를 리스트로 변환할 수 없음: {emb_type}")
+                                return None
+                        except Exception as convert_error:
+                            insert_logger.error(f"[Thread-{thread_id}] 임베딩 벡터 변환 오류: {str(convert_error)}")
+                            return None
+                    
+                    # 벡터 길이 확인
+                    emb_length = len(chunk_data['text_emb']) if isinstance(chunk_data['text_emb'], (list, tuple, np.ndarray)) else 0
+                    if emb_length != 1024:
+                        insert_logger.error(f"[Thread-{thread_id}] 임베딩 벡터 길이가 1024가 아님: {emb_length}")
+                        
+                        # 길이가 맞지 않으면 0으로 채운 벡터 생성
+                        if emb_length > 0:
+                            # 벡터가 있지만 길이가 다른 경우
+                            if emb_length < 1024:
+                                # 부족한 경우 0으로 채움
+                                padding = [0.0] * (1024 - emb_length)
+                                chunk_data['text_emb'] = list(chunk_data['text_emb']) + padding
+                                insert_logger.warning(f"[Thread-{thread_id}] 벡터 길이 부족, 0으로 채움: {emb_length} -> 1024")
+                            else:
+                                # 길이가 초과하는 경우 자름
+                                chunk_data['text_emb'] = list(chunk_data['text_emb'])[:1024]
+                                insert_logger.warning(f"[Thread-{thread_id}] 벡터 길이 초과, 자름: {emb_length} -> 1024")
+                        else:
+                            # 벡터가 비어있는 경우 0으로 채운 벡터 생성
+                            chunk_data['text_emb'] = [0.0] * 1024
+                            insert_logger.warning(f"[Thread-{thread_id}] 빈 벡터, 0으로 채운 벡터 생성")
+                    
+                    # 임베딩 벡터 샘플 로깅 (안전하게 처리)
+                    try:
+                        emb_sample = str(chunk_data['text_emb'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
+                    except:
+                        emb_sample = "로깅 불가"
+                    
+                    insert_logger.info(f"[Thread-{thread_id}] 임베딩 완료: passage_uid={chunk_id}, 벡터 타입={type(chunk_data['text_emb'])}, 벡터 크기={len(chunk_data['text_emb'])}, 샘플={emb_sample}, 소요시간={embed_time:.4f}초")
                     
                     # 필수 필드 유효성 검증 - 특히 passage_id
                     if 'passage_id' not in chunk_data or chunk_data['passage_id'] is None:
@@ -1738,8 +1911,23 @@ class InteractManager:
                                 chunk_data['passage_id'] = 0
                                 insert_logger.warning(f"[Thread-{thread_id}] passage_id 추출 실패, 기본값 사용: 0")
                     
+                    # 최종 데이터 구조 검증
+                    final_check_fields = ['passage_uid', 'doc_id', 'raw_doc_id', 'passage_id', 'text', 'text_emb', 'domain']
+                    for field in final_check_fields:
+                        if field not in chunk_data:
+                            if field == 'raw_doc_id' and 'doc_id' in chunk_data:
+                                # raw_doc_id가 없는 경우 doc_id를 사용
+                                chunk_data['raw_doc_id'] = chunk_data['doc_id']
+                                insert_logger.info(f"[Thread-{thread_id}] raw_doc_id 필드 자동 추가: {chunk_data['raw_doc_id']}")
+                            elif field == 'domain' and 'metadata' in chunk_data and 'domain' in chunk_data['metadata']:
+                                # metadata에서 domain 정보 가져오기
+                                chunk_data['domain'] = chunk_data['metadata']['domain']
+                                insert_logger.info(f"[Thread-{thread_id}] domain 필드 자동 추가: {chunk_data['domain']}")
+                            else:
+                                insert_logger.warning(f"[Thread-{thread_id}] 중요 필드 {field} 누락됨")
+                    
                     # 최종 검증 로그
-                    insert_logger.info(f"[Thread-{thread_id}] 최종 데이터 검증: passage_id={chunk_data.get('passage_id', 'None')}, 타입={type(chunk_data.get('passage_id', None))}")
+                    insert_logger.info(f"[Thread-{thread_id}] 최종 데이터 검증: passage_id={chunk_data.get('passage_id', 'None')}, 타입={type(chunk_data.get('passage_id', None))}, 벡터 타입={type(chunk_data.get('text_emb', None))}")
                     
                     return chunk_data
                     

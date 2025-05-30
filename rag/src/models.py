@@ -209,10 +209,29 @@ class EmbModel(Model):
             logging.error("Model not properly loaded")
             raise RuntimeError("Embedding model not loaded")
         
-        # 입력 텍스트 확인
-        if not text or len(text) == 0:
+        # 입력 텍스트 확인 및 전처리
+        if not text:
             logging.warning("Empty text provided for embedding")
             # 빈 텍스트에 대해 0으로 채워진 임베딩 반환
+            return [0.0] * 1024
+            
+        # 텍스트가 튜플인 경우 첫 번째 요소만 사용
+        if isinstance(text, tuple):
+            logging.warning(f"[Thread-{thread_id}] 텍스트가 튜플 형태로 전달됨, 첫 번째 요소만 사용")
+            text = text[0] if len(text) > 0 else ""
+            
+        # 텍스트가 문자열이 아닌 경우 문자열로 변환
+        if not isinstance(text, str):
+            logging.warning(f"[Thread-{thread_id}] 텍스트가 문자열이 아님: {type(text)}, 문자열로 변환 시도")
+            try:
+                text = str(text)
+            except Exception as e:
+                logging.error(f"[Thread-{thread_id}] 텍스트 변환 실패: {str(e)}")
+                return [0.0] * 1024
+        
+        # 텍스트가 비어있는 경우
+        if len(text) == 0:
+            logging.warning("Empty text after preprocessing")
             return [0.0] * 1024
         
         try:
@@ -223,26 +242,77 @@ class EmbModel(Model):
                 # 텍스트가 너무 길면 잘라내기
                 if len(text) > 5000:  # 안전을 위한 최대 길이 제한
                     text = text[:5000]
+                    logging.warning(f"[Thread-{thread_id}] 텍스트 길이가 5000자를 초과하여 잘랐습니다.")
                 
                 # 모드에 따라 적절한 최대 길이 설정
                 mode = "gpu" if torch.cuda.is_available() and self.gpu_initialized else "cpu"
                 max_length = 512 if mode == "cpu" else 1024  # CPU에서는 더 작은 값 사용
                 
-                # 임베딩 생성
-                embeddings = self.bge_emb.encode(text, max_length=max_length)['dense_vecs']
+                try:
+                    # 임베딩 생성
+                    embeddings = self.bge_emb.encode(text, max_length=max_length)['dense_vecs']
+                except Exception as encode_error:
+                    logging.error(f"[Thread-{thread_id}] 임베딩 인코딩 오류: {str(encode_error)}")
+                    # 더 간단한 텍스트로 재시도
+                    fallback_text = text[:100] + "..." if len(text) > 100 else text
+                    try:
+                        embeddings = self.bge_emb.encode(fallback_text, max_length=256)['dense_vecs']
+                        logging.info(f"[Thread-{thread_id}] 대체 텍스트로 임베딩 성공")
+                    except:
+                        logging.error(f"[Thread-{thread_id}] 대체 텍스트 임베딩도 실패")
+                        return [0.0] * 1024
             
             # 임베딩 소요 시간
             embed_time = time.time() - embed_start
             
             # 임베딩 형태 확인 및 처리
             if isinstance(embeddings, list) and len(embeddings) > 0:
-                result = embeddings[0]  # 첫 번째 임베딩 반환
-            elif isinstance(embeddings, (np.ndarray, torch.Tensor)):
-                # numpy 배열 또는 tensor인 경우
-                result = embeddings.tolist() if isinstance(embeddings, torch.Tensor) else embeddings.tolist()
+                # 리스트인 경우 첫 번째 요소 사용
+                if isinstance(embeddings[0], (list, np.ndarray)):
+                    result = embeddings[0]
+                elif isinstance(embeddings[0], torch.Tensor):
+                    result = embeddings[0].tolist()
+                else:
+                    result = embeddings[0] if hasattr(embeddings[0], '__iter__') else embeddings
+            elif isinstance(embeddings, np.ndarray):
+                # numpy 배열인 경우
+                if embeddings.ndim > 1 and embeddings.shape[0] > 0:
+                    result = embeddings[0].tolist()
+                else:
+                    result = embeddings.tolist()
+            elif isinstance(embeddings, torch.Tensor):
+                # tensor인 경우
+                if embeddings.dim() > 1 and embeddings.shape[0] > 0:
+                    result = embeddings[0].tolist()
+                else:
+                    result = embeddings.tolist()
+            elif isinstance(embeddings, tuple):
+                # 튜플인 경우 리스트로 변환
+                logging.warning(f"[Thread-{thread_id}] 임베딩 결과가 튜플: {len(embeddings)}")
+                result = list(embeddings)
             else:
-                logging.warning(f"Unexpected embedding format: {type(embeddings)}")
+                logging.warning(f"[Thread-{thread_id}] 예상치 못한 임베딩 형식: {type(embeddings)}")
                 result = [0.0] * 1024  # 기본 임베딩 반환
+            
+            # 결과가 리스트가 아니면 리스트로 변환 시도
+            if not isinstance(result, list):
+                try:
+                    if hasattr(result, 'tolist'):
+                        result = result.tolist()
+                    elif hasattr(result, '__iter__'):
+                        result = list(result)
+                    else:
+                        logging.warning(f"[Thread-{thread_id}] 임베딩 결과를 리스트로 변환할 수 없음: {type(result)}")
+                        result = [0.0] * 1024
+                except Exception as convert_error:
+                    logging.error(f"[Thread-{thread_id}] 임베딩 결과 변환 오류: {str(convert_error)}")
+                    result = [0.0] * 1024
+            
+            # 결과 차원 확인
+            if len(result) != 1024:
+                logging.warning(f"[Thread-{thread_id}] 임베딩 벡터 크기가 1024가 아님: {len(result)}")
+                # 크기가 맞지 않으면 0으로 채워진 벡터 반환
+                result = [0.0] * 1024
             
             # 임베딩 완료 로그 - 핵심 정보만 유지
             end_time = time.time()
@@ -253,12 +323,14 @@ class EmbModel(Model):
                 logging.warning(f"[Thread-{thread_id}] ⚠️ 비정상적으로 긴 임베딩 총 처리 시간: {total_time:.2f}초")
             
             # 성능 요약 로그
-            logging.info(f"[Thread-{thread_id}] 임베딩 완료: 총 {total_time:.4f}초, 계산={embed_time:.4f}초")
+            logging.info(f"[Thread-{thread_id}] 임베딩 완료: 총 {total_time:.4f}초, 계산={embed_time:.4f}초, 결과 길이={len(result)}")
             
             return result
             
         except Exception as e:
             logging.error(f"임베딩 생성 오류: {str(e)}")
+            import traceback
+            logging.error(f"스택 트레이스: {traceback.format_exc()}")
             # 오류 시 기본 임베딩 반환
             return [0.0] * 1024
 
