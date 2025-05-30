@@ -823,22 +823,14 @@ def insert_data():
                             # GPU 세마포어 상태 확인 - 중요 정보이므로 유지
                             if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                                 try:
-                                    # InteractManager에서 세마포어 정보 가져오기
-                                    gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
-                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
-                                    
                                     # 새로운 메서드 사용
-                                    if hasattr(interact_manager.emb_model, 'get_active_workers') and hasattr(interact_manager.emb_model, 'get_max_workers'):
-                                        active_workers = interact_manager.emb_model.get_active_workers()
-                                        max_workers = interact_manager.emb_model.get_max_workers()
-                                    else:
-                                        # 이전 방식 (fallback)
-                                        max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
-                                        active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
+                                    max_workers = InteractManager.get_max_workers()
+                                    active_workers = InteractManager.get_active_workers()
+                                    sem_value = InteractManager.get_gpu_semaphore_value()
                                     
                                     # 간소화된 로그 - 중요 정보만 출력
                                     # 이미 위에서 설정한 doc_hashed_id 사용
-                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hashed_id})")
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (세마포어 값: {sem_value}, 문서 ID: {doc_hashed_id})")
                                 except Exception as e:
                                     insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
@@ -1006,22 +998,14 @@ def insert_data():
                             # GPU 세마포어 상태 확인 - 중요 정보이므로 유지
                             if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                                 try:
-                                    # InteractManager에서 세마포어 정보 가져오기
-                                    gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
-                                    sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
-                                    
                                     # 새로운 메서드 사용
-                                    if hasattr(interact_manager.emb_model, 'get_active_workers') and hasattr(interact_manager.emb_model, 'get_max_workers'):
-                                        active_workers = interact_manager.emb_model.get_active_workers()
-                                        max_workers = interact_manager.emb_model.get_max_workers()
-                                    else:
-                                        # 이전 방식 (fallback)
-                                        max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
-                                        active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
+                                    max_workers = InteractManager.get_max_workers()
+                                    active_workers = InteractManager.get_active_workers()
+                                    sem_value = InteractManager.get_gpu_semaphore_value()
                                     
                                     # 간소화된 로그 - 중요 정보만 출력
                                     # 이미 위에서 설정한 doc_hashed_id 사용
-                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (문서 ID: {doc_hashed_id})")
+                                    insert_logger.info(f"[Thread-{thread_id}] 문서 처리 시작 - GPU 자원: {active_workers}/{max_workers} 사용 중 (세마포어 값: {sem_value}, 문서 ID: {doc_hashed_id})")
                                 except Exception as e:
                                     insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
@@ -1102,24 +1086,13 @@ def insert_data():
                     # 전체 GPU 세마포어 상태 확인
                     if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                         try:
-                            gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
-                            # 더 안전한 세마포어 값 확인 방법
-                            sem_value = 0
-                            if hasattr(gpu_sem, '_value'):  # threading.Semaphore 내부 구현
-                                sem_value = gpu_sem._value
-                            elif hasattr(gpu_sem, '_sem') and hasattr(gpu_sem._sem, '_value'):  # BoundedSemaphore 구현
-                                sem_value = gpu_sem._sem._value
-                                
-                            # 최대 워커 수와 현재 사용 중인 워커 수 계산 (새로운 메서드 사용)
-                            if hasattr(interact_manager.emb_model, 'get_active_workers') and hasattr(interact_manager.emb_model, 'get_max_workers'):
-                                active_workers = interact_manager.emb_model.get_active_workers()
-                                max_workers = interact_manager.emb_model.get_max_workers()
-                            else:
-                                # 이전 방식 (fallback)
-                                max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
-                                active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
-                                
-                            insert_logger.info(f"문서 처리 시작 전 GPU 세마포어 상태: 활성작업={active_workers}/{max_workers}, 세마포어값={sem_value}")
+                            from rag.src.pipe import InteractManager
+                            # 새로운 메서드 사용
+                            max_workers = InteractManager.get_max_workers()
+                            active_workers = InteractManager.get_active_workers()
+                            sem_value = InteractManager.get_gpu_semaphore_value()
+                            
+                            insert_logger.info(f"문서 처리 완료 후 GPU 세마포어 상태: 활성작업={active_workers}/{max_workers}, 세마포어값={sem_value}")
                         except Exception as sem_err:
                             insert_logger.warning(f"GPU 세마포어 상태 확인 실패: {str(sem_err)}")
                     
@@ -1141,23 +1114,12 @@ def insert_data():
                     # 전체 GPU 세마포어 상태 확인
                     if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                         try:
-                            gpu_sem = interact_manager.emb_model.get_gpu_semaphore()
-                            # 더 안전한 세마포어 값 확인 방법
-                            sem_value = 0
-                            if hasattr(gpu_sem, '_value'):  # threading.Semaphore 내부 구현
-                                sem_value = gpu_sem._value
-                            elif hasattr(gpu_sem, '_sem') and hasattr(gpu_sem._sem, '_value'):  # BoundedSemaphore 구현
-                                sem_value = gpu_sem._sem._value
-                                
-                            # 최대 워커 수와 현재 사용 중인 워커 수 계산 (새로운 메서드 사용)
-                            if hasattr(interact_manager.emb_model, 'get_active_workers') and hasattr(interact_manager.emb_model, 'get_max_workers'):
-                                active_workers = interact_manager.emb_model.get_active_workers()
-                                max_workers = interact_manager.emb_model.get_max_workers()
-                            else:
-                                # 이전 방식 (fallback)
-                                max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
-                                active_workers = max_workers - sem_value if isinstance(sem_value, int) else 'unknown'
-                                
+                            from rag.src.pipe import InteractManager
+                            # 새로운 메서드 사용
+                            max_workers = InteractManager.get_max_workers()
+                            active_workers = InteractManager.get_active_workers()
+                            sem_value = InteractManager.get_gpu_semaphore_value()
+                            
                             insert_logger.info(f"문서 처리 완료 후 GPU 세마포어 상태: 활성작업={active_workers}/{max_workers}, 세마포어값={sem_value}")
                         except Exception as sem_err:
                             insert_logger.warning(f"GPU 세마포어 상태 확인 실패: {str(sem_err)}")

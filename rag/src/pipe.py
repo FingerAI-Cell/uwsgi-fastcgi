@@ -74,19 +74,23 @@ class EnvManager():
 class InteractManager:
     # 클래스 변수로 세마포어 공유
     _gpu_semaphore = _GPU_SEMAPHORE
-    _active_tasks = 0
     _task_lock = GPU_TASK_LOCK
     
     @classmethod
     def get_gpu_semaphore(cls):
         """모든 인스턴스에서 공유하는 GPU 세마포어를 반환합니다."""
+        # 세마포어가 초기화되지 않았으면 초기화
+        if cls._gpu_semaphore is None:
+            cls._gpu_semaphore = threading.BoundedSemaphore(int(os.getenv('MAX_GPU_WORKERS', '50')))
         return cls._gpu_semaphore
     
     @classmethod
-    def get_active_workers(cls):
-        """현재 활성화된 GPU 작업 수를 반환합니다."""
-        with cls._task_lock:
-            return cls._active_tasks
+    def get_gpu_semaphore_value(cls):
+        """현재 GPU 세마포어 값(사용 가능한 슬롯 수)을 반환합니다."""
+        sem = cls.get_gpu_semaphore()
+        if hasattr(sem, '_value'):
+            return sem._value
+        return 'unknown'
     
     @classmethod
     def get_max_workers(cls):
@@ -94,19 +98,14 @@ class InteractManager:
         return int(os.getenv('MAX_GPU_WORKERS', '50'))
     
     @classmethod
-    def increment_active_tasks(cls):
-        """활성 GPU 작업 수를 증가시킵니다."""
-        with cls._task_lock:
-            cls._active_tasks += 1
-            return cls._active_tasks
+    def get_active_workers(cls):
+        """현재 활성화된 GPU 작업 수를 계산합니다."""
+        max_workers = cls.get_max_workers()
+        sem_value = cls.get_gpu_semaphore_value()
+        if isinstance(sem_value, int):
+            return max_workers - sem_value
+        return 0
     
-    @classmethod
-    def decrement_active_tasks(cls):
-        """활성 GPU 작업 수를 감소시킵니다."""
-        with cls._task_lock:
-            cls._active_tasks = max(0, cls._active_tasks - 1)
-            return cls._active_tasks
-            
     def __init__(self, data_p=None, vectorenv=None, vectordb=None, emb_model=None, response_model=None, logger=None):
         '''
         vectordb = MilvusData - insert data, set search params, search data 
@@ -1372,39 +1371,19 @@ class InteractManager:
                     continue
                 
                 # 임베딩 벡터 확인 (반드시 필요)
-                if 'text_emb' not in item or not item['text_emb'] or len(item['text_emb']) == 0:
+                if 'text_emb' not in item or not item['text_emb']:
                     logger.warning(f"임베딩 벡터 없음, 항목 건너뜀: {item.get('passage_uid', 'unknown')}")
                     continue
                 
-                # 벡터 타입 사전 검증 및 변환
-                try:
-                    # 임베딩 벡터 데이터 유형 확인 및 리스트로 변환
-                    emb_vector = item['text_emb']
-                    if not isinstance(emb_vector, list):
-                        logger.info(f"임베딩 벡터 타입 변환 필요: {type(emb_vector)}, passage_uid={item.get('passage_uid', 'unknown')}")
-                        
-                        if isinstance(emb_vector, tuple):
-                            item['text_emb'] = list(emb_vector)
-                            logger.info(f"임베딩 벡터 튜플을 리스트로 변환: passage_uid={item.get('passage_uid', 'unknown')}")
-                        elif isinstance(emb_vector, np.ndarray):
-                            item['text_emb'] = emb_vector.tolist()
-                            logger.info(f"임베딩 벡터 numpy 배열을 리스트로 변환: passage_uid={item.get('passage_uid', 'unknown')}")
-                        elif hasattr(emb_vector, 'tolist'):
-                            item['text_emb'] = emb_vector.tolist()
-                            logger.info(f"임베딩 벡터 객체를 tolist() 메서드로 리스트 변환: passage_uid={item.get('passage_uid', 'unknown')}")
-                        elif hasattr(emb_vector, '__iter__'):
-                            item['text_emb'] = list(emb_vector)
-                            logger.info(f"임베딩 벡터 이터러블 객체를 리스트로 변환: passage_uid={item.get('passage_uid', 'unknown')}")
-                        else:
-                            logger.warning(f"임베딩 벡터를 리스트로 변환할 수 없음, 항목 건너뜀: {item.get('passage_uid', 'unknown')}")
-                            continue
-                except Exception as e:
-                    logger.error(f"임베딩 벡터 처리 중 오류 발생: {str(e)}, 항목 건너뜀: {item.get('passage_uid', 'unknown')}")
+                # 임베딩 벡터 간단 검증 (models.py에서 이미 표준 리스트로 변환되어 있다고 가정)
+                # 벡터 타입만 확인하고 리스트가 아니면 오류 로그만 남김
+                if not isinstance(item['text_emb'], list):
+                    logger.error(f"임베딩 벡터가 리스트 타입이 아님: {type(item['text_emb'])}, passage_uid={item.get('passage_uid', 'unknown')}")
                     continue
                 
-                # 임베딩 벡터 길이 확인
+                # 벡터 길이 확인 (1024가 아니면 오류 로그만 남김)
                 if len(item['text_emb']) != 1024:
-                    logger.warning(f"임베딩 벡터 길이가 1024가 아님: {len(item['text_emb'])}, 항목 건너뜀: {item.get('passage_uid', 'unknown')}")
+                    logger.error(f"임베딩 벡터 길이가 1024가 아님: {len(item['text_emb'])}, passage_uid={item.get('passage_uid', 'unknown')}")
                     continue
                 
                 valid_batch_data.append(item)
@@ -1440,20 +1419,7 @@ class InteractManager:
                             # passage_uid 업데이트
                             new_item['passage_uid'] = f"{item['passage_uid']}_{idx}"
                             
-                            # 임베딩 벡터 유형 재확인 및 변환
-                            if not isinstance(new_item['text_emb'], list):
-                                try:
-                                    if isinstance(new_item['text_emb'], tuple):
-                                        new_item['text_emb'] = list(new_item['text_emb'])
-                                    elif isinstance(new_item['text_emb'], np.ndarray):
-                                        new_item['text_emb'] = new_item['text_emb'].tolist()
-                                    else:
-                                        logger.warning(f"하위 청크의 임베딩 벡터를 리스트로 변환할 수 없음, 건너뜀")
-                                        continue
-                                except Exception as e:
-                                    logger.error(f"하위 청크 임베딩 벡터 변환 중 오류: {str(e)}")
-                                    continue
-                                
+                            # 최종 검증 (text_emb는 이미 검증 완료됨)
                             final_batch.append(new_item)
                     else:
                         # passage_id가 문자열이면 정수로 변환
@@ -1463,76 +1429,28 @@ class InteractManager:
                             except (ValueError, TypeError):
                                 # 변환 실패 시 기본값 사용
                                 item['passage_id'] = 0
-                                
-                        # 임베딩 벡터 타입 최종 확인
-                        if not isinstance(item['text_emb'], list):
-                            try:
-                                if isinstance(item['text_emb'], tuple):
-                                    item['text_emb'] = list(item['text_emb'])
-                                elif isinstance(item['text_emb'], np.ndarray):
-                                    item['text_emb'] = item['text_emb'].tolist()
-                                else:
-                                    logger.warning(f"최종 임베딩 벡터를 리스트로 변환할 수 없음, 건너뜀")
-                                    continue
-                            except Exception as e:
-                                logger.error(f"최종 임베딩 벡터 변환 중 오류: {str(e)}")
-                                continue
                         
                         final_batch.append(item)
                 
                 try:
                     # 배치 삽입 시도
                     if final_batch:
-                        # 삽입 전 모든 항목의 text_emb 타입 검증 - 최종 안전장치
-                        for idx, item in enumerate(final_batch):
-                            # text_emb 필드가 없는 경우는 이미 필터링되었으므로 여기서는 타입만 확인
-                            if not isinstance(item['text_emb'], list):
-                                try:
-                                    if isinstance(item['text_emb'], tuple):
-                                        item['text_emb'] = list(item['text_emb'])
-                                        logger.warning(f"최종 검증에서 튜플 발견 및 변환: 항목 {idx}, passage_uid={item.get('passage_uid', 'unknown')}")
-                                    elif isinstance(item['text_emb'], np.ndarray):
-                                        item['text_emb'] = item['text_emb'].tolist()
-                                        logger.warning(f"최종 검증에서 numpy 배열 발견 및 변환: 항목 {idx}, passage_uid={item.get('passage_uid', 'unknown')}")
-                                    else:
-                                        logger.error(f"최종 검증에서 변환 불가능한 타입 발견: {type(item['text_emb'])}, 항목 제외")
-                                        final_batch.remove(item)
-                                except Exception as e:
-                                    logger.error(f"최종 검증 중 변환 실패: {str(e)}, 항목 제외")
-                                    final_batch.remove(item)
-                            
-                            # 벡터 길이 최종 확인
-                            if len(item['text_emb']) != 1024:
-                                logger.error(f"최종 검증에서 잘못된 벡터 길이 발견: {len(item['text_emb'])}, 항목 제외")
-                                final_batch.remove(item)
+                        # 로그에 첫 항목의 벡터 타입 정보 추가 (디버깅용)
+                        if final_batch and 'text_emb' in final_batch[0]:
+                            first_emb = final_batch[0]['text_emb']
+                            logger.info(f"첫 항목 text_emb 정보: 타입={type(first_emb)}, 길이={len(first_emb) if hasattr(first_emb, '__len__') else 'unknown'}")
                         
-                        # 삽입 직전 최종 확인 로그
-                        if final_batch:
-                            logger.info(f"최종 배치 삽입 준비: {len(final_batch)}개 항목")
-                            
-                            # 벡터 인코딩 오류 방지를 위해 문자열로 변환하여 로깅
-                            first_item_info = "N/A"
-                            if final_batch:
-                                try:
-                                    first_item = final_batch[0]
-                                    first_emb_type = type(first_item['text_emb'])
-                                    first_emb_len = len(first_item['text_emb']) if hasattr(first_item['text_emb'], '__len__') else 'unknown'
-                                    first_item_info = f"타입: {first_emb_type}, 길이: {first_emb_len}"
-                                except:
-                                    pass
-                            logger.info(f"첫 항목 text_emb 정보: {first_item_info}")
-                            
-                            # 실제 삽입 시도
-                            collection.insert(final_batch)
-                            total_success += len(final_batch)
-                            logger.info(f"배치 {i//max_batch_size + 1} 삽입 성공: {len(final_batch)}개 항목")
-                            
-                            # 성공 후 바로 flush 추가
-                            try:
-                                collection.flush()
-                                logger.info(f"배치 {i//max_batch_size + 1} 즉시 flush 성공")
-                            except Exception as flush_error:
-                                logger.warning(f"배치 {i//max_batch_size + 1} 즉시 flush 실패: {str(flush_error)}")
+                        # 실제 삽입 시도
+                        collection.insert(final_batch)
+                        total_success += len(final_batch)
+                        logger.info(f"배치 {i//max_batch_size + 1} 삽입 성공: {len(final_batch)}개 항목")
+                        
+                        # 성공 후 바로 flush 추가
+                        try:
+                            collection.flush()
+                            logger.info(f"배치 {i//max_batch_size + 1} 즉시 flush 성공")
+                        except Exception as flush_error:
+                            logger.warning(f"배치 {i//max_batch_size + 1} 즉시 flush 실패: {str(flush_error)}")
                     
                     # 주기적으로 flush 및 메모리 정리
                     if (i + max_batch_size) % (max_batch_size * 2) == 0:
@@ -1542,30 +1460,12 @@ class InteractManager:
                 except Exception as batch_error:
                     logger.warning(f"배치 삽입 실패, 개별 삽입 시도: {str(batch_error)}")
                     
-                    # 개별 삽입 시도
+                    # 개별 삽입 시도 - 간소화된 버전
                     for item in final_batch:
                         try:
-                            # 임베딩 벡터 유형 최종 확인
-                            if not isinstance(item['text_emb'], list):
-                                try:
-                                    if isinstance(item['text_emb'], tuple):
-                                        item['text_emb'] = list(item['text_emb'])
-                                    elif isinstance(item['text_emb'], np.ndarray):
-                                        item['text_emb'] = item['text_emb'].tolist()
-                                    elif hasattr(item['text_emb'], 'tolist'):
-                                        item['text_emb'] = item['text_emb'].tolist()
-                                    elif hasattr(item['text_emb'], '__iter__'):
-                                        item['text_emb'] = list(item['text_emb'])
-                                    else:
-                                        logger.error(f"개별 항목 text_emb 변환 불가: 알 수 없는 타입 {type(item['text_emb'])}, 항목 건너뜀")
-                                        continue
-                                except Exception as e:
-                                    logger.error(f"개별 항목 text_emb 변환 실패: {str(e)}, 항목 건너뜀")
-                                    continue
-                            
-                            # 벡터 길이 확인
-                            if len(item['text_emb']) != 1024:
-                                logger.error(f"개별 항목 벡터 길이 오류: {len(item['text_emb'])}, 항목 건너뜀")
+                            # 단일 항목 검증 (임베딩 벡터만 간단히 확인)
+                            if not isinstance(item.get('text_emb', []), list):
+                                logger.error(f"개별 항목 text_emb가 리스트가 아님: {type(item.get('text_emb', []))}, 항목 건너뜀")
                                 continue
                                 
                             # 단일 항목 삽입
@@ -1634,21 +1534,28 @@ class InteractManager:
 
     def embed_and_prepare_chunk(self, chunk_data):
         """청크 데이터에 임베딩을 추가하고 DB 삽입을 위한 데이터로 변환합니다."""
-        thread_id = threading.get_ident()
-        chunk_index = chunk_data.get('chunk_index', -1)  # 청크 인덱스 정보 추출
-        start_time = time.time()
-        
         try:
-            # 텍스트 추출 및 처리
+            import logging
+            self.insert_logger = logging.getLogger('insert')
+            
+            # 시작 시간 기록
+            start_time = time.time()
+            
+            # 스레드 ID 및 청크 메타데이터 추출
+            thread_id = threading.get_ident()
+            chunk_index = chunk_data.get('chunk_index', 0)
+            chunk_no = chunk_data.get('chunk_no', None)
+            
+            # 청크 텍스트 추출
             chunk_text = chunk_data.get('text', '')
             
-            # 청크가 튜플인 경우 처리 (청킹 알고리즘이 (text, chunk_no) 튜플을 반환)
-            chunk_no = None
-            if isinstance(chunk_text, tuple) and len(chunk_text) >= 1:
-                if len(chunk_text) > 1:
-                    chunk_no = chunk_text[1]  # 튜플의 두 번째 요소는 청크 번호
-                # 튜플의 첫 번째 요소(텍스트)만 사용
-                chunk_text = chunk_text[0]
+            # 텍스트 타입 확인 및 변환 (튜플 지원)
+            if isinstance(chunk_text, tuple):
+                if len(chunk_text) > 0:
+                    chunk_text = chunk_text[0]  # 튜플의 첫 번째 요소만 사용
+                else:
+                    self.insert_logger.warning(f"[Thread-{thread_id}] 빈 튜플 건너뛰기: 청크#{chunk_no if chunk_no is not None else chunk_index}")
+                    return None
                 self.insert_logger.info(f"[Thread-{thread_id}] 튜플 형태의 청크 텍스트 변환: 청크#{chunk_no if chunk_no is not None else chunk_index}")
             
             # 텍스트가 비어있으면 처리하지 않음
@@ -1664,13 +1571,12 @@ class InteractManager:
                 # 세마포어 획득 대기 시간 측정
                 sem_wait_time = time.time() - sem_wait_start
                 
-                # 활성 GPU 작업 수 증가 및 자원 상태 로깅
-                active_tasks = self.increment_active_tasks()
-                gpu_sem = InteractManager.get_gpu_semaphore()
-                sem_value = gpu_sem._value if hasattr(gpu_sem, '_value') else 'unknown'
-                max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
+                # GPU 자원 상태 로깅
+                max_workers = InteractManager.get_max_workers()
+                sem_value = InteractManager.get_gpu_semaphore_value()
+                active_workers = InteractManager.get_active_workers()
                 
-                self.insert_logger.info(f"[Thread-{thread_id}] GPU 자원 상태: 활성작업={active_tasks}/{max_workers}, 세마포어값={sem_value}, 대기시간={sem_wait_time:.4f}초 (청크#{chunk_no if chunk_no is not None else chunk_index})")
+                self.insert_logger.info(f"[Thread-{thread_id}] GPU 자원 상태: 활성작업={active_workers}/{max_workers}, 세마포어값={sem_value}, 대기시간={sem_wait_time:.4f}초 (청크#{chunk_no if chunk_no is not None else chunk_index})")
                 
                 # 임베딩 시작 시간
                 embed_start = time.time()
@@ -1680,9 +1586,6 @@ class InteractManager:
                 
                 # 임베딩 소요 시간
                 embed_time = time.time() - embed_start
-                
-                # 활성 GPU 작업 수 감소
-                active_tasks = self.decrement_active_tasks()
             
             # 결과 데이터 준비 - 원본 데이터의 ID 정보 유지
             prepared_data = {
@@ -1709,9 +1612,6 @@ class InteractManager:
             return prepared_data
             
         except Exception as e:
-            # 오류 발생 시 활성 GPU 작업 수 감소
-            self.decrement_active_tasks()
-            
             # 오류 로깅
             error_trace = traceback.format_exc()
             self.insert_logger.error(f"[Thread-{thread_id}] 청크 임베딩 오류: {str(e)} (청크#{chunk_no if 'chunk_no' in locals() and chunk_no is not None else chunk_index})\n{error_trace}")
@@ -1729,18 +1629,14 @@ class InteractManager:
             
             thread_id = threading.get_ident()
             
-            # 필수 필드 확인
-            required_fields = ['text', 'doc_id', 'passage_uid']
-            missing_fields = [field for field in required_fields if field not in chunk_data]
-            
-            if missing_fields:
-                insert_logger.error(f"[Thread-{thread_id}] 필수 필드 누락: {missing_fields} (passage_uid: {chunk_data.get('passage_uid', 'unknown')})")
+            # 필수 필드 확인 (간소화)
+            if not all(field in chunk_data for field in ['text', 'doc_id', 'passage_uid']):
+                insert_logger.error(f"[Thread-{thread_id}] 필수 필드 누락: {[f for f in ['text', 'doc_id', 'passage_uid'] if f not in chunk_data]}")
                 return None
             
-            # 텍스트 타입 확인 및 처리
+            # 텍스트 간소화된 전처리
             chunk_text = chunk_data.get('text', '')
             if isinstance(chunk_text, tuple):
-                insert_logger.warning(f"[Thread-{thread_id}] 텍스트가 튜플 형태: {chunk_data.get('passage_uid', 'unknown')}")
                 if len(chunk_text) > 0:
                     chunk_data['text'] = chunk_text[0]  # 튜플의 첫 번째 요소만 사용
                 else:
@@ -1750,7 +1646,6 @@ class InteractManager:
             if not isinstance(chunk_data['text'], str):
                 try:
                     chunk_data['text'] = str(chunk_data['text'])
-                    insert_logger.warning(f"[Thread-{thread_id}] 텍스트가 문자열이 아니어서 변환함: {chunk_data.get('passage_uid', 'unknown')}")
                 except Exception as e:
                     insert_logger.error(f"[Thread-{thread_id}] 텍스트 변환 실패: {str(e)}")
                     return None
@@ -1760,192 +1655,43 @@ class InteractManager:
                 insert_logger.error(f"[Thread-{thread_id}] 빈 텍스트: {chunk_data.get('passage_uid', 'unknown')}")
                 return None
             
-            # passage_id 확인 및 정수형 변환
-            if 'passage_id' in chunk_data:
-                if not isinstance(chunk_data['passage_id'], int):
-                    try:
-                        chunk_data['passage_id'] = int(chunk_data['passage_id'])
-                    except (ValueError, TypeError):
-                        # 변환 실패 시 메타데이터에서 chunk_index를 가져오거나 기본값 사용
-                        if 'metadata' in chunk_data and 'chunk_index' in chunk_data['metadata']:
-                            chunk_data['passage_id'] = int(chunk_data['metadata']['chunk_index'])
-                        else:
-                            # 기본값 설정
-                            chunk_data['passage_id'] = 0
-                        insert_logger.warning(f"[Thread-{thread_id}] passage_id 정수 변환 실패, 기본값 사용: {chunk_data['passage_id']}")
-            
-            # GPU 세마포어 획득 시작 시간
-            sem_wait_start = time.time()
-            
-            # GPU 세마포어 획득
-            if self.__class__._gpu_semaphore is None:
-                self.__class__._gpu_semaphore = threading.BoundedSemaphore(int(os.getenv('MAX_GPU_WORKERS', '50')))
-                
-            active_workers = 0
-            with self.__class__._task_lock:
-                active_workers = self.__class__._active_tasks
-                
-            max_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))
-            
-            with self.__class__._gpu_semaphore:
-                # 세마포어 획득 대기 시간
-                sem_wait_time = time.time() - sem_wait_start
-                
-                # 활성 GPU 작업 수 증가
-                with self.__class__._task_lock:
-                    self.__class__._active_tasks += 1
-                    active_workers = self.__class__._active_tasks
-                    
+            # passage_id 확인 및 정수형 변환 (간소화)
+            if 'passage_id' in chunk_data and not isinstance(chunk_data['passage_id'], int):
                 try:
-                    # 임베딩 시작 시간
-                    embed_start = time.time()
-                    
-                    # 로그 정보 추가
-                    chunk_text = chunk_data.get('text', '')
-                    chunk_len = len(chunk_text)
-                    chunk_id = chunk_data.get('passage_uid', chunk_data.get('id', 'unknown'))
-                    
-                    insert_logger.info(f"[Thread-{thread_id}] 임베딩 시작: passage_uid={chunk_id}, 텍스트 길이={chunk_len} (대기시간={sem_wait_time:.4f}초)")
-                    
-                    # 임베딩 생성
-                    emb_vector = None
-                    try:
-                        emb_vector = self.emb_model.bge_embed_data(chunk_text)
-                    except Exception as emb_error:
-                        insert_logger.error(f"[Thread-{thread_id}] 임베딩 생성 오류: {str(emb_error)}")
-                        # 짧은 텍스트로 재시도
-                        if len(chunk_text) > 200:
-                            short_text = chunk_text[:200] + "..."
-                            insert_logger.info(f"[Thread-{thread_id}] 짧은 텍스트로 재시도: {len(short_text)}자")
-                            try:
-                                emb_vector = self.emb_model.bge_embed_data(short_text)
-                                insert_logger.info(f"[Thread-{thread_id}] 짧은 텍스트로 임베딩 성공")
-                            except Exception as retry_error:
-                                insert_logger.error(f"[Thread-{thread_id}] 재시도 실패: {str(retry_error)}")
-                                return None
-                        else:
-                            return None
-                    
-                    # 임베딩 소요 시간
-                    embed_time = time.time() - embed_start
-                    
-                    # 임베딩 벡터 유효성 검사
-                    if emb_vector is None:
-                        insert_logger.error(f"[Thread-{thread_id}] 임베딩 벡터가 None: {chunk_id}")
-                        return None
-                    
-                    # 임베딩 결과 저장
-                    chunk_data['text_emb'] = emb_vector
-                    
-                    # 임베딩 벡터 타입 확인 및 변환
-                    emb_type = type(emb_vector)
-                    
-                    # 임베딩 벡터가 리스트가 아닌 경우 변환
-                    if not isinstance(emb_vector, list):
-                        try:
-                            if isinstance(emb_vector, tuple):
-                                chunk_data['text_emb'] = list(emb_vector)
-                                insert_logger.info(f"[Thread-{thread_id}] 임베딩 벡터를 튜플에서 리스트로 변환: {emb_type} -> list")
-                            elif isinstance(emb_vector, np.ndarray):
-                                chunk_data['text_emb'] = emb_vector.tolist()
-                                insert_logger.info(f"[Thread-{thread_id}] 임베딩 벡터를 numpy 배열에서 리스트로 변환: {emb_type} -> list")
-                            elif hasattr(emb_vector, 'tolist'):
-                                chunk_data['text_emb'] = emb_vector.tolist()
-                                insert_logger.info(f"[Thread-{thread_id}] 임베딩 벡터를 tolist() 메서드로 변환: {emb_type} -> list")
-                            elif hasattr(emb_vector, '__iter__'):
-                                chunk_data['text_emb'] = list(emb_vector)
-                                insert_logger.info(f"[Thread-{thread_id}] 임베딩 벡터를 이터러블 객체에서 리스트로 변환: {emb_type} -> list")
-                            else:
-                                insert_logger.error(f"[Thread-{thread_id}] 임베딩 벡터를 리스트로 변환할 수 없음: {emb_type}")
-                                return None
-                        except Exception as convert_error:
-                            insert_logger.error(f"[Thread-{thread_id}] 임베딩 벡터 변환 오류: {str(convert_error)}")
-                            return None
-                    
-                    # 벡터 길이 확인
-                    emb_length = len(chunk_data['text_emb']) if isinstance(chunk_data['text_emb'], (list, tuple, np.ndarray)) else 0
-                    if emb_length != 1024:
-                        insert_logger.error(f"[Thread-{thread_id}] 임베딩 벡터 길이가 1024가 아님: {emb_length}")
-                        
-                        # 길이가 맞지 않으면 0으로 채운 벡터 생성
-                        if emb_length > 0:
-                            # 벡터가 있지만 길이가 다른 경우
-                            if emb_length < 1024:
-                                # 부족한 경우 0으로 채움
-                                padding = [0.0] * (1024 - emb_length)
-                                chunk_data['text_emb'] = list(chunk_data['text_emb']) + padding
-                                insert_logger.warning(f"[Thread-{thread_id}] 벡터 길이 부족, 0으로 채움: {emb_length} -> 1024")
-                            else:
-                                # 길이가 초과하는 경우 자름
-                                chunk_data['text_emb'] = list(chunk_data['text_emb'])[:1024]
-                                insert_logger.warning(f"[Thread-{thread_id}] 벡터 길이 초과, 자름: {emb_length} -> 1024")
-                        else:
-                            # 벡터가 비어있는 경우 0으로 채운 벡터 생성
-                            chunk_data['text_emb'] = [0.0] * 1024
-                            insert_logger.warning(f"[Thread-{thread_id}] 빈 벡터, 0으로 채운 벡터 생성")
-                    
-                    # 임베딩 벡터 샘플 로깅 (안전하게 처리)
-                    try:
-                        emb_sample = str(chunk_data['text_emb'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
-                    except:
-                        emb_sample = "로깅 불가"
-                    
-                    insert_logger.info(f"[Thread-{thread_id}] 임베딩 완료: passage_uid={chunk_id}, 벡터 타입={type(chunk_data['text_emb'])}, 벡터 크기={len(chunk_data['text_emb'])}, 샘플={emb_sample}, 소요시간={embed_time:.4f}초")
-                    
-                    # 필수 필드 유효성 검증 - 특히 passage_id
-                    if 'passage_id' not in chunk_data or chunk_data['passage_id'] is None:
-                        if 'metadata' in chunk_data and 'chunk_index' in chunk_data['metadata']:
-                            chunk_data['passage_id'] = int(chunk_data['metadata']['chunk_index'])
-                            insert_logger.info(f"[Thread-{thread_id}] passage_id 필드 자동 추가 (metadata): {chunk_data['passage_id']}")
-                        else:
-                            # passage_uid에서 추출 시도
-                            passage_uid = chunk_data.get('passage_uid', '')
-                            if '_' in passage_uid:
-                                try:
-                                    chunk_data['passage_id'] = int(passage_uid.split('_')[-1])
-                                    insert_logger.info(f"[Thread-{thread_id}] passage_id 필드 자동 추가 (passage_uid): {chunk_data['passage_id']}")
-                                except (ValueError, IndexError):
-                                    chunk_data['passage_id'] = 0
-                                    insert_logger.warning(f"[Thread-{thread_id}] passage_id 추출 실패, 기본값 사용: 0")
-                            else:
-                                chunk_data['passage_id'] = 0
-                                insert_logger.warning(f"[Thread-{thread_id}] passage_id 추출 실패, 기본값 사용: 0")
-                    
-                    # 최종 데이터 구조 검증
-                    final_check_fields = ['passage_uid', 'doc_id', 'raw_doc_id', 'passage_id', 'text', 'text_emb', 'domain']
-                    for field in final_check_fields:
-                        if field not in chunk_data:
-                            if field == 'raw_doc_id' and 'doc_id' in chunk_data:
-                                # raw_doc_id가 없는 경우 doc_id를 사용
-                                chunk_data['raw_doc_id'] = chunk_data['doc_id']
-                                insert_logger.info(f"[Thread-{thread_id}] raw_doc_id 필드 자동 추가: {chunk_data['raw_doc_id']}")
-                            elif field == 'domain' and 'metadata' in chunk_data and 'domain' in chunk_data['metadata']:
-                                # metadata에서 domain 정보 가져오기
-                                chunk_data['domain'] = chunk_data['metadata']['domain']
-                                insert_logger.info(f"[Thread-{thread_id}] domain 필드 자동 추가: {chunk_data['domain']}")
-                            else:
-                                insert_logger.warning(f"[Thread-{thread_id}] 중요 필드 {field} 누락됨")
-                    
-                    # 최종 검증 로그
-                    insert_logger.info(f"[Thread-{thread_id}] 최종 데이터 검증: passage_id={chunk_data.get('passage_id', 'None')}, 타입={type(chunk_data.get('passage_id', None))}, 벡터 타입={type(chunk_data.get('text_emb', None))}")
-                    
-                    return chunk_data
-                    
-                except Exception as e:
-                    # 오류 로깅
-                    error_trace = traceback.format_exc()
-                    insert_logger.error(f"[Thread-{thread_id}] 임베딩 생성 오류: {str(e)}\n{error_trace}")
-                    return None
-                    
-                finally:
-                    # 활성 GPU 작업 수 감소
-                    with self.__class__._task_lock:
-                        self.__class__._active_tasks = max(0, self.__class__._active_tasks - 1)
-                        
+                    chunk_data['passage_id'] = int(chunk_data['passage_id'])
+                except (ValueError, TypeError):
+                    # 변환 실패 시 메타데이터에서 chunk_index를 가져오거나 기본값 사용
+                    if 'metadata' in chunk_data and 'chunk_index' in chunk_data['metadata']:
+                        chunk_data['passage_id'] = int(chunk_data['metadata']['chunk_index'])
+                    else:
+                        chunk_data['passage_id'] = 0
+            
+            # 임베딩 생성 - bge_embed_data 함수에서 GPU 작업 추적 처리
+            try:
+                # 로그 정보 추가 (최소화)
+                chunk_id = chunk_data.get('passage_uid', chunk_data.get('id', 'unknown'))
+                
+                # 임베딩 생성 (실제 임베딩은 bge_embed_data 함수에서 처리)
+                emb_vector = self.emb_model.bge_embed_data(chunk_data['text'])
+                
+                # 임베딩 결과 저장
+                chunk_data['text_emb'] = emb_vector
+                
+                # 임베딩 완료 로그 (최소화)
+                emb_sample = str(emb_vector[:2])[:20] + "..." if len(emb_vector) > 0 else "비어있음"
+                insert_logger.info(f"[Thread-{thread_id}] 최종 데이터 검증: passage_id={chunk_data.get('passage_id', 'unknown')}, 타입={type(chunk_data.get('passage_id', 0))}, 벡터 타입={type(chunk_data['text_emb'])}")
+                
+                return chunk_data
+                
+            except Exception as emb_error:
+                insert_logger.error(f"[Thread-{thread_id}] 임베딩 생성 실패: {str(emb_error)}")
+                return None
+                
         except Exception as e:
-            # 예외 처리
+            import logging, traceback
+            insert_logger = logging.getLogger('insert')
             error_trace = traceback.format_exc()
-            logger.error(f"임베딩 준비 중 오류: {str(e)}\n{error_trace}")
+            insert_logger.error(f"[Thread-{thread_id}] 청크 임베딩 처리 오류: {str(e)}\n{error_trace}")
             return None
 
     def batch_insert_data(self, domain, data_batch):
