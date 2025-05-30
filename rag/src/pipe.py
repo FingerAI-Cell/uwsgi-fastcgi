@@ -17,6 +17,7 @@ import uuid
 from collections import defaultdict
 from queue import Queue
 from typing import List, Dict, Any, Optional, Tuple
+import numpy as np
 
 # 전역 GPU 세마포어 설정 - 모든 임베딩 처리에서 공유
 GPU_WORKERS = int(os.getenv('MAX_GPU_WORKERS', '50'))
@@ -1436,14 +1437,34 @@ class InteractManager:
                             if not isinstance(item['text_emb'], list):
                                 logger.warning(f"항목 {idx}의 text_emb 유형 변환: {type(item['text_emb'])} -> list")
                                 try:
-                                    item['text_emb'] = list(item['text_emb'])
+                                    if isinstance(item['text_emb'], tuple):
+                                        item['text_emb'] = list(item['text_emb'])
+                                    elif isinstance(item['text_emb'], np.ndarray):
+                                        item['text_emb'] = item['text_emb'].tolist()
+                                    else:
+                                        # 다른 형식인 경우 일단 문자열로 변환 후 리스트로 파싱 시도
+                                        try:
+                                            item['text_emb'] = list(map(float, str(item['text_emb']).strip('()[]').split(',')))
+                                        except:
+                                            logger.error(f"text_emb 변환 실패: 알 수 없는 타입 {type(item['text_emb'])}, 항목 제외")
+                                            final_batch.remove(item)
                                 except Exception as e:
                                     logger.error(f"text_emb 변환 실패: {str(e)}, 항목 제외")
                                     final_batch.remove(item)
                         
+                        # 삽입 직전 최종 확인 로그
+                        logger.info(f"최종 배치 삽입 준비: {len(final_batch)}개 항목, 첫 항목 text_emb 타입: {type(final_batch[0]['text_emb']) if final_batch else 'N/A'}")
+                        
                         collection.insert(final_batch)
                         total_success += len(final_batch)
                         logger.info(f"배치 {i//max_batch_size + 1} 삽입 성공: {len(final_batch)}개 항목")
+                        
+                        # 성공 후 바로 flush 추가
+                        try:
+                            collection.flush()
+                            logger.info(f"배치 {i//max_batch_size + 1} 즉시 flush 성공")
+                        except Exception as flush_error:
+                            logger.warning(f"배치 {i//max_batch_size + 1} 즉시 flush 실패: {str(flush_error)}")
                     
                     # 주기적으로 flush 및 메모리 정리
                     if (i + max_batch_size) % (max_batch_size * 2) == 0:
@@ -1458,7 +1479,21 @@ class InteractManager:
                         try:
                             # 임베딩 벡터 유형 확인
                             if not isinstance(item['text_emb'], list):
-                                item['text_emb'] = list(item['text_emb'])
+                                try:
+                                    if isinstance(item['text_emb'], tuple):
+                                        item['text_emb'] = list(item['text_emb'])
+                                    elif isinstance(item['text_emb'], np.ndarray):
+                                        item['text_emb'] = item['text_emb'].tolist()
+                                    else:
+                                        # 다른 형식인 경우 일단 문자열로 변환 후 리스트로 파싱 시도
+                                        try:
+                                            item['text_emb'] = list(map(float, str(item['text_emb']).strip('()[]').split(',')))
+                                        except:
+                                            logger.error(f"개별 항목 text_emb 변환 실패: 알 수 없는 타입 {type(item['text_emb'])}, 항목 건너뜀")
+                                            continue
+                                except Exception as e:
+                                    logger.error(f"개별 항목 text_emb 변환 실패: {str(e)}, 항목 건너뜀")
+                                    continue
                                 
                             collection.insert([item])
                             total_success += 1
@@ -1470,6 +1505,25 @@ class InteractManager:
                     
             # 최종 flush
             collection.flush()
+            
+            # 추가 검증: flush 후 데이터가 저장되었는지 확인
+            try:
+                # 이 배치에서 삽입한 임의의 passage_uid 선택
+                if valid_batch_data and len(valid_batch_data) > 0:
+                    sample_passage_uid = valid_batch_data[0].get('passage_uid')
+                    if sample_passage_uid:
+                        # 실제로 저장되었는지 확인
+                        verify_expr = f'passage_uid == "{sample_passage_uid}"'
+                        verify_results = collection.query(expr=verify_expr, output_fields=["passage_uid"], limit=1)
+                        if verify_results and len(verify_results) > 0:
+                            logger.info(f"데이터 저장 확인 성공: passage_uid={sample_passage_uid}")
+                        else:
+                            logger.warning(f"데이터 저장 확인 실패: passage_uid={sample_passage_uid}가 데이터베이스에 없음")
+                            # 다시 flush 시도
+                            logger.info("데이터베이스 다시 flush 시도")
+                            collection.flush()
+            except Exception as verify_error:
+                logger.error(f"데이터 저장 확인 중 오류: {str(verify_error)}")
             
             insert_end = time.time()
             insert_duration = insert_end - insert_start
