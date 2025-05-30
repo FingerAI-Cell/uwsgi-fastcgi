@@ -1932,6 +1932,415 @@ def index():
     print(f"hello results")
     return jsonify({"message": "Hello, FastCGI is working!"})
 
+@app.route("/rag/test/duplicate_check", methods=["POST"])
+def test_duplicate_check():
+    """
+    여러 doc_id에 대한 중복 체크 테스트를 수행합니다.
+    
+    Request Body:
+    {
+        "doc_ids": ["id1", "id2", "id3", ...],
+        "domain": "도메인명"
+    }
+    
+    Returns:
+        JSON: 중복 체크 결과
+    """
+    try:
+        # 로그 설정
+        import logging
+        test_logger = logging.getLogger('duplication')
+        if not test_logger.handlers:
+            log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
+            os.makedirs(log_dir, exist_ok=True)
+            handler = logging.FileHandler(os.path.join(log_dir, 'duplication.log'))
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            test_logger.setLevel(logging.INFO)
+            test_logger.addHandler(handler)
+            test_logger.propagate = False
+        
+        # 요청 데이터 검증
+        request_data = request.get_json()
+        if not request_data:
+            return jsonify({"error": "요청 본문이 비어있습니다."}), 400
+            
+        doc_ids = request_data.get("doc_ids")
+        domain = request_data.get("domain")
+        
+        if not doc_ids:
+            return jsonify({"error": "doc_ids 필드는 필수입니다."}), 400
+            
+        if not domain:
+            return jsonify({"error": "domain 필드는 필수입니다."}), 400
+            
+        if not isinstance(doc_ids, list):
+            doc_ids = [doc_ids]  # 단일 ID를 리스트로 변환
+            
+        # 도메인 유효성 검증
+        available_collections = milvus_db.get_list_collection()
+        if domain not in available_collections:
+            return jsonify({
+                "error": f"도메인 '{domain}'이 존재하지 않습니다.",
+                "available_domains": available_collections
+            }), 404
+            
+        # 테스트 시작 로깅
+        test_logger.info(f"중복 체크 테스트 시작: {len(doc_ids)}개 문서, 도메인: {domain}")
+        test_logger.info(f"테스트할 문서 ID: {doc_ids}")
+        
+        # 중복 체크 수행
+        start_time = time.time()
+        try:
+            results = interact_manager.check_duplicates(doc_ids, domain)
+            end_time = time.time()
+            
+            # 결과 로깅
+            test_logger.info(f"중복 체크 결과: {results}")
+            test_logger.info(f"소요 시간: {end_time - start_time:.4f}초")
+            
+            # 응답 구성
+            return jsonify({
+                "status": "success",
+                "message": f"{len(doc_ids)}개 문서 중 {len(results)}개 중복 발견",
+                "test_doc_ids": doc_ids,
+                "duplicate_doc_ids": results,
+                "domain": domain,
+                "duration": end_time - start_time
+            }), 200
+            
+        except Exception as e:
+            test_logger.error(f"중복 체크 오류: {str(e)}")
+            return jsonify({
+                "status": "error",
+                "message": f"중복 체크 중 오류 발생: {str(e)}",
+                "test_doc_ids": doc_ids,
+                "domain": domain
+            }), 500
+            
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"요청 처리 중 오류 발생: {str(e)}"
+        }), 500
+
+@app.route("/rag/test/in_operator", methods=["POST"])
+def test_in_operator():
+    """
+    IN 연산자를 직접 테스트하는 엔드포인트입니다.
+    
+    Request Body:
+    {
+        "doc_ids": ["id1", "id2", "id3", ...],
+        "domain": "도메인명",
+        "batch_size": 20  // 선택적, 기본값은 20
+    }
+    
+    Returns:
+        JSON: IN 연산자 테스트 결과
+    """
+    try:
+        # 로그 설정
+        import logging
+        test_logger = logging.getLogger('duplication')
+        if not test_logger.handlers:
+            log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
+            os.makedirs(log_dir, exist_ok=True)
+            handler = logging.FileHandler(os.path.join(log_dir, 'duplication.log'))
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            test_logger.setLevel(logging.INFO)
+            test_logger.addHandler(handler)
+            test_logger.propagate = False
+        
+        # 요청 데이터 검증
+        request_data = request.get_json()
+        if not request_data:
+            return jsonify({"error": "요청 본문이 비어있습니다."}), 400
+            
+        doc_ids = request_data.get("doc_ids")
+        domain = request_data.get("domain")
+        batch_size = request_data.get("batch_size", 20)  # 기본값 20
+        
+        if not doc_ids:
+            return jsonify({"error": "doc_ids 필드는 필수입니다."}), 400
+            
+        if not domain:
+            return jsonify({"error": "domain 필드는 필수입니다."}), 400
+            
+        if not isinstance(doc_ids, list):
+            doc_ids = [doc_ids]  # 단일 ID를 리스트로 변환
+            
+        # 도메인 유효성 검증
+        available_collections = milvus_db.get_list_collection()
+        if domain not in available_collections:
+            return jsonify({
+                "error": f"도메인 '{domain}'이 존재하지 않습니다.",
+                "available_domains": available_collections
+            }), 404
+            
+        # 테스트 시작 로깅
+        test_logger.info(f"IN 연산자 테스트 시작: {len(doc_ids)}개 문서, 도메인: {domain}, 배치 크기: {batch_size}")
+        
+        # 컬렉션 로드
+        collection = Collection(domain)
+        collection.load()
+        test_logger.info(f"컬렉션 '{domain}' 로드 완료")
+        
+        # 결과 저장 변수
+        all_results = []
+        batch_results = []
+        found_doc_ids = []
+        
+        # 배치 단위로 처리
+        start_time = time.time()
+        total_query_time = 0
+        
+        try:
+            for i in range(0, len(doc_ids), batch_size):
+                batch = doc_ids[i:i + batch_size]
+                if not batch:
+                    continue
+                    
+                # IN 연산자를 사용하여 배치로 쿼리
+                ids_str = ", ".join([f'"{id}"' for id in batch])
+                expr = f'doc_id in [{ids_str}]'  # 올바른 IN 연산자 형식 사용
+                
+                batch_start = time.time()
+                test_logger.info(f"배치 {i//batch_size + 1} 쿼리 실행: {expr[:100]}{'...' if len(expr) > 100 else ''}")
+                
+                try:
+                    # 중요: 여기서 expr 매개변수로 쿼리 실행
+                    results = collection.query(
+                        expr=expr,
+                        output_fields=["doc_id", "passage_id"],
+                        limit=10000  # 충분히 큰 값으로 설정
+                    )
+                    
+                    batch_end = time.time()
+                    batch_time = batch_end - batch_start
+                    total_query_time += batch_time
+                    
+                    # 결과 로깅
+                    result_doc_ids = {result["doc_id"] for result in results if "doc_id" in result}
+                    found_doc_ids.extend(list(result_doc_ids))
+                    
+                    batch_results.append({
+                        "batch_index": i//batch_size + 1,
+                        "batch_size": len(batch),
+                        "query_time": batch_time,
+                        "result_count": len(results),
+                        "unique_doc_ids": len(result_doc_ids),
+                        "found_ids": list(result_doc_ids)
+                    })
+                    
+                    test_logger.info(f"배치 {i//batch_size + 1} 쿼리 결과: {len(results)}개 항목, {len(result_doc_ids)}개 고유 문서, 소요시간: {batch_time:.4f}초")
+                    
+                except Exception as e:
+                    test_logger.error(f"배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
+                    batch_results.append({
+                        "batch_index": i//batch_size + 1,
+                        "batch_size": len(batch),
+                        "error": str(e),
+                        "status": "error"
+                    })
+            
+            end_time = time.time()
+            total_time = end_time - start_time
+            
+            # 중복 제거된 최종 결과
+            unique_found_doc_ids = list(set(found_doc_ids))
+            
+            test_logger.info(f"IN 연산자 테스트 완료: 총 {len(doc_ids)}개 문서 중 {len(unique_found_doc_ids)}개 발견, 총 소요시간: {total_time:.4f}초, 쿼리 시간: {total_query_time:.4f}초")
+            
+            # 응답 구성
+            return jsonify({
+                "status": "success",
+                "message": f"{len(doc_ids)}개 문서 중 {len(unique_found_doc_ids)}개 발견",
+                "test_doc_ids": doc_ids,
+                "found_doc_ids": unique_found_doc_ids,
+                "domain": domain,
+                "batch_size": batch_size,
+                "total_time": total_time,
+                "query_time": total_query_time,
+                "batch_results": batch_results
+            }), 200
+            
+        except Exception as e:
+            test_logger.error(f"IN 연산자 테스트 오류: {str(e)}")
+            return jsonify({
+                "status": "error",
+                "message": f"IN 연산자 테스트 중 오류 발생: {str(e)}",
+                "test_doc_ids": doc_ids,
+                "domain": domain
+            }), 500
+            
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"요청 처리 중 오류 발생: {str(e)}"
+        }), 500
+
+@app.route("/rag/test/or_operator", methods=["POST"])
+def test_or_operator():
+    """
+    OR 연산자를 직접 테스트하는 엔드포인트입니다.
+    
+    Request Body:
+    {
+        "doc_ids": ["id1", "id2", "id3", ...],
+        "domain": "도메인명",
+        "batch_size": 20  // 선택적, 기본값은 20
+    }
+    
+    Returns:
+        JSON: OR 연산자 테스트 결과
+    """
+    try:
+        # 로그 설정
+        import logging
+        test_logger = logging.getLogger('duplication')
+        if not test_logger.handlers:
+            log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
+            os.makedirs(log_dir, exist_ok=True)
+            handler = logging.FileHandler(os.path.join(log_dir, 'duplication.log'))
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            test_logger.setLevel(logging.INFO)
+            test_logger.addHandler(handler)
+            test_logger.propagate = False
+        
+        # 요청 데이터 검증
+        request_data = request.get_json()
+        if not request_data:
+            return jsonify({"error": "요청 본문이 비어있습니다."}), 400
+            
+        doc_ids = request_data.get("doc_ids")
+        domain = request_data.get("domain")
+        batch_size = request_data.get("batch_size", 20)  # 기본값 20
+        
+        if not doc_ids:
+            return jsonify({"error": "doc_ids 필드는 필수입니다."}), 400
+            
+        if not domain:
+            return jsonify({"error": "domain 필드는 필수입니다."}), 400
+            
+        if not isinstance(doc_ids, list):
+            doc_ids = [doc_ids]  # 단일 ID를 리스트로 변환
+            
+        # 도메인 유효성 검증
+        available_collections = milvus_db.get_list_collection()
+        if domain not in available_collections:
+            return jsonify({
+                "error": f"도메인 '{domain}'이 존재하지 않습니다.",
+                "available_domains": available_collections
+            }), 404
+            
+        # 테스트 시작 로깅
+        test_logger.info(f"OR 연산자 테스트 시작: {len(doc_ids)}개 문서, 도메인: {domain}, 배치 크기: {batch_size}")
+        
+        # 컬렉션 로드
+        collection = Collection(domain)
+        collection.load()
+        test_logger.info(f"컬렉션 '{domain}' 로드 완료")
+        
+        # 결과 저장 변수
+        all_results = []
+        batch_results = []
+        found_doc_ids = []
+        
+        # 배치 단위로 처리
+        start_time = time.time()
+        total_query_time = 0
+        
+        try:
+            for i in range(0, len(doc_ids), batch_size):
+                batch = doc_ids[i:i + batch_size]
+                if not batch:
+                    continue
+                    
+                # OR 연산자를 사용하여 배치로 쿼리
+                conditions = []
+                for doc_id in batch:
+                    conditions.append(f'doc_id == "{doc_id}"')
+                
+                expr = " || ".join(conditions)  # OR 연산자 사용
+                
+                batch_start = time.time()
+                test_logger.info(f"배치 {i//batch_size + 1} 쿼리 실행: {expr[:100]}{'...' if len(expr) > 100 else ''}")
+                
+                try:
+                    # 중요: 여기서 expr 매개변수로 쿼리 실행
+                    results = collection.query(
+                        expr=expr,
+                        output_fields=["doc_id", "passage_id"],
+                        limit=10000  # 충분히 큰 값으로 설정
+                    )
+                    
+                    batch_end = time.time()
+                    batch_time = batch_end - batch_start
+                    total_query_time += batch_time
+                    
+                    # 결과 로깅
+                    result_doc_ids = {result["doc_id"] for result in results if "doc_id" in result}
+                    found_doc_ids.extend(list(result_doc_ids))
+                    
+                    batch_results.append({
+                        "batch_index": i//batch_size + 1,
+                        "batch_size": len(batch),
+                        "query_time": batch_time,
+                        "result_count": len(results),
+                        "unique_doc_ids": len(result_doc_ids),
+                        "found_ids": list(result_doc_ids)
+                    })
+                    
+                    test_logger.info(f"배치 {i//batch_size + 1} 쿼리 결과: {len(results)}개 항목, {len(result_doc_ids)}개 고유 문서, 소요시간: {batch_time:.4f}초")
+                    
+                except Exception as e:
+                    test_logger.error(f"배치 {i//batch_size + 1} 처리 중 오류: {str(e)}")
+                    batch_results.append({
+                        "batch_index": i//batch_size + 1,
+                        "batch_size": len(batch),
+                        "error": str(e),
+                        "status": "error"
+                    })
+            
+            end_time = time.time()
+            total_time = end_time - start_time
+            
+            # 중복 제거된 최종 결과
+            unique_found_doc_ids = list(set(found_doc_ids))
+            
+            test_logger.info(f"OR 연산자 테스트 완료: 총 {len(doc_ids)}개 문서 중 {len(unique_found_doc_ids)}개 발견, 총 소요시간: {total_time:.4f}초, 쿼리 시간: {total_query_time:.4f}초")
+            
+            # 응답 구성
+            return jsonify({
+                "status": "success",
+                "message": f"{len(doc_ids)}개 문서 중 {len(unique_found_doc_ids)}개 발견",
+                "test_doc_ids": doc_ids,
+                "found_doc_ids": unique_found_doc_ids,
+                "domain": domain,
+                "batch_size": batch_size,
+                "total_time": total_time,
+                "query_time": total_query_time,
+                "batch_results": batch_results
+            }), 200
+            
+        except Exception as e:
+            test_logger.error(f"OR 연산자 테스트 오류: {str(e)}")
+            return jsonify({
+                "status": "error",
+                "message": f"OR 연산자 테스트 중 오류 발생: {str(e)}",
+                "test_doc_ids": doc_ids,
+                "domain": domain
+            }), 500
+            
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"요청 처리 중 오류 발생: {str(e)}"
+        }), 500
+
 if __name__ == "__main__":
     print(f"Start results")
     app.run(host="0.0.0.0", port=5000)
