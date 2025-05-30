@@ -896,12 +896,13 @@ def insert_data():
                                         emb_sample = str(chunk_data['text_emb'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
                                         insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 완료: 벡터 크기={emb_length}, 샘플={emb_sample}, 소요시간={embedding_duration:.4f}초")
                                         chunk_success = True
-                                        prepared_chunks.append(chunk_data)
+                                        return chunk_data  # prepared_chunks.append(chunk_data) 대신 chunk_data 반환
                                     else:
                                         chunk_success = False
-                                        chunk_errors.append(f"청크 {index}의 임베딩 생성 실패")
+                                        # chunk_errors.append(f"청크 {index}의 임베딩 생성 실패")
+                                        logger.warning(f"청크 {index}의 임베딩 생성 실패")
+                                        return None
                                     
-                                    return chunk_success, embedding_duration
                                 except Exception as e:
                                     logger.error(f"청크 처리 오류: {str(e)}")
                                     chunk_end = time.time()
