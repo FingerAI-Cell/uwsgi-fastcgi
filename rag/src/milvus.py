@@ -210,7 +210,7 @@ class DataMilVus(MilVus):   #  args: (DataProcessor)
     def get_len_data(self, collection):
         print(collection.num_entities)
 
-    def set_search_params(self, query_emb, anns_field='text_emb', filter=None, limit=5, output_fields=None, consistency_level="Strong"):
+    def set_search_params(self, query_emb, anns_field='text_emb', expr=None, limit=5, output_fields=None, consistency_level="Strong"):
         # nprobe는 1~65536 범위에 있어야 함 (0은 불가능)
         nprobe_value = self.db_config.get('search_nprobe', 16)  # 기본값 16
         if nprobe_value <= 0:
@@ -221,7 +221,7 @@ class DataMilVus(MilVus):   #  args: (DataProcessor)
             "anns_field": anns_field, 
             "param": {"metric_type": self.db_config['search_metric'], "params": {"nprobe": nprobe_value}, "offset": 0},
             "limit": limit,
-            "filter": filter, 
+            "expr": expr, 
             "output_fields": output_fields,
             "consistency_level": consistency_level
         }

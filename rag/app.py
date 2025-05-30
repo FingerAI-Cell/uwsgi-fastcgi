@@ -1741,7 +1741,7 @@ def calculate_domain_document_count(collection, domain_name):
                 
                 # 효율적인 iterator 쿼리 생성
                 iterator = collection.query_iterator(
-                    filter="",  # 모든 레코드 대상
+                    expr="",  # 모든 레코드 대상
                     output_fields=["doc_id"],  # doc_id만 가져옴
                     batch_size=batch_size,
                     limit=-1  # 모든 결과 반환
