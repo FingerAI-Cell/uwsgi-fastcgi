@@ -17,6 +17,7 @@ import signal
 import concurrent.futures
 import threading
 import traceback
+import psutil
 
 # 로깅 설정
 logging.basicConfig(
@@ -472,6 +473,32 @@ def insert_data():
     
     insert_logger.info("=== INSERT API START ===")
     
+    # 배치 처리를 위한 공유 변수 초기화
+    processed_chunks = []  # 처리된 청크를 담을 리스트
+    chunks_lock = threading.Lock()  # 스레드 안전성을 위한 락
+    batch_size = int(os.getenv('BATCH_SIZE', '300'))  # 배치 크기 설정
+    
+    # 배치 삽입 함수 정의
+    def insert_batch(batch, domain):
+        try:
+            if not batch:
+                return
+                
+            batch_insert_start = time.time()
+            interact_manager.batch_insert_data(domain, batch)
+            batch_insert_end = time.time()
+            
+            logger.info(f"배치 삽입 완료: {len(batch)}개 항목, 소요시간: {batch_insert_end - batch_insert_start:.4f}초")
+        except Exception as e:
+            logger.error(f"배치 삽입 중 오류 발생: {str(e)}")
+            # 오류 발생 시 개별 항목 삽입 시도
+            for item in batch:
+                try:
+                    interact_manager.batch_insert_data(domain, [item])
+                    logger.info(f"개별 항목 삽입 성공: {item.get('passage_uid', 'unknown')}")
+                except Exception as single_error:
+                    logger.error(f"개별 항목 삽입 실패: {item.get('passage_uid', 'unknown')}, 오류={str(single_error)}")
+    
     try:
         request_data = request.json
         if not request_data:
@@ -820,6 +847,12 @@ def insert_data():
                             # 2. 청크 임베딩 처리 단계 시간 측정
                             embedding_start = time.time()
                             
+                            # 스레드 ID 미리 정의 (전역적으로 사용)
+                            thread_id = threading.get_ident()
+                            
+                            # 청크 중복 처리 방지를 위한 집합 초기화
+                            processed_chunk_ids = set()
+                            
                             # GPU 세마포어 상태 확인 - 중요 정보이므로 유지
                             if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                                 try:
@@ -836,8 +869,18 @@ def insert_data():
                             
                             # 청크별 임베딩 생성을 병렬화
                             max_chunk_threads = int(os.getenv('INSERT_CHUNK_THREADS', '10'))  # 동시 청크 처리 수 제한
-                            batch_size = int(os.getenv('BATCH_SIZE', '100'))  # 배치 크기
+                            # 전역 배치 크기 재사용 (insert_data 함수 시작 부분에서 정의된 값)
                             chunk_batch_size = min(batch_size, 100)  # 안전을 위해 상한선 설정
+                            
+                            # 성능 모니터링 시작
+                            try:
+                                import psutil
+                                process = psutil.Process()
+                                mem_before = process.memory_info().rss / 1024 / 1024  # MB 단위
+                                logger.info(f"[MEMORY] 청크 처리 전 메모리 사용량: {mem_before:.2f} MB")
+                            except Exception:
+                                # 실패해도 계속 진행
+                                pass
                             
                             # 각 청크 처리에 필요한 도메인 정보 준비
                             domain = doc.get('domain', 'general')
@@ -911,6 +954,19 @@ def insert_data():
                                     embedding_time_end = time.time()
                                     embedding_duration = embedding_time_end - embedding_time_start
                                     
+                                    # 타임아웃 감지 - 임베딩 생성에 너무 오래 걸리면 경고
+                                    if embedding_duration > 10.0:  # 10초 이상 걸리면 경고
+                                        logger.warning(f"[TIMEOUT] 청크 {index} 임베딩 생성에 비정상적으로 오래 걸림: {embedding_duration:.2f}초")
+                                    
+                                    # GPU 메모리 정리
+                                    try:
+                                        import torch
+                                        if torch.cuda.is_available():
+                                            torch.cuda.empty_cache()
+                                    except Exception as gpu_error:
+                                        # 실패해도 계속 진행
+                                        pass
+                                    
                                     # 임베딩 벡터 확인 로그 및 성공 여부 판단
                                     if chunk_data_with_embedding and 'text_emb' in chunk_data_with_embedding:
                                         # 임베딩 벡터 유형 및 길이 확인
@@ -954,12 +1010,12 @@ def insert_data():
                                                 chunk_data_with_embedding['text_emb'] = [0.0] * 1024
                                                 logger.info(f"청크 {index}의 벡터가 비어있어 0으로 채운 벡터 생성")
                                         
-                                        # 임베딩 벡터 정보 로깅
+                                        # 임베딩 벡터 정보 로깅 간소화
                                         try:
-                                            emb_sample = str(chunk_data_with_embedding['text_emb'][:3])[:30] + "..." if emb_length > 0 else "비어있음"
-                                            insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 완료: 벡터 타입={type(chunk_data_with_embedding['text_emb'])}, 벡터 크기={len(chunk_data_with_embedding['text_emb'])}, 샘플={emb_sample}, 소요시간={embedding_duration:.4f}초")
+                                            # 최소한의 정보만 로깅
+                                            insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 완료: 소요시간={embedding_duration:.4f}초")
                                         except Exception as log_error:
-                                            insert_logger.error(f"[Thread-{thread_id}] 청크 {index} 임베딩 로깅 오류: {str(log_error)}")
+                                            pass
                                         
                                         return chunk_data_with_embedding  # 성공한 경우 임베딩이 추가된 데이터 반환
                                     else:
@@ -976,18 +1032,73 @@ def insert_data():
                             with concurrent.futures.ThreadPoolExecutor(max_workers=max_chunk_threads) as executor:
                                 future_to_chunk = {executor.submit(process_chunk, chunk, i): i for i, chunk in enumerate(chunks)}
                                 doc_prepared_chunks = []
+                                completed_chunks = []  # 완료된 청크 추적
                                 
+                                # 청크 처리 결과 수집 및 즉시 큐에 추가
                                 for future in concurrent.futures.as_completed(future_to_chunk):
                                     chunk_index = future_to_chunk[future]
                                     try:
                                         data = future.result()
                                         if data:
-                                            doc_prepared_chunks.append(data)
+                                            # 데이터 검증 확인
+                                            if 'text_emb' in data and len(data['text_emb']) == 1024:
+                                                # 청크 ID 생성 (중복 처리 방지용)
+                                                chunk_id = f"{doc_hashed_id}_{chunk_index}"
+                                                
+                                                # 중복 처리 방지
+                                                if chunk_id not in processed_chunk_ids:
+                                                    processed_chunk_ids.add(chunk_id)
+                                                    
+                                                    # 유효한 청크는 즉시 큐에 추가
+                                                    with chunks_lock:
+                                                        # 임베딩 완료된 청크를 바로 처리 큐에 추가
+                                                        processed_chunks.append(data)
+                                                        completed_chunks.append(chunk_index)
+                                                        
+                                                        # 배치 크기에 도달하면 바로 삽입 처리
+                                                        if len(processed_chunks) >= batch_size:
+                                                            chunks_to_insert = processed_chunks.copy()
+                                                            processed_chunks.clear()
+                                                            # 락 외부에서 실제 삽입 수행
+                                                            insert_batch(chunks_to_insert, domain)
+                                                            insert_logger.info(f"청크 배치 삽입 완료: {len(chunks_to_insert)}개")
+                                                
+                                                # 중복 처리 방지 - doc_prepared_chunks에는 한 번만 추가
+                                                doc_prepared_chunks.append(data)
+                                            else:
+                                                logger.warning(f"청크 {chunk_index}의 데이터가 유효하지 않습니다: {'text_emb' in data}, {len(data.get('text_emb', []))}") 
                                     except Exception as e:
                                         logger.error(f"문서 '{doc_title}' 청크 {chunk_index} 처리 실패: {str(e)}")
+                                        # 실패 카운터 증가
+                                        if not hasattr(process_document, 'failed_count'):
+                                            process_document.failed_count = 0
+                                        process_document.failed_count += 1
+                                        
+                                        # 일정 개수마다 통계 로깅
+                                        if process_document.failed_count % 5 == 0:
+                                            logger.warning(f"총 {process_document.failed_count}개 청크 처리 실패")
                             
                             embedding_end = time.time()
                             embedding_duration = embedding_end - embedding_start
+                            
+                            # 성능 모니터링 종료
+                            try:
+                                import psutil
+                                process = psutil.Process()
+                                mem_after = process.memory_info().rss / 1024 / 1024  # MB 단위
+                                mem_diff = mem_after - mem_before if 'mem_before' in locals() else 0
+                                logger.info(f"[MEMORY] 청크 처리 후 메모리 사용량: {mem_after:.2f} MB (변화: {mem_diff:+.2f} MB)")
+                                
+                                # 메모리 사용량이 너무 높으면 GC 강제 실행
+                                if mem_after > 1000:  # 1GB 이상
+                                    import gc
+                                    gc.collect()
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                    logger.info("[MEMORY] 강제 메모리 정리 수행")
+                            except Exception:
+                                # 실패해도 계속 진행
+                                pass
                             
                             # 청크 처리 완료 로그 간소화
                             logger.info(f"[TIMING] 문서 '{doc_title}'의 청크 처리 완료: 성공={len(doc_prepared_chunks)}, 실패={len(chunks)-len(doc_prepared_chunks)}, 총={len(chunks)}개 청크, 소요시간: {embedding_duration:.4f}초")
@@ -1009,50 +1120,49 @@ def insert_data():
                                 except Exception as e:
                                     insert_logger.warning(f"GPU 세마포어 정보 확인 실패: {str(e)}")
                             
-                            # 배치 삽입 수행
+                            # 배치 삽입 수행 - 완료된 청크 중 아직 삽입되지 않은 것들 처리
                             chunk_success = 0  # 성공적으로 삽입된 청크 수 초기화
-                            if doc_prepared_chunks:
-                                # 불필요한 로그 제거
-                                
-                                # 대기 세마포어 획득 시작 시간 기록
-                                semaphore_wait_start = time.time()
-                                
-                                # 청크를 배치로 나누어 삽입
-                                for i in range(0, len(doc_prepared_chunks), chunk_batch_size):
-                                    batch = doc_prepared_chunks[i:i + chunk_batch_size]
+                            
+                            # 남은 청크들 확인 - 큐에 있지만 아직 처리되지 않은 청크
+                            remaining_chunks = []
+                            with chunks_lock:
+                                remaining_chunks = processed_chunks.copy()
+                                processed_chunks.clear()
+                            
+                            # 남은 청크들 삽입
+                            if remaining_chunks:
+                                try:
+                                    insert_logger.info(f"남은 청크 {len(remaining_chunks)}개 일괄 삽입")
+                                    interact_manager.batch_insert_data(domain, remaining_chunks)
+                                    chunk_success += len(remaining_chunks)
+                                except Exception as e:
+                                    logger.error(f"남은 청크 삽입 실패: {str(e)}")
                                     
-                                    # 세마포어 획득 시간 측정 (배치 삽입은 세마포어로 제한됨)
-                                    before_batch_insert = time.time()
-                                    semaphore_wait_duration = before_batch_insert - semaphore_wait_start
-                                    
-                                    # 중요한 대기 시간만 로깅
-                                    if semaphore_wait_duration > 1.0:  # 1초 이상 대기했을 경우만 로깅
-                                        insert_logger.info(f"세마포어 대기 시간: {semaphore_wait_duration:.4f}초 (Thread: {thread_id})")
-                                    
-                                    try:
-                                        # 배치 삽입
-                                        batch_insert_start = time.time()
-                                        interact_manager.batch_insert_data(domain, batch)
-                                        batch_insert_end = time.time()
-                                        
-                                        # 배치 삽입 실제 소요시간 로그 제거
-                                        
-                                        chunk_success += len(batch)
-                                    except Exception as e:
-                                        # 오류 로그는 유지
-                                        logger.error(f"배치 삽입 중 오류 발생: {str(e)}")
-                                        insert_logger.error(f"문서 '{doc_title}' 배치 {i//chunk_batch_size + 1} 삽입 실패: {str(e)} (Thread: {thread_id})")
-                                        
-                                        # 개별 항목 삽입 시도 (복구 메커니즘)
-                                        logger.info(f"배치 오류 발생, 개별 항목 삽입 시도")
-                                        for j, item in enumerate(batch):
-                                            try:
-                                                single_batch = [item]
-                                                interact_manager.batch_insert_data(domain, single_batch)
-                                                logger.info(f"[RECOVERY] 문서 '{doc_title}' 개별 항목 삽입 성공: batch_index={i+j}")
-                                                chunk_success += 1
-                                            except Exception as single_error:
-                                                logger.error(f"[ERROR] 문서 '{doc_title}' 개별 항목 삽입 실패: batch_index={i+j}, 오류={str(single_error)}")
+                                    # 개별 삽입 시도
+                                    for chunk in remaining_chunks:
+                                        try:
+                                            interact_manager.batch_insert_data(domain, [chunk])
+                                            chunk_success += 1
+                                        except Exception as chunk_e:
+                                            logger.error(f"개별 청크 삽입 실패: {str(chunk_e)}")
+                            
+                            # 최종 데이터베이스 flush 수행
+                            try:
+                                # 이미 로드된 컬렉션 사용
+                                collection = interact_manager.get_collection(domain)
+                                # 명시적인 flush 호출
+                                collection.flush()
+                                logger.info(f"문서 '{doc_title}' 처리 완료 후 명시적 flush 수행")
+                            except Exception as flush_e:
+                                logger.warning(f"최종 flush 실패: {str(flush_e)}")
+                                # 실패 시 직접 컬렉션 로드 시도
+                                try:
+                                    collection = Collection(domain)
+                                    collection.load()
+                                    collection.flush()
+                                    logger.info(f"문서 '{doc_title}' 처리 완료 후 재시도 flush 성공")
+                                except Exception as retry_e:
+                                    logger.error(f"최종 flush 재시도 실패: {str(retry_e)}")
                             
                             insert_end = time.time()
                             insert_duration = insert_end - insert_start
