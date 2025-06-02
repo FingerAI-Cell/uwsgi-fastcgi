@@ -119,6 +119,25 @@ def load_common_collections():
     except Exception as e:
         logger.error(f"Error during collection preloading: {str(e)}")
 
+# 현재 프로세스의 메모리 사용량을 MB 단위로 반환하는 함수
+def get_memory_usage():
+    """
+    현재 프로세스의 메모리 사용량을 메가바이트(MB) 단위로 반환합니다.
+    
+    Returns:
+        float: 메모리 사용량 (MB)
+    """
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        memory_info = process.memory_info()
+        # RSS(Resident Set Size)를 MB로 변환
+        memory_mb = memory_info.rss / (1024 * 1024)
+        return memory_mb
+    except Exception as e:
+        logger.warning(f"메모리 사용량 조회 실패: {str(e)}")
+        return 0.0  # 실패 시 0 반환
+
 # 앱 종료 시 정리 작업
 def cleanup_on_exit():
     """애플리케이션 종료 시 정리 작업을 수행합니다."""
@@ -872,7 +891,7 @@ def insert_data():
                             
                             # 청크 임베딩 병렬 처리 스레드 수 설정
                             max_chunk_threads = min(
-                                int(os.getenv('CHUNK_EMBEDDING_THREADS', '10')),  # 기본값: 10
+                                int(os.getenv('INSERT_CHUNK_THREADS', '10')),  # 기본값: 10
                                 len(chunks),  # 청크 수보다 많은 스레드는 불필요
                                 10  # 최대 10개로 제한
                             )
@@ -893,16 +912,26 @@ def insert_data():
                             # 임베딩 생성 함수 정의
                             def process_chunk(chunk, index):
                                 """
-                                청크를 처리하고 필요한 경우 임베딩을 추가합니다.
+                                청크를 처리하고 임베딩을 추가합니다.
                                 
                                 Args:
-                                    chunk (dict): 처리할 청크 데이터
+                                    chunk (dict 또는 tuple): 청크 데이터
                                     index (int): 청크 인덱스
                                     
                                 Returns:
                                     dict: 처리된 청크 데이터 또는 None (오류 시)
                                 """
                                 try:
+                                    # 튜플 형태의 청크를 사전 형태로 변환
+                                    if isinstance(chunk, tuple):
+                                        # 튜플을 딕셔너리로 변환
+                                        chunk_dict = {'text': str(chunk[0]) if len(chunk) > 0 else ''}
+                                        # 추가 정보가 있는 경우 처리
+                                        if len(chunk) > 1:
+                                            chunk_dict['metadata'] = chunk[1] if isinstance(chunk[1], dict) else {}
+                                        chunk = chunk_dict
+                                        logger.info(f"튜플 형태의 청크를 딕셔너리로 변환: 청크 #{index}")
+                                    
                                     # 필수 필드 검증
                                     if not chunk.get('text', '').strip():
                                         logger.warning(f"빈 텍스트 청크 건너뜀: {doc.get('doc_id', 'unknown')}, 청크 #{index}")
