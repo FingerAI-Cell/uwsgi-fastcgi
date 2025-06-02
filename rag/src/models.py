@@ -25,8 +25,8 @@ torch.backends.cudnn.allow_tf32 = True          # TF32 연산 허용
 class Model:
     def __init__(self, config):
         self.config = config 
+        self.gpu_initialized = False  # GPU 초기화 상태 추적 - 명시적으로 먼저 False로 설정
         self.set_gpu()
-        self.gpu_initialized = False  # GPU 초기화 상태 추적
        
     def set_gpu(self):
         try:
@@ -39,7 +39,7 @@ class Model:
                 _ = torch.zeros(1).cuda()  # 첫 CUDA 할당 미리 수행
                 
                 self.device = torch.device("cuda:0")
-                self.gpu_initialized = True
+                self.gpu_initialized = True  # 초기화 성공 시 플래그 설정
                 
                 # CUDA 상태 출력
                 device_name = torch.cuda.get_device_name(0)
@@ -86,7 +86,22 @@ class EmbModel(Model):
     def set_embbeding_config(self, batch_size=None, max_length=1024):
         # GPU 여부에 따라 기본 배치 사이즈 선택
         if batch_size is None:
-            mode = "gpu" if torch.cuda.is_available() and self.gpu_initialized else "cpu"
+            # 디버깅을 위한 상세 로깅 추가
+            cuda_available = torch.cuda.is_available()
+            gpu_init = self.gpu_initialized
+            
+            # 각 조건 상태 로깅
+            logging.info(f"디버깅 - CUDA 사용 가능: {cuda_available}, GPU 초기화 상태: {gpu_init}")
+            
+            # 조건 검사
+            mode = "gpu" if cuda_available and gpu_init else "cpu"
+            
+            # 어떤 조건이 실패했는지 로깅
+            if not cuda_available:
+                logging.warning("CUDA 사용 불가로 CPU 모드 사용")
+            elif not gpu_init:
+                logging.warning("GPU 초기화 실패로 CPU 모드 사용")
+                
             batch_size = self.default_batch_sizes[mode]
             logging.info(f"Using {mode.upper()} mode with batch_size: {batch_size}")
         
@@ -104,6 +119,10 @@ class EmbModel(Model):
             device = self.device
             mode = "gpu" if use_gpu else "cpu"
             batch_size = self.default_batch_sizes[mode]
+            
+            # GPU 상태 자세히 로깅
+            logging.info(f"GPU 사용 여부 체크: cuda_available={torch.cuda.is_available()}, gpu_initialized={self.gpu_initialized}, use_gpu={use_gpu}")
+            logging.info(f"선택된 디바이스: {device}, 모드: {mode}, 배치 크기: {batch_size}")
             
             model_path = os.getenv('MODEL_PATH', '/rag/models/bge-m3')
             if not os.path.exists(os.path.join(model_path, 'pytorch_model.bin')):
