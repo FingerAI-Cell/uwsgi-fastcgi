@@ -1657,7 +1657,10 @@ class InteractManager:
                 return False
             
             # 필수 필드 정의
-            required_fields = ['passage_uid', 'doc_id', 'raw_doc_id', 'passage_id', 'domain', 'text', 'text_emb']
+            required_fields = ['passage_uid', 'doc_id', 'passage_id', 'domain', 'text', 'text_emb']
+            
+            # 문서별로 청크 그룹화 - 같은 문서의 청크들은 함께 처리
+            doc_chunks = {}
             
             # 필수 필드 확인 및 추가 - 모든 항목에 대해 확인
             valid_items = []
@@ -1674,7 +1677,7 @@ class InteractManager:
                     # passage_uid에서 ID 부분 추출 시도
                     passage_uid = item.get('passage_uid', '')
                     if '_' in passage_uid:
-                        # passage_uid가 "doc_id_chunk_index" 형식인 경우, 마지막 부분 추출
+                        # passage_uid가 "doc_id_text_hash_chunk_index" 형식인 경우, 마지막 부분 추출
                         try:
                             item['passage_id'] = int(passage_uid.split('_')[-1])
                             logger.info(f"항목에 passage_id 필드 자동 추가 (passage_uid에서 추출): {passage_uid} -> {item['passage_id']}")
@@ -1713,6 +1716,12 @@ class InteractManager:
                 # 모든 필수 필드가 있는 경우만 유효 항목으로 포함
                 if not missing_fields:
                     valid_items.append(item)
+                    
+                    # 문서별 그룹화
+                    doc_id = item.get('doc_id', 'unknown')
+                    if doc_id not in doc_chunks:
+                        doc_chunks[doc_id] = []
+                    doc_chunks[doc_id].append(item)
                 else:
                     logger.warning(f"필수 필드 누락으로 항목 제외: {item.get('passage_uid', 'unknown')}, 누락 필드: {missing_fields}")
             
@@ -1745,17 +1754,38 @@ class InteractManager:
                     emb_length = len(sample_item['text_emb']) if sample_item['text_emb'] else 0
                     logger.info(f"임베딩 벡터 샘플 길이: {emb_length}")
             
-            # 배치 삽입 수행
-            logger.info(f"배치 삽입 시작: {len(valid_items)}개 유효 항목 (도메인: {domain})")
-            insert_result = self._execute_batch_insert(valid_items, domain)
+            # 문서별 배치 삽입 수행
+            logger.info(f"배치 삽입 시작: {len(valid_items)}개 유효 항목, {len(doc_chunks)}개 문서 (도메인: {domain})")
+            
+            # 문서별로 처리하여 동일 문서의 청크들이 함께 처리되도록 함
+            success_count = 0
+            for doc_id, chunks in doc_chunks.items():
+                try:
+                    # 각 문서별 배치 삽입 실행
+                    result = self._execute_batch_insert(chunks, domain)
+                    if result:
+                        success_count += len(chunks)
+                        logger.info(f"문서 '{doc_id}' 청크 {len(chunks)}개 삽입 성공")
+                    else:
+                        logger.error(f"문서 '{doc_id}' 청크 {len(chunks)}개 삽입 실패")
+                except Exception as doc_error:
+                    logger.error(f"문서 '{doc_id}' 삽입 중 오류: {str(doc_error)}")
+                    # 개별 청크 삽입 시도
+                    for chunk in chunks:
+                        try:
+                            self._execute_batch_insert([chunk], domain)
+                            success_count += 1
+                            logger.info(f"문서 '{doc_id}' 청크 개별 삽입 성공")
+                        except Exception as chunk_error:
+                            logger.error(f"문서 '{doc_id}' 청크 개별 삽입 실패: {str(chunk_error)}")
             
             # 삽입 결과 로깅
-            if insert_result:
-                logger.info(f"배치 삽입 성공 (도메인: {domain})")
+            if success_count > 0:
+                logger.info(f"배치 삽입 성공: {success_count}/{len(valid_items)}개 항목 (도메인: {domain}, 문서 수: {len(doc_chunks)})")
+                return True
             else:
-                logger.warning(f"배치 삽입 실패 (도메인: {domain})")
-            
-            return insert_result
+                logger.warning(f"배치 삽입 실패: 모든 항목 삽입 실패 (도메인: {domain}, 문서 수: {len(doc_chunks)})")
+                return False
             
         except Exception as e:
             import traceback
@@ -2058,7 +2088,10 @@ class InteractManager:
                             cls.last_batch_time[domain] = time.time()
                             
                             batch_size = len(batch_data)
-                            logger.info(f"글로벌 배치 처리: 도메인={domain}, 청크 수={batch_size}")
+                            
+                            # 문서별 청크 그룹화 - 같은 문서의 청크는 함께 처리되도록
+                            doc_ids = set(item.get('doc_id', '') for item in batch_data)
+                            logger.info(f"글로벌 배치 처리: 도메인={domain}, 청크 수={batch_size}, 고유 문서 수={len(doc_ids)}")
                         else:
                             continue
                     
@@ -2067,8 +2100,32 @@ class InteractManager:
                         try:
                             # 인스턴스 생성 필요 (클래스 메서드에서 인스턴스 메서드 호출)
                             instance = InteractManager()
-                            instance._execute_batch_insert(batch_data, domain)
-                            logger.info(f"글로벌 배치 {batch_size}개 항목 처리 완료 (도메인: {domain})")
+                            
+                            # 문서별로 청크 그룹화
+                            doc_chunks = {}
+                            for chunk in batch_data:
+                                doc_id = chunk.get('doc_id', 'unknown')
+                                if doc_id not in doc_chunks:
+                                    doc_chunks[doc_id] = []
+                                doc_chunks[doc_id].append(chunk)
+                            
+                            # 각 문서별로 배치 처리 실행
+                            for doc_id, chunks in doc_chunks.items():
+                                try:
+                                    logger.info(f"문서 '{doc_id}' 청크 {len(chunks)}개 처리 중")
+                                    instance._execute_batch_insert(chunks, domain)
+                                    logger.info(f"문서 '{doc_id}' 청크 처리 완료")
+                                except Exception as doc_error:
+                                    logger.error(f"문서 '{doc_id}' 처리 오류: {str(doc_error)}")
+                                    # 오류 발생 시 개별 청크 처리 시도
+                                    for chunk in chunks:
+                                        try:
+                                            instance._execute_batch_insert([chunk], domain)
+                                        except Exception as chunk_error:
+                                            logger.error(f"청크 개별 처리 실패: {str(chunk_error)}")
+                            
+                            logger.info(f"글로벌 배치 {batch_size}개 항목 처리 완료 (도메인: {domain}, 문서 수: {len(doc_chunks)})")
+                            
                         except Exception as e:
                             logger.error(f"글로벌 배치 처리 오류: {str(e)}")
                             # 오류 발생 시 개별 처리 시도
@@ -2117,6 +2174,41 @@ class InteractManager:
             if not data_items:
                 return False
             
+            # 각 항목이 필수 필드를 가지고 있는지 확인
+            for item in data_items:
+                # 원본 문서 ID 필드 확인
+                if 'doc_id' not in item:
+                    import logging
+                    logger = logging.getLogger('rag-backend')
+                    logger.error(f"글로벌 배치 큐 추가 실패: 필수 필드 'doc_id' 누락")
+                    return False
+                
+                # 문서 ID 해시 여부 확인 및 로깅
+                doc_id = item.get('doc_id', '')
+                if len(doc_id) < 32:  # 해시되지 않은 ID로 보임
+                    import logging
+                    logger = logging.getLogger('rag-backend')
+                    logger.warning(f"해시되지 않은 doc_id를 사용하는 것으로 보입니다: {doc_id[:20]}")
+                
+                # 청크 식별을 위한 passage_uid 필드 확인
+                if 'passage_uid' not in item:
+                    # passage_uid 자동 생성
+                    try:
+                        import hashlib
+                        text_hash = hashlib.sha512((item.get('text', '') or '').encode('utf-8')).hexdigest()
+                        passage_id = str(item.get('passage_id', '0'))
+                        doc_id = item.get('doc_id', '')
+                        # doc_id를 포함하여 고유성 보장
+                        item['passage_uid'] = f"{doc_id}_{text_hash}_{passage_id}"
+                        
+                        import logging
+                        logger = logging.getLogger('rag-backend')
+                        logger.info(f"passage_uid 자동 생성: {item['passage_uid'][:20]}...")
+                    except Exception as e:
+                        import logging
+                        logger = logging.getLogger('rag-backend')
+                        logger.error(f"passage_uid 생성 실패: {str(e)}")
+            
             with cls.global_batch_lock:
                 # 도메인별 큐 초기화
                 if domain not in cls.global_batch_queue:
@@ -2128,8 +2220,17 @@ class InteractManager:
                 # 마지막 배치 추가 시간 갱신 (로깅용)
                 cls.last_batch_time[domain] = time.time()
                 
+                # 로깅: 현재 배치 크기 및 문서 ID 정보
+                queue_size = len(cls.global_batch_queue[domain])
+                doc_ids = set(item.get('doc_id', '') for item in cls.global_batch_queue[domain])
+                unique_docs = len(doc_ids)
+                
+                import logging
+                logger = logging.getLogger('rag-backend')
+                logger.info(f"글로벌 배치 큐 상태: 도메인={domain}, 항목 수={queue_size}, 고유 문서 수={unique_docs}")
+                
                 # 배치 크기 이상이 되면 배치 처리가 필요함을 표시
-                return len(cls.global_batch_queue[domain]) >= cls.batch_size
+                return queue_size >= cls.batch_size
                 
         except Exception as e:
             import logging

@@ -912,8 +912,16 @@ def insert_data():
                                     chunk['metadata'].update(doc.get('metadata', {}))
                                     
                                     # 문서 ID와 청크 번호 설정
-                                    chunk['doc_id'] = doc.get('doc_id', '')
+                                    chunk['doc_id'] = doc_hashed_id  # 해시된 문서 ID 사용
+                                    chunk['raw_doc_id'] = raw_doc_id  # 원본 문서 ID 보존
                                     chunk['passage_id'] = index
+                                    
+                                    # 문서 메타데이터 설정
+                                    chunk['title'] = doc.get('title', '')
+                                    chunk['author'] = doc.get('author', '')
+                                    chunk['domain'] = domain
+                                    chunk['info'] = doc.get('info', {})
+                                    chunk['tags'] = doc.get('tags', {})
                                     
                                     # 메모리 사용량 추적
                                     memory_usage = get_memory_usage()
@@ -923,7 +931,7 @@ def insert_data():
                                     processed_chunk = interact_manager.embed_and_prepare_chunk(chunk)
                                     
                                     if processed_chunk is None:
-                                        logger.warning(f"청크 처리 실패: {doc.get('doc_id', 'unknown')}, 청크 #{index}")
+                                        logger.warning(f"청크 처리 실패: {doc_hashed_id}, 청크 #{index}")
                                         return None
                                     
                                     # 해시 기반 고유 ID 생성 (passage_uid)
@@ -931,14 +939,15 @@ def insert_data():
                                         import hashlib
                                         text_hash = hashlib.sha512(processed_chunk['text'].encode('utf-8')).hexdigest()
                                         passage_id = str(processed_chunk.get('passage_id', '0'))
-                                        processed_chunk['passage_uid'] = f"{text_hash}_{passage_id}"
+                                        # 문서 ID를 포함하여 문서 간 고유성 보장
+                                        processed_chunk['passage_uid'] = f"{doc_hashed_id}_{text_hash}_{passage_id}"
                                     
                                     # 처리된 청크 데이터를 글로벌 배치 큐에 직접 추가
                                     from src.pipe import InteractManager
                                     added_to_batch = InteractManager.add_to_global_batch(processed_chunk, domain)
                                     
                                     if added_to_batch:
-                                        logger.info(f"청크 글로벌 배치 큐에 추가 완료: {doc.get('doc_id', 'unknown')}, 청크 #{index}")
+                                        logger.info(f"청크 글로벌 배치 큐에 추가 완료: {doc_hashed_id}, 청크 #{index}")
                                     
                                     # 처리된 청크 반환 (배치 처리를 위해)
                                     return processed_chunk
