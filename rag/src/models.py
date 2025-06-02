@@ -199,98 +199,114 @@ class EmbModel(Model):
     def bge_embed_data(self, text):
         """
         BGE 모델을 사용하여 텍스트를 임베딩합니다.
-        오류 발생 시 안전한 임베딩 처리를 제공합니다.
-        항상 1024 길이의 표준 Python 리스트를 반환합니다.
-        """
-        start_time = time.time()
-        thread_id = threading.get_ident()  # 현재 스레드 ID 가져오기
+        모든 예외 상황을 처리하여 항상 1024 길이의 벡터를 반환합니다.
         
+        Args:
+            text (str): 임베딩할 텍스트
+            
+        Returns:
+            list: 1024 길이의 임베딩 벡터 (Python 리스트)
+        """
         try:
-            # 모델 로드 확인
-            if not self._model_loaded:
-                logging.error("Model not properly loaded")
-                raise RuntimeError("Embedding model not loaded")
+            import time
+            import logging
+            import threading
+            import numpy as np
+            import torch
             
-            # 입력 텍스트 간소화된 전처리
-            if not text:
-                logging.warning("Empty text provided for embedding")
-                return [0.0] * 1024  # 빈 텍스트는 0으로 채운 벡터 반환
-                
-            # 텍스트 타입 통합 검사 (최적화)
-            if not isinstance(text, str):
-                if isinstance(text, tuple) and len(text) > 0:
-                    text = text[0]
-                try:
-                    text = str(text)
-                except Exception as e:
-                    logging.error(f"[Thread-{thread_id}] 텍스트 변환 실패: {str(e)}")
-                    return [0.0] * 1024
+            thread_id = threading.get_ident()
+            start_time = time.time()
             
-            if len(text) == 0:
-                logging.warning("Empty text after preprocessing")
+            # 텍스트가 없으면 기본 벡터 반환
+            if not text or len(text) == 0:
+                logging.warning(f"[Thread-{thread_id}] 임베딩할 텍스트가 없음")
                 return [0.0] * 1024
             
-            # 임베딩 시작 시간
+            # 모델이 로드되지 않았으면 기본 벡터 반환
+            if not self._model_loaded:
+                logging.error(f"[Thread-{thread_id}] 모델이 로드되지 않음")
+                return [0.0] * 1024
+            
+            # 전처리: 특수 기호 제거 (선택적)
+            # text = re.sub(r'[^\w\s]', '', text)
+            
+            # GPU 메모리 상태 확인 (디버깅용)
+            if torch.cuda.is_available():
+                try:
+                    # 주기적으로 미사용 GPU 메모리 해제
+                    torch.cuda.empty_cache()
+                except:
+                    pass
+            
+            # BGE 모델 임베딩 수행
             embed_start = time.time()
             
-            with torch.no_grad():  # 그래디언트 계산 비활성화
-                # 텍스트 길이 제한 (간소화)
-                if len(text) > 5000:
-                    text = text[:5000]
-                    logging.warning(f"[Thread-{thread_id}] 텍스트 길이가 5000자를 초과하여 잘랐습니다.")
-                
-                # 모드에 따른 최대 길이 설정
-                mode = "gpu" if torch.cuda.is_available() and self.gpu_initialized else "cpu"
-                max_length = 512 if mode == "cpu" else 1024
-                
-                # 임베딩 생성 (오류 처리 간소화)
+            # GPU 세마포어를 사용하여 GPU 접근 제한
+            with self.get_gpu_semaphore():
                 try:
-                    embeddings = self.bge_emb.encode(text, max_length=max_length)['dense_vecs']
-                except Exception as encode_error:
-                    logging.error(f"[Thread-{thread_id}] 임베딩 인코딩 오류: {str(encode_error)}")
-                    # 더 간단한 텍스트로 재시도
+                    # 임베딩 생성
+                    result = self.bge_emb.encode(text)
+                except Exception as emb_error:
+                    logging.error(f"[Thread-{thread_id}] 임베딩 생성 오류: {str(emb_error)}")
+                    # 실패 시 CPU로 재시도
                     try:
-                        fallback_text = text[:100] + "..." if len(text) > 100 else text
-                        embeddings = self.bge_emb.encode(fallback_text, max_length=256)['dense_vecs']
-                        logging.info(f"[Thread-{thread_id}] 대체 텍스트로 임베딩 성공")
-                    except:
-                        logging.error(f"[Thread-{thread_id}] 대체 텍스트 임베딩도 실패")
+                        # 메모리 에러인 경우 GPU 메모리 정리 후 재시도
+                        if "out of memory" in str(emb_error) and torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            # CPU로 계산 시도
+                            with torch.no_grad():
+                                text_tensor = self.bge_emb.tokenizer(text, padding=True, truncation=True, return_tensors='pt')
+                                text_tensor = {key: val.to('cpu') for key, val in text_tensor.items()}
+                                embeddings = self.bge_emb.model(**text_tensor).pooler_output.cpu()
+                                result = embeddings[0].numpy()
+                        else:
+                            # 다른 오류면 그냥 기본 벡터 반환
+                            return [0.0] * 1024
+                    except Exception as retry_error:
+                        logging.error(f"[Thread-{thread_id}] CPU 재시도 오류: {str(retry_error)}")
                         return [0.0] * 1024
             
-            # 임베딩 소요 시간
-            embed_time = time.time() - embed_start
+            # 임베딩 계산 후 GPU 메모리 정리
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except:
+                    pass
             
+            embed_end = time.time()
+            embed_time = embed_end - embed_start
+
             # 임베딩 결과 표준 리스트로 변환 (단일화된 로직)
             # 1. 입력 타입 확인 및 초기 변환
             try:
-                if isinstance(embeddings, list):
-                    if len(embeddings) > 0:
+                if isinstance(result, list):
+                    if len(result) > 0:
                         # 리스트의 첫 번째 항목이 벡터인 경우
-                        if isinstance(embeddings[0], (list, np.ndarray, torch.Tensor)):
-                            result = embeddings[0]
+                        if isinstance(result[0], (list, np.ndarray, torch.Tensor)):
+                            result = result[0]
                         else:
-                            result = embeddings
+                            result = result
                     else:
                         logging.warning(f"[Thread-{thread_id}] 빈 임베딩 리스트 반환됨")
                         result = [0.0] * 1024
-                elif isinstance(embeddings, np.ndarray):
+                elif isinstance(result, np.ndarray):
                     # NumPy 배열인 경우
-                    if embeddings.ndim > 1 and embeddings.shape[0] > 0:
-                        result = embeddings[0]
+                    if result.ndim > 1 and result.shape[0] > 0:
+                        result = result[0]
                     else:
-                        result = embeddings
-                elif isinstance(embeddings, torch.Tensor):
+                        result = result
+                elif isinstance(result, torch.Tensor):
                     # PyTorch 텐서인 경우
-                    if embeddings.dim() > 1 and embeddings.shape[0] > 0:
-                        result = embeddings[0]
+                    if result.dim() > 1 and result.shape[0] > 0:
+                        result = result[0]
                     else:
-                        result = embeddings
-                elif isinstance(embeddings, tuple):
+                        result = result
+                elif isinstance(result, tuple):
                     # 튜플인 경우
-                    result = embeddings
+                    result = result
                 else:
-                    logging.warning(f"[Thread-{thread_id}] 알 수 없는 임베딩 타입: {type(embeddings)}")
-                    result = embeddings  # 처리 시도
+                    logging.warning(f"[Thread-{thread_id}] 알 수 없는 임베딩 타입: {type(result)}")
+                    result = result  # 처리 시도
             except Exception as e:
                 logging.error(f"[Thread-{thread_id}] 임베딩 초기 변환 오류: {str(e)}")
                 return [0.0] * 1024

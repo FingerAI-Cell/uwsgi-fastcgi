@@ -427,7 +427,7 @@ class InteractManager:
         if cls.batch_lock is None:
             cls.batch_lock = threading.Lock()
             cls.batch_data = {}
-            cls.batch_size = int(os.getenv('BATCH_SIZE', '100'))
+            cls.batch_size = int(os.getenv('BATCH_SIZE', '300'))  # 100에서 300으로 증가
             print(f"[DEBUG] Initialized batch processing with size {cls.batch_size}")
     
     @classmethod
@@ -1445,16 +1445,11 @@ class InteractManager:
                         total_success += len(final_batch)
                         logger.info(f"배치 {i//max_batch_size + 1} 삽입 성공: {len(final_batch)}개 항목")
                         
-                        # 성공 후 바로 flush 추가
-                        try:
-                            collection.flush()
-                            logger.info(f"배치 {i//max_batch_size + 1} 즉시 flush 성공")
-                        except Exception as flush_error:
-                            logger.warning(f"배치 {i//max_batch_size + 1} 즉시 flush 실패: {str(flush_error)}")
+                        # 매 배치마다 flush하지 않고, 최종 단계에서만 flush
+                        # 즉시 flush 코드 제거
                     
-                    # 주기적으로 flush 및 메모리 정리
-                    if (i + max_batch_size) % (max_batch_size * 2) == 0:
-                        collection.flush()
+                    # 주기적으로 메모리 정리만 하고 flush는 최종에만 수행
+                    if (i + max_batch_size) % (max_batch_size * 4) == 0:
                         gc.collect()
                         
                 except Exception as batch_error:
@@ -1481,12 +1476,12 @@ class InteractManager:
                     except Exception as flush_error:
                         logger.warning(f"개별 삽입 후 flush 실패: {str(flush_error)}")
                     
-            # 최종 flush
+            # 최종 flush 진행
             try:
                 collection.flush()
-                logger.info("최종 flush 완료")
-            except Exception as final_flush_error:
-                logger.warning(f"최종 flush 실패: {str(final_flush_error)}")
+                logger.info(f"최종 flush 완료")
+            except Exception as flush_error:
+                logger.warning(f"최종 flush 실패: {str(flush_error)}")
             
             # 추가 검증: flush 후 데이터가 저장되었는지 확인
             try:
