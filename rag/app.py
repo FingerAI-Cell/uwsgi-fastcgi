@@ -870,8 +870,12 @@ def insert_data():
                             # 2. 청크 임베딩 처리 단계 시간 측정
                             embedding_start = time.time()
                             
-                            # 스레드 ID 미리 정의 (전역적으로 사용)
-                            thread_id = threading.get_ident()
+                            # 청크 임베딩 병렬 처리 스레드 수 설정
+                            max_chunk_threads = min(
+                                int(os.getenv('CHUNK_EMBEDDING_THREADS', '10')),  # 기본값: 10
+                                len(chunks),  # 청크 수보다 많은 스레드는 불필요
+                                10  # 최대 10개로 제한
+                            )
                             
                             # 청크 중복 처리 방지를 위한 집합 초기화
                             processed_chunk_ids = set()
@@ -920,6 +924,15 @@ def insert_data():
                                     chunk['title'] = doc.get('title', '')
                                     chunk['author'] = doc.get('author', '')
                                     chunk['domain'] = domain
+                                    
+                                    # 원본 문서 정보 추가 (명시적으로 청크가 어떤 문서에서 왔는지 표시)
+                                    chunk['source_doc'] = {
+                                        'id': doc_hashed_id,
+                                        'raw_id': raw_doc_id,
+                                        'title': doc.get('title', '')
+                                    }
+                                    
+                                    # 문서 태그 및 정보 설정
                                     chunk['info'] = doc.get('info', {})
                                     chunk['tags'] = doc.get('tags', {})
                                     

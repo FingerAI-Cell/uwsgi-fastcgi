@@ -2174,40 +2174,67 @@ class InteractManager:
             if not data_items:
                 return False
             
+            import logging
+            logger = logging.getLogger('rag-backend')
+            
             # 각 항목이 필수 필드를 가지고 있는지 확인
             for item in data_items:
                 # 원본 문서 ID 필드 확인
                 if 'doc_id' not in item:
-                    import logging
-                    logger = logging.getLogger('rag-backend')
                     logger.error(f"글로벌 배치 큐 추가 실패: 필수 필드 'doc_id' 누락")
                     return False
                 
                 # 문서 ID 해시 여부 확인 및 로깅
                 doc_id = item.get('doc_id', '')
-                if len(doc_id) < 32:  # 해시되지 않은 ID로 보임
-                    import logging
-                    logger = logging.getLogger('rag-backend')
-                    logger.warning(f"해시되지 않은 doc_id를 사용하는 것으로 보입니다: {doc_id[:20]}")
+                raw_doc_id = item.get('raw_doc_id', '')
+                
+                # raw_doc_id가 없는 경우 doc_id를 복사
+                if not raw_doc_id and doc_id:
+                    item['raw_doc_id'] = doc_id
+                    logger.info(f"raw_doc_id 자동 추가: {doc_id[:20]}...")
+                
+                # passage_id가 누락된 경우 기본값 설정
+                if 'passage_id' not in item:
+                    item['passage_id'] = 0
+                    logger.warning(f"passage_id 필드 누락: 기본값 0으로 설정")
+                
+                # passage_id가 정수형이 아닌 경우 변환
+                if not isinstance(item['passage_id'], int):
+                    try:
+                        item['passage_id'] = int(item['passage_id'])
+                    except (ValueError, TypeError):
+                        logger.warning(f"passage_id 형식 오류: {item['passage_id']}를 0으로 설정")
+                        item['passage_id'] = 0
                 
                 # 청크 식별을 위한 passage_uid 필드 확인
                 if 'passage_uid' not in item:
-                    # passage_uid 자동 생성
+                    # passage_uid 자동 생성 - 원본 문서 ID 포함
                     try:
                         import hashlib
-                        text_hash = hashlib.sha512((item.get('text', '') or '').encode('utf-8')).hexdigest()
+                        text = item.get('text', '') or ''
+                        # 텍스트 길이 제한 (해시 속도 및 효율성 향상)
+                        if len(text) > 1000:
+                            text = text[:1000]
+                        
+                        text_hash = hashlib.sha512(text.encode('utf-8')).hexdigest()
                         passage_id = str(item.get('passage_id', '0'))
                         doc_id = item.get('doc_id', '')
-                        # doc_id를 포함하여 고유성 보장
-                        item['passage_uid'] = f"{doc_id}_{text_hash}_{passage_id}"
                         
-                        import logging
-                        logger = logging.getLogger('rag-backend')
+                        # doc_id + text_hash + passage_id 형식으로 고유 ID 생성
+                        item['passage_uid'] = f"{doc_id}_{text_hash}_{passage_id}"
                         logger.info(f"passage_uid 자동 생성: {item['passage_uid'][:20]}...")
                     except Exception as e:
-                        import logging
-                        logger = logging.getLogger('rag-backend')
                         logger.error(f"passage_uid 생성 실패: {str(e)}")
+                
+                # title 필드 확인 및 설정
+                if 'title' not in item or not item['title']:
+                    logger.warning(f"title 필드 누락: 문서 {doc_id[:20]}...")
+                    item['title'] = '제목 없음'
+                
+                # domain 필드가 없으면 현재 도메인 사용
+                if 'domain' not in item:
+                    item['domain'] = domain
+                    logger.info(f"domain 필드 자동 추가: {domain}")
             
             with cls.global_batch_lock:
                 # 도메인별 큐 초기화
@@ -2225,12 +2252,10 @@ class InteractManager:
                 doc_ids = set(item.get('doc_id', '') for item in cls.global_batch_queue[domain])
                 unique_docs = len(doc_ids)
                 
-                import logging
-                logger = logging.getLogger('rag-backend')
                 logger.info(f"글로벌 배치 큐 상태: 도메인={domain}, 항목 수={queue_size}, 고유 문서 수={unique_docs}")
                 
                 # 배치 크기 이상이 되면 배치 처리가 필요함을 표시
-                return queue_size >= cls.batch_size
+                return True
                 
         except Exception as e:
             import logging
