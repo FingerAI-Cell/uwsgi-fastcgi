@@ -62,6 +62,10 @@ class Model:
 
 
 class EmbModel(Model):
+    # 클래스 변수로 인스턴스 추적
+    _instances_count = 0
+    _instances_lock = threading.Lock()
+    
     def __init__(self, config):
         super().__init__(config)
         # GPU/CPU에 따른 기본 배치 사이즈 설정
@@ -82,6 +86,12 @@ class EmbModel(Model):
         self._embedding_cache = {}
         self._cache_size = int(os.getenv('EMBEDDING_CACHE_SIZE', '1000'))
         self._cache_lock = threading.Lock()
+        
+        # 인스턴스 카운터 증가
+        with self.__class__._instances_lock:
+            self.__class__._instances_count += 1
+            self._instance_id = self.__class__._instances_count
+            logging.warning(f"EmbModel 인스턴스 생성: ID={self._instance_id}, 총 인스턴스 수={self.__class__._instances_count}")
     
     def set_embbeding_config(self, batch_size=None, max_length=1024):
         # GPU 여부에 따라 기본 배치 사이즈 선택
@@ -124,6 +134,9 @@ class EmbModel(Model):
             logging.info(f"GPU 사용 여부 체크: cuda_available={torch.cuda.is_available()}, gpu_initialized={self.gpu_initialized}, use_gpu={use_gpu}")
             logging.info(f"선택된 디바이스: {device}, 모드: {mode}, 배치 크기: {batch_size}")
             
+            # 인스턴스 정보 로깅
+            logging.warning(f"인스턴스 {self._instance_id}에서 모델 로드 시작")
+            
             model_path = os.getenv('MODEL_PATH', '/rag/models/bge-m3')
             if not os.path.exists(os.path.join(model_path, 'pytorch_model.bin')):
                 logging.error(f"모델 파일이 {model_path}에 존재하지 않습니다.")
@@ -139,7 +152,8 @@ class EmbModel(Model):
                 # 모델 로드 전 메모리 상태 확인
                 if use_gpu:
                     before_load = torch.cuda.memory_allocated()/1024**2
-                    logging.info(f"GPU Memory before model load: {before_load:.2f}MB")
+                    before_reserved = torch.cuda.memory_reserved()/1024**2
+                    logging.warning(f"GPU Memory before model load: allocated={before_load:.2f}MB, reserved={before_reserved:.2f}MB")
                 
                 # 모델 로드 시 타임아웃 설정 (안전장치)
                 import signal
@@ -180,8 +194,9 @@ class EmbModel(Model):
                 # 모델 로드 후 메모리 상태 확인
                 if use_gpu:
                     after_load = torch.cuda.memory_allocated()/1024**2
-                    logging.info(f"GPU Memory after model load: {after_load:.2f}MB")
-                    logging.info(f"Model size in memory: {after_load - before_load:.2f}MB")
+                    after_reserved = torch.cuda.memory_reserved()/1024**2
+                    logging.warning(f"GPU Memory after model load: allocated={after_load:.2f}MB, reserved={after_reserved:.2f}MB")
+                    logging.warning(f"Model size in memory: {after_load - before_load:.2f}MB")
                 
                 logging.info(f"Successfully loaded BGE model on {device}")
                 
@@ -190,6 +205,9 @@ class EmbModel(Model):
                 with torch.no_grad():
                     _ = self.bge_emb.encode("워밍업 텍스트", max_length=128)['dense_vecs']
                 logging.info("Model warmup completed")
+                
+                # 모델 로드 완료 로깅
+                logging.warning(f"인스턴스 {self._instance_id}에서 모델 로드 완료")
                 
             except Exception as e:
                 logging.error(f"Error loading model: {str(e)}")
@@ -217,7 +235,14 @@ class EmbModel(Model):
         """GPU 접근을 제한하기 위한 세마포어를 반환합니다."""
         # InteractManager 클래스의 세마포어 사용 (모든 임베딩 처리에서 공유)
         from .pipe import InteractManager
-        return InteractManager.get_gpu_semaphore()
+        sem = InteractManager.get_gpu_semaphore()
+        
+        # 세마포어 현재 값 로깅
+        sem_value = InteractManager.get_gpu_semaphore_value()
+        active_workers = InteractManager.get_active_workers()
+        logging.warning(f"세마포어 정보: 사용 가능={sem_value}, 활성 작업={active_workers}, 최대={InteractManager.get_max_workers()}")
+        
+        return sem
             
     def embed_text(self, text, model_type=None):
         """텍스트에 임베딩을 적용합니다. 임베딩 벡터를 반환합니다."""
@@ -225,12 +250,16 @@ class EmbModel(Model):
         if model_type is None:
             model_type = getattr(self, 'model_type', 'bge')
         
+        # 인스턴스 정보 로깅
+        logging.info(f"임베딩 요청: 인스턴스 ID={self._instance_id}, 텍스트 길이={len(text)}")
+        
         # 캐시 확인 (짧은 텍스트만 캐싱)
         if len(text) < 1000:
             cache_key = f"{model_type}:{text}"
             with self._cache_lock:
                 if cache_key in self._embedding_cache:
                     # 캐시 히트
+                    logging.info(f"캐시 히트: 인스턴스 ID={self._instance_id}")
                     return self._embedding_cache[cache_key]
         
         # 세마포어 획득
@@ -243,15 +272,25 @@ class EmbModel(Model):
             
             # 세마포어 획득 시도
             sem_timeout = 60  # 세마포어 획득 최대 대기 시간 (초)
+            logging.info(f"세마포어 획득 시도: 인스턴스 ID={self._instance_id}")
             sem_acquired = sem.acquire(timeout=sem_timeout)
             
             if not sem_acquired:
-                logging.warning("GPU 세마포어 획득 실패, 제한 시간 초과")
+                logging.warning(f"GPU 세마포어 획득 실패: 인스턴스 ID={self._instance_id}, 제한 시간 초과")
                 # 세마포어 획득 실패해도 계속 진행 (성능 저하 가능성)
+            else:
+                logging.info(f"세마포어 획득 성공: 인스턴스 ID={self._instance_id}")
+            
+            # GPU 메모리 상태 로깅
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated()/1024**2
+                reserved = torch.cuda.memory_reserved()/1024**2
+                logging.info(f"GPU 메모리 상태: 할당={allocated:.2f}MB, 예약={reserved:.2f}MB")
             
             # 활성 작업 수 증가
             with self._task_lock:
                 self._active_gpu_tasks += 1
+                logging.info(f"활성 작업 증가: 인스턴스 ID={self._instance_id}, 작업 수={self._active_gpu_tasks}")
             
             # 임베딩 생성 - 모델 타입에 따라 분기
             compute_start = time.time()
@@ -259,11 +298,14 @@ class EmbModel(Model):
             if model_type == 'bge':
                 # BGE 모델 확인
                 if not hasattr(self, 'bge_emb') or self.bge_emb is None:
+                    logging.warning(f"모델 로드 필요: 인스턴스 ID={self._instance_id}")
                     self.set_emb_model('bge')
                 
                 # BGE 모델로 임베딩 계산
                 with torch.no_grad():
+                    logging.info(f"임베딩 계산 시작: 인스턴스 ID={self._instance_id}")
                     result = self.bge_emb.encode(text, max_length=self.emb_config.get('max_length', 1024))
+                    logging.info(f"임베딩 계산 완료: 인스턴스 ID={self._instance_id}")
                 
                 # 벡터 추출 및 numpy 배열로 변환
                 if isinstance(result, dict) and 'dense_vecs' in result:
@@ -301,10 +343,16 @@ class EmbModel(Model):
             
             # 장시간 소요된 경우 경고 로그
             if total_time > 5.0:
-                logging.warning(f"⚠️ 비정상적으로 긴 임베딩 처리 시간: {total_time:.2f}초")
+                logging.warning(f"⚠️ 비정상적으로 긴 임베딩 처리 시간: {total_time:.2f}초, 인스턴스 ID={self._instance_id}")
             
             # 일반 로그 (디버깅용)
-            logging.info(f"임베딩 완료: 총 {total_time:.4f}초, 계산={compute_time:.4f}초")
+            logging.info(f"임베딩 완료: 인스턴스 ID={self._instance_id}, 총 {total_time:.4f}초, 계산={compute_time:.4f}초")
+            
+            # GPU 메모리 상태 다시 로깅
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated()/1024**2
+                reserved = torch.cuda.memory_reserved()/1024**2
+                logging.info(f"임베딩 후 GPU 메모리: 할당={allocated:.2f}MB, 예약={reserved:.2f}MB")
             
             # 캐시 저장 (짧은 텍스트만)
             if len(text) < 1000:
@@ -324,7 +372,7 @@ class EmbModel(Model):
             return embedding_vector
             
         except Exception as e:
-            logging.error(f"임베딩 생성 오류: {str(e)}")
+            logging.error(f"임베딩 생성 오류: 인스턴스 ID={self._instance_id}, 오류={str(e)}")
             # 오류 발생 시 0 벡터 반환
             return [0.0] * 1024
             
@@ -332,18 +380,22 @@ class EmbModel(Model):
             # 활성 작업 수 감소
             with self._task_lock:
                 self._active_gpu_tasks = max(0, self._active_gpu_tasks - 1)
+                logging.info(f"활성 작업 감소: 인스턴스 ID={self._instance_id}, 작업 수={self._active_gpu_tasks}")
             
             # 세마포어 반환 (획득한 경우에만)
             if sem_acquired:
                 try:
                     sem.release()
+                    logging.info(f"세마포어 반환: 인스턴스 ID={self._instance_id}")
                 except Exception as release_error:
-                    logging.error(f"세마포어 반환 오류: {str(release_error)}")
+                    logging.error(f"세마포어 반환 오류: 인스턴스 ID={self._instance_id}, 오류={str(release_error)}")
             
             # GPU 메모리 정리 (다른 작업이 없을 때만)
             with self._task_lock:
                 if self._active_gpu_tasks == 0 and torch.cuda.is_available():
+                    logging.info(f"GPU 메모리 정리 시작: 인스턴스 ID={self._instance_id}")
                     torch.cuda.empty_cache()
+                    logging.info(f"GPU 메모리 정리 완료: 인스턴스 ID={self._instance_id}")
 
     def calc_emb_similarity(self, emb1, emb2, metric='L2'):
         if metric == 'L2':   # Euclidean distance
