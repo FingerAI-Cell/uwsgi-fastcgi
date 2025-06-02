@@ -410,6 +410,35 @@ class EmbModel(Model):
     def get_cohere_encoder(self, cohere_api):
         pass
 
+    def bge_embed_data(self, text):
+        """
+        임베딩 벡터 생성 메서드입니다. embed_text를 호출하여 동일한 기능을 수행합니다.
+        텍스트를 받아 임베딩 벡터를 반환합니다.
+        
+        Args:
+            text (str): 임베딩할 텍스트
+            
+        Returns:
+            list: 임베딩 벡터 (1024 차원)
+        """
+        # 로깅 추가 - 메서드 호출 정보
+        logging.info(f"bge_embed_data 호출됨: 인스턴스 ID={self._instance_id}, 텍스트 길이 {len(text)}")
+        
+        # 시작 시간 기록
+        start_time = time.time()
+        
+        # embed_text 메서드 호출
+        result = self.embed_text(text, model_type='bge')
+        
+        # 완료 시간 및 소요 시간 계산
+        end_time = time.time()
+        duration = end_time - start_time
+        
+        # 결과 및 성능 로깅
+        logging.info(f"bge_embed_data 완료: 인스턴스 ID={self._instance_id}, 소요 시간 {duration:.4f}초")
+        
+        return result
+
 
 class LLMOpenAI(Model):
     def __init__(self, config):
