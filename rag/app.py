@@ -18,6 +18,7 @@ import concurrent.futures
 import threading
 import traceback
 import psutil
+import hashlib
 
 # 로깅 설정
 logging.basicConfig(
@@ -887,113 +888,65 @@ def insert_data():
                             
                             # 임베딩 생성 함수 정의
                             def process_chunk(chunk, index):
-                                chunk_start = time.time()
-                                logger.info(f"process_chunk 호출: 청크 {index}")
+                                """
+                                청크를 처리하고 필요한 경우 임베딩을 추가합니다.
+                                
+                                Args:
+                                    chunk (dict): 처리할 청크 데이터
+                                    index (int): 청크 인덱스
+                                    
+                                Returns:
+                                    dict: 처리된 청크 데이터 또는 None (오류 시)
+                                """
                                 try:
-                                    # 청크 텍스트 유효성 확인 및 전처리
-                                    if isinstance(chunk, tuple):
-                                        logger.warning(f"청크 {index}가 튜플 형태로 전달됨, 첫 번째 요소만 사용")
-                                        if len(chunk) > 0:
-                                            chunk = chunk[0]  # 튜플의 첫 번째 요소만 사용
-                                        else:
-                                            logger.error(f"청크 {index}가 빈 튜플")
-                                            return None
-                                    
-                                    # 청크가 문자열이 아닌 경우 문자열로 변환
-                                    if not isinstance(chunk, str):
-                                        try:
-                                            chunk = str(chunk)
-                                            logger.warning(f"청크 {index}가 문자열이 아니어서 변환함: {type(chunk)}")
-                                        except Exception as e:
-                                            logger.error(f"청크 {index} 문자열 변환 실패: {str(e)}")
-                                            return None
-                                    
-                                    # 청크가 비어 있는지 확인
-                                    if not chunk or len(chunk.strip()) == 0:
-                                        logger.error(f"청크 {index}가 비어있음")
+                                    # 필수 필드 검증
+                                    if not chunk.get('text', '').strip():
+                                        logger.warning(f"빈 텍스트 청크 건너뜀: {doc.get('doc_id', 'unknown')}, 청크 #{index}")
                                         return None
                                     
-                                    # 청크 ID 생성
-                                    chunk_id = f"{doc_hashed_id}_chunk_{index}"
-                                    passage_uid = f"{doc_hashed_id}_{index}"  # passage_uid 생성
+                                    # 메타데이터 및 필수 필드 설정
+                                    if 'metadata' not in chunk:
+                                        chunk['metadata'] = {}
                                     
-                                    # 청크 데이터 구성 - 컬렉션 스키마에 맞게 모든 필드 포함
-                                    chunk_data = {
-                                        'id': chunk_id,
-                                        'passage_uid': passage_uid,  # passage_uid 필드 추가
-                                        'doc_id': doc_hashed_id,
-                                        'raw_doc_id': raw_doc_id,
-                                        'passage_id': int(index),  # passage_id 명시적으로 정수형 변환
-                                        'text': chunk,
-                                        'title': doc.get('title', ''),
-                                        'domain': domain,     # domain 필드 확실히 설정
-                                        'author': doc.get('author', ''), 
-                                        'info': doc.get('info', {}),
-                                        'tags': doc.get('tags', {}),
-                                        'metadata': {
-                                            'chunk_index': int(index),  # chunk_index도 정수형으로 설정
-                                            'source': 'api',
-                                            'timestamp': time.time()
-                                        }
-                                    }
+                                    # 문서 메타데이터 상속
+                                    chunk['metadata'].update(doc.get('metadata', {}))
                                     
-                                    # 임베딩 생성 전 GPU 세마포어 상태 추적
-                                    thread_id = threading.get_ident()
-                                    insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 시작 (텍스트 길이: {len(chunk)})")
+                                    # 문서 ID와 청크 번호 설정
+                                    chunk['doc_id'] = doc.get('doc_id', '')
+                                    chunk['passage_id'] = index
                                     
-                                    # 임베딩 생성 (prepare_data_with_embedding 사용)
-                                    embedding_start = time.time()
-                                    chunk_data_with_embedding = interact_manager.prepare_data_with_embedding(chunk_data)
-                                    embedding_end = time.time()
-                                    embedding_duration = embedding_end - embedding_start
+                                    # 메모리 사용량 추적
+                                    memory_usage = get_memory_usage()
+                                    logger.info(f"[MEMORY] 청크 처리 전 메모리 사용량: {memory_usage:.2f} MB")
                                     
-                                    # 임베딩 생성 성공 시 글로벌 배치 큐에 추가
-                                    if chunk_data_with_embedding is not None:
-                                        # 임베딩 벡터 길이 확인 및 보정
-                                        if 'text_emb' in chunk_data_with_embedding:
-                                            emb_length = len(chunk_data_with_embedding['text_emb'])
-                                            if emb_length != 1024:
-                                                # 벡터 길이가 1024가 아닌 경우 보정
-                                                if emb_length < 1024:
-                                                    # 부족한 경우 0으로 채움
-                                                    padding = [0.0] * (1024 - emb_length)
-                                                    chunk_data_with_embedding['text_emb'] = list(chunk_data_with_embedding['text_emb']) + padding
-                                                    logger.info(f"청크 {index}의 벡터 길이 부족, 0으로 채움: {emb_length} -> 1024")
-                                                else:
-                                                    # 길이가 초과하는 경우 자름
-                                                    chunk_data_with_embedding['text_emb'] = list(chunk_data_with_embedding['text_emb'])[:1024]
-                                                    logger.info(f"청크 {index}의 벡터 길이 초과, 자름: {emb_length} -> 1024")
-                                            else:
-                                                # 벡터가 비어있는 경우 0으로 채운 벡터 생성
-                                                chunk_data_with_embedding['text_emb'] = [0.0] * 1024
-                                                logger.info(f"청크 {index}의 벡터가 비어있어 0으로 채운 벡터 생성")
-                                        
-                                        # 청크 ID로 중복 검사
-                                        chunk_id = f"{doc_hashed_id}_{index}"
-                                        if chunk_id not in processed_chunk_ids:
-                                            processed_chunk_ids.add(chunk_id)
-                                            
-                                            # 글로벌 배치 큐에 즉시 추가 (임베딩 즉시 삽입)
-                                            batch_full = InteractManager.add_to_global_batch(chunk_data_with_embedding, domain)
-                                            if batch_full:
-                                                insert_logger.info(f"청크 {index} 추가 후 글로벌 배치가 가득 참 (도메인: {domain})")
-                                        
-                                        # 임베딩 벡터 정보 로깅 간소화
-                                        try:
-                                            # 최소한의 정보만 로깅
-                                            insert_logger.info(f"[Thread-{thread_id}] 청크 {index} 임베딩 완료: 소요시간={embedding_duration:.4f}초")
-                                        except Exception as log_error:
-                                            pass
-                                        
-                                        return chunk_data_with_embedding  # 성공한 경우 임베딩이 추가된 데이터 반환
-                                    else:
-                                        logger.warning(f"청크 {index}의 임베딩 생성 실패: prepare_data_with_embedding이 None을 반환함")
-                                        return None  # 실패한 경우 None 반환
+                                    # 임베딩 추가
+                                    processed_chunk = interact_manager.embed_and_prepare_chunk(chunk)
+                                    
+                                    if processed_chunk is None:
+                                        logger.warning(f"청크 처리 실패: {doc.get('doc_id', 'unknown')}, 청크 #{index}")
+                                        return None
+                                    
+                                    # 해시 기반 고유 ID 생성 (passage_uid)
+                                    if 'passage_uid' not in processed_chunk:
+                                        import hashlib
+                                        text_hash = hashlib.sha512(processed_chunk['text'].encode('utf-8')).hexdigest()
+                                        passage_id = str(processed_chunk.get('passage_id', '0'))
+                                        processed_chunk['passage_uid'] = f"{text_hash}_{passage_id}"
+                                    
+                                    # 처리된 청크 데이터를 글로벌 배치 큐에 직접 추가
+                                    from rag.src.pipe import InteractManager
+                                    added_to_batch = InteractManager.add_to_global_batch(processed_chunk, domain)
+                                    
+                                    if added_to_batch:
+                                        logger.info(f"청크 글로벌 배치 큐에 추가 완료: {doc.get('doc_id', 'unknown')}, 청크 #{index}")
+                                    
+                                    # 처리된 청크 반환 (배치 처리를 위해)
+                                    return processed_chunk
                                     
                                 except Exception as e:
-                                    logger.error(f"청크 처리 오류: {str(e)}")
+                                    logger.error(f"청크 처리 중 오류: {str(e)}, 청크 #{index}")
                                     import traceback
-                                    logger.error(f"스택 트레이스: {traceback.format_exc()}")
+                                    logger.error(f"오류 세부 정보: {traceback.format_exc()}")
                                     return None
                             
                             # 청크 병렬 처리
