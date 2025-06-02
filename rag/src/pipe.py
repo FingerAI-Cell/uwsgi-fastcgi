@@ -76,6 +76,14 @@ class InteractManager:
     _gpu_semaphore = _GPU_SEMAPHORE
     _task_lock = GPU_TASK_LOCK
     
+    # 글로벌 배치 큐 관련 변수 추가
+    global_batch_queue = {}  # 도메인별 글로벌 배치 큐 {domain: [chunks...]}
+    global_batch_lock = threading.Lock()  # 글로벌 배치 큐 접근을 위한 락
+    batch_worker_thread = None  # 배치 처리 워커 스레드
+    batch_worker_running = False  # 워커 스레드 실행 상태
+    # 로깅 용도로만 사용
+    last_batch_time = {}  # 도메인별 마지막 배치 추가 시간 {domain: timestamp}
+    
     @classmethod
     def get_gpu_semaphore(cls):
         """모든 인스턴스에서 공유하는 GPU 세마포어를 반환합니다."""
@@ -407,28 +415,24 @@ class InteractManager:
 
     # 전역 DB 접근 세마포어 및 배치 처리 관련 변수
     db_semaphore = None
+    # 불필요한 변수 제거 - 글로벌 배치 큐로 대체됨
+    batch_size = 300  # 기본 배치 크기 (300으로 통일)
+    # 레거시 호환성을 위해 유지 (하지만 실제로는 사용하지 않음)
     batch_lock = None
-    batch_data = {}  # 도메인별 배치 데이터 저장 {domain: [data_items]}
-    batch_size = 100  # 기본 배치 크기
-    gpu_semaphore = None  # GPU 접근 제한을 위한 세마포어
-
-    @classmethod
-    def get_gpu_semaphore(cls):
-        """GPU 접근을 제한하기 위한 세마포어를 반환합니다."""
-        if cls.gpu_semaphore is None:
-            max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))  # 기본값: 50
-            cls.gpu_semaphore = threading.BoundedSemaphore(max_gpu_workers)
-            print(f"[DEBUG] Initialized GPU semaphore with {max_gpu_workers} max workers")
-        return cls.gpu_semaphore
+    batch_data = {}
+    
+    # 중복 메서드 제거 (위에 이미 동일한 기능의 get_gpu_semaphore 메서드가 있음)
     
     @classmethod
     def init_batch_processing(cls):
         """배치 처리를 위한 공유 변수를 초기화합니다."""
-        if cls.batch_lock is None:
-            cls.batch_lock = threading.Lock()
-            cls.batch_data = {}
-            cls.batch_size = int(os.getenv('BATCH_SIZE', '300'))  # 100에서 300으로 증가
-            print(f"[DEBUG] Initialized batch processing with size {cls.batch_size}")
+        # 배치 크기 설정
+        cls.batch_size = int(os.getenv('BATCH_SIZE', '300'))  # 100에서 300으로 증가
+        print(f"[DEBUG] Initialized batch processing with size {cls.batch_size}")
+        
+        # 글로벌 배치 워커 시작
+        cls.start_batch_worker()
+        print(f"[DEBUG] Global batch worker started")
     
     @classmethod
     def init_db_semaphore(cls):
@@ -648,7 +652,11 @@ class InteractManager:
             # 남은 배치 데이터 처리
             batch_flush_start = time.time()
             print(f"[DEBUG] Flushing any remaining batch data for domain: {domain}")
-            self._flush_batch(domain)
+            # self._flush_batch(domain) 대신 글로벌 배치 큐에 추가
+            remaining_batches = self._get_remaining_batches(domain)
+            if remaining_batches:
+                self.__class__.add_to_global_batch(remaining_batches, domain)
+                print(f"[DEBUG] Added {len(remaining_batches)} remaining items to global batch queue for domain: {domain}")
             batch_flush_end = time.time()
             
             # DB 삽입 완료
@@ -1311,6 +1319,8 @@ class InteractManager:
         데이터를 배치에 추가하고 배치 크기가 충족되면 삽입합니다.
         배치 처리를 통해 DB 접근 횟수를 줄입니다.
         
+        글로벌 배치 큐를 사용하도록 수정됨
+        
         Args:
             data (dict 또는 list): 삽입할 데이터 항목 (딕셔너리) 또는 항목 리스트
             domain (str): 삽입할 도메인(컬렉션)
@@ -1318,32 +1328,11 @@ class InteractManager:
         Returns:
             bool: 배치 삽입이 수행되었는지 여부
         """
-        inserted = False
+        # 글로벌 배치 큐 사용
+        batch_full = self.__class__.add_to_global_batch(data, domain)
         
-        # data가 딕셔너리인 경우 리스트로 변환 (단일 항목 처리 지원)
-        if isinstance(data, dict):
-            data_items = [data]
-        else:
-            data_items = data
-        
-        # 배치 락 획득
-        with self.__class__.batch_lock:
-            # 도메인별 배치 초기화
-            if domain not in self.__class__.batch_data:
-                self.__class__.batch_data[domain] = []
-            
-            # 데이터 배치에 추가
-            self.__class__.batch_data[domain].extend(data_items)
-            
-            # 배치 크기가 충족되면 삽입
-            if len(self.__class__.batch_data[domain]) >= self.__class__.batch_size:
-                batch_data = self.__class__.batch_data[domain]
-                self.__class__.batch_data[domain] = []  # 배치 비우기
-                
-                # 락 해제 상태에서 실제 삽입 수행
-                inserted = self._execute_batch_insert(batch_data, domain)
-        
-        return inserted
+        # 하위 호환성을 위해 배치 크기 충족 여부 반환
+        return batch_full
     
     def _execute_batch_insert(self, batch_data, domain):
         """배치 데이터 삽입을 위한 개선된 메서드"""
@@ -1527,6 +1516,20 @@ class InteractManager:
                     # 락 해제 상태에서 삽입 수행
                     self._execute_batch_insert(data_to_insert, domain)
 
+    def _get_remaining_batches(self, domain):
+        """
+        특정 도메인의 배치 큐에 남아있는 데이터를 가져옵니다.
+        글로벌 배치 큐 사용을 위한 호환성 메서드입니다.
+        
+        Args:
+            domain (str): 데이터를 가져올 도메인
+            
+        Returns:
+            list: 배치 데이터 목록 또는 빈 리스트
+        """
+        # 더 이상 인스턴스 배치 데이터를 사용하지 않으므로 빈 리스트 반환
+        return []
+    
     def embed_and_prepare_chunk(self, chunk_data):
         """청크 데이터에 임베딩을 추가하고 DB 삽입을 위한 데이터로 변환합니다."""
         try:
@@ -2067,3 +2070,186 @@ class InteractManager:
             duplication_logger.error(f"스택 트레이스: {traceback.format_exc()}")
             
             return []
+
+    @classmethod
+    def start_batch_worker(cls):
+        """배치 처리 워커 스레드를 시작합니다."""
+        if cls.batch_worker_thread is None or not cls.batch_worker_running:
+            cls.batch_worker_running = True
+            cls.batch_worker_thread = threading.Thread(target=cls._batch_worker_loop, daemon=True)
+            cls.batch_worker_thread.start()
+            print(f"[DEBUG] 배치 처리 워커 스레드 시작됨")
+
+    @classmethod
+    def stop_batch_worker(cls):
+        """배치 처리 워커 스레드를 중지합니다."""
+        cls.batch_worker_running = False
+        if cls.batch_worker_thread and cls.batch_worker_thread.is_alive():
+            cls.batch_worker_thread.join(timeout=2.0)
+            print(f"[DEBUG] 배치 처리 워커 스레드 중지됨")
+
+    @classmethod
+    def _batch_worker_loop(cls):
+        """배치 처리 워커 스레드의 메인 루프"""
+        import logging
+        logger = logging.getLogger('rag-backend')
+        logger.info("배치 처리 워커 스레드 시작")
+        
+        while cls.batch_worker_running:
+            try:
+                # 각 도메인에 대해 배치 처리 확인
+                domains_to_process = []
+                
+                with cls.global_batch_lock:
+                    # 처리할 도메인 목록 생성
+                    for domain, chunks in cls.global_batch_queue.items():
+                        # 배치가 꽉 찬 경우에만 처리
+                        if len(chunks) >= cls.batch_size:
+                            domains_to_process.append(domain)
+                
+                # 처리할 도메인이 있으면 배치 처리 수행
+                for domain in domains_to_process:
+                    with cls.global_batch_lock:
+                        # 배치 데이터 가져오기
+                        if domain in cls.global_batch_queue and cls.global_batch_queue[domain]:
+                            # 배치 크기만큼 또는 모든 청크 가져오기
+                            if len(cls.global_batch_queue[domain]) <= cls.batch_size:
+                                batch_data = cls.global_batch_queue[domain]
+                                cls.global_batch_queue[domain] = []
+                            else:
+                                batch_data = cls.global_batch_queue[domain][:cls.batch_size]
+                                cls.global_batch_queue[domain] = cls.global_batch_queue[domain][cls.batch_size:]
+                            
+                            # 타임스탬프 갱신 (로깅용으로만 사용)
+                            cls.last_batch_time[domain] = time.time()
+                            
+                            batch_size = len(batch_data)
+                            logger.info(f"글로벌 배치 처리: 도메인={domain}, 청크 수={batch_size}")
+                        else:
+                            continue
+                    
+                    # 락 해제 상태에서 배치 처리 (다른 스레드가 큐에 추가할 수 있도록)
+                    if batch_data:
+                        try:
+                            # 인스턴스 생성 필요 (클래스 메서드에서 인스턴스 메서드 호출)
+                            instance = InteractManager()
+                            instance._execute_batch_insert(batch_data, domain)
+                            logger.info(f"글로벌 배치 {batch_size}개 항목 처리 완료 (도메인: {domain})")
+                        except Exception as e:
+                            logger.error(f"글로벌 배치 처리 오류: {str(e)}")
+                            # 오류 발생 시 개별 처리 시도
+                            try:
+                                for item in batch_data:
+                                    try:
+                                        instance._execute_batch_insert([item], domain)
+                                    except Exception as item_error:
+                                        logger.error(f"개별 항목 처리 실패: {str(item_error)}")
+                            except Exception as recovery_error:
+                                logger.error(f"복구 시도 중 오류: {str(recovery_error)}")
+            
+                # 처리할 도메인이 없으면 잠시 대기
+                if not domains_to_process:
+                    time.sleep(0.1)  # CPU 사용률 감소를 위한 짧은 대기
+                    
+            except Exception as e:
+                logger.error(f"배치 워커 루프 오류: {str(e)}")
+                time.sleep(1.0)  # 오류 발생 시 더 긴 대기
+        
+        logger.info("배치 처리 워커 스레드 종료")
+
+    @classmethod
+    def add_to_global_batch(cls, data, domain):
+        """
+        글로벌 배치 큐에 데이터를 추가합니다.
+        
+        Args:
+            data (dict 또는 list): 추가할 데이터 항목 또는 항목 리스트
+            domain (str): 도메인
+            
+        Returns:
+            bool: 성공 여부
+        """
+        try:
+            # 배치 워커 시작 확인
+            if not cls.batch_worker_running:
+                cls.start_batch_worker()
+            
+            # 단일 항목을 리스트로 변환
+            if isinstance(data, dict):
+                data_items = [data]
+            else:
+                data_items = data
+            
+            if not data_items:
+                return False
+            
+            with cls.global_batch_lock:
+                # 도메인별 큐 초기화
+                if domain not in cls.global_batch_queue:
+                    cls.global_batch_queue[domain] = []
+                
+                # 데이터 항목 추가
+                cls.global_batch_queue[domain].extend(data_items)
+                
+                # 마지막 배치 추가 시간 갱신 (로깅용)
+                cls.last_batch_time[domain] = time.time()
+                
+                # 배치 크기 이상이 되면 배치 처리가 필요함을 표시
+                return len(cls.global_batch_queue[domain]) >= cls.batch_size
+                
+        except Exception as e:
+            import logging
+            logger = logging.getLogger('rag-backend')
+            logger.error(f"글로벌 배치 큐 추가 실패: {str(e)}")
+            return False
+
+    @classmethod
+    def flush_all_batches(cls):
+        """글로벌 배치 큐의 모든 데이터를 처리합니다."""
+        import logging
+        logger = logging.getLogger('rag-backend')
+        logger.info("모든 배치 데이터 강제 처리 시작")
+        
+        try:
+            domains_to_process = []
+            batch_data_map = {}
+            
+            # 모든 배치 데이터를 안전하게 가져오기
+            with cls.global_batch_lock:
+                for domain, chunks in cls.global_batch_queue.items():
+                    if chunks:
+                        domains_to_process.append(domain)
+                        batch_data_map[domain] = chunks.copy()
+                        cls.global_batch_queue[domain] = []
+            
+            if not domains_to_process:
+                logger.info("처리할 배치 데이터가 없음")
+                return
+            
+            # 모든 도메인의 배치 데이터 처리
+            for domain in domains_to_process:
+                batch_data = batch_data_map[domain]
+                if batch_data:
+                    logger.info(f"도메인 {domain}의 {len(batch_data)}개 항목 처리 중")
+                    try:
+                        # 인스턴스 생성 필요 (클래스 메서드에서 인스턴스 메서드 호출)
+                        instance = InteractManager()
+                        instance._execute_batch_insert(batch_data, domain)
+                        logger.info(f"도메인 {domain} 배치 데이터 처리 완료")
+                    except Exception as e:
+                        logger.error(f"도메인 {domain} 배치 데이터 처리 실패: {str(e)}")
+                        # 중요 데이터이므로 항목별 처리 시도
+                        success_count = 0
+                        for item in batch_data:
+                            try:
+                                instance._execute_batch_insert([item], domain)
+                                success_count += 1
+                            except Exception as item_error:
+                                logger.error(f"항목 처리 실패: {str(item_error)}")
+                        logger.info(f"도메인 {domain} 항목별 처리 결과: {success_count}/{len(batch_data)}개 성공")
+            
+            logger.info("모든 배치 데이터 처리 완료")
+        except Exception as e:
+            logger.error(f"배치 데이터 강제 처리 중 오류 발생: {str(e)}")
+            import traceback
+            logger.error(f"오류 상세: {traceback.format_exc()}")
