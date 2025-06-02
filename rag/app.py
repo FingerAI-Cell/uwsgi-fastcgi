@@ -811,7 +811,7 @@ def insert_data():
                     chunk_to_doc_map = {}  # 청크 -> 원본 문서 매핑
                     
                     # 글로벌 배치 워커 시작
-                    from rag.src.pipe import InteractManager
+                    from src.pipe import InteractManager
                     InteractManager.start_batch_worker()
                     logger.info("글로벌 배치 처리 워커 시작됨")
                     
@@ -934,7 +934,7 @@ def insert_data():
                                         processed_chunk['passage_uid'] = f"{text_hash}_{passage_id}"
                                     
                                     # 처리된 청크 데이터를 글로벌 배치 큐에 직접 추가
-                                    from rag.src.pipe import InteractManager
+                                    from src.pipe import InteractManager
                                     added_to_batch = InteractManager.add_to_global_batch(processed_chunk, domain)
                                     
                                     if added_to_batch:
@@ -1007,7 +1007,7 @@ def insert_data():
                     # 전체 GPU 세마포어 상태 확인
                     if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                         try:
-                            from rag.src.pipe import InteractManager
+                            from src.pipe import InteractManager
                             # 새로운 메서드 사용
                             max_workers = InteractManager.get_max_workers()
                             active_workers = InteractManager.get_active_workers()
@@ -1035,7 +1035,7 @@ def insert_data():
                     # 전체 GPU 세마포어 상태 확인
                     if hasattr(interact_manager.emb_model, 'get_gpu_semaphore'):
                         try:
-                            from rag.src.pipe import InteractManager
+                            from src.pipe import InteractManager
                             # 새로운 메서드 사용
                             max_workers = InteractManager.get_max_workers()
                             active_workers = InteractManager.get_active_workers()
