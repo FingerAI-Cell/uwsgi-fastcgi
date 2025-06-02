@@ -126,7 +126,7 @@ def cleanup_on_exit():
     try:
         # 글로벌 배치 워커 스레드 정리
         try:
-            from rag.src.pipe import InteractManager
+            from src.pipe import InteractManager
             # 남은 배치 데이터 처리
             logger.info("남은 배치 데이터 처리 중...")
             InteractManager.flush_all_batches()
