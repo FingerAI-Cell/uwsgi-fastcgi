@@ -2103,17 +2103,29 @@ class InteractManager:
         logger = logging.getLogger('rag-backend')
         logger.info("배치 처리 워커 스레드 시작")
         
+        # 도메인별 마지막 처리 시간 추적 (타임아웃 처리용)
+        last_process_time = {}
+        # 배치 타임아웃 설정 (초) - 이 시간이 지나면 배치 크기가 차지 않아도 처리
+        batch_timeout = 10.0
+        
         while cls.batch_worker_running:
             try:
                 # 각 도메인에 대해 배치 처리 확인
                 domains_to_process = []
+                current_time = time.time()
                 
                 with cls.global_batch_lock:
                     # 처리할 도메인 목록 생성
                     for domain, chunks in cls.global_batch_queue.items():
-                        # 배치가 꽉 찬 경우에만 처리
+                        # 배치가 꽉 찬 경우에 처리
                         if len(chunks) >= cls.batch_size:
                             domains_to_process.append(domain)
+                        # 또는 일정 시간이 지난 경우에도 처리 (배치에 데이터가 있는 경우)
+                        elif len(chunks) > 0:
+                            time_since_last_process = current_time - last_process_time.get(domain, 0)
+                            if time_since_last_process >= batch_timeout or domain not in last_process_time:
+                                domains_to_process.append(domain)
+                                logger.info(f"배치 타임아웃 발생: 도메인={domain}, 항목 수={len(chunks)}, 경과 시간={time_since_last_process:.1f}초")
                 
                 # 처리할 도메인이 있으면 배치 처리 수행
                 for domain in domains_to_process:
@@ -2129,7 +2141,9 @@ class InteractManager:
                                 cls.global_batch_queue[domain] = cls.global_batch_queue[domain][cls.batch_size:]
                             
                             # 타임스탬프 갱신 (로깅용으로만 사용)
-                            cls.last_batch_time[domain] = time.time()
+                            cls.last_batch_time[domain] = current_time
+                            # 마지막 처리 시간 갱신 (타임아웃 계산용)
+                            last_process_time[domain] = current_time
                             
                             batch_size = len(batch_data)
                             
@@ -2311,18 +2325,56 @@ class InteractManager:
     def flush_all_batches(cls):
         """모든 도메인의 남은 배치 데이터를 처리합니다."""
         try:
+            import logging
+            logger = logging.getLogger('rag-backend')
+            logger.info("모든 도메인의 남은 배치 데이터 처리 시작")
+            
             with cls.global_batch_lock:
                 domains = list(cls.global_batch_queue.keys())
             
             for domain in domains:
-                # 각 도메인의 남은 배치 데이터 처리
-                instance = InteractManager()
-                remaining = instance._get_remaining_batches(domain)
-                if remaining:
-                    instance._execute_batch_insert(remaining, domain)
-                    print(f"[DEBUG] 남은 배치 데이터 처리 완료: 도메인={domain}, 항목 수={len(remaining)}")
+                try:
+                    # 각 도메인의 남은 배치 데이터 처리
+                    instance = InteractManager()
+                    
+                    with cls.global_batch_lock:
+                        if domain in cls.global_batch_queue and cls.global_batch_queue[domain]:
+                            batch_data = cls.global_batch_queue[domain]
+                            cls.global_batch_queue[domain] = []
+                            
+                            logger.info(f"도메인 '{domain}'의 남은 배치 데이터 처리 중: {len(batch_data)}개 항목")
+                        else:
+                            logger.info(f"도메인 '{domain}'에 남은 배치 데이터 없음")
+                            continue
+                    
+                    if batch_data:
+                        # 배치 데이터 처리
+                        try:
+                            instance._execute_batch_insert(batch_data, domain)
+                            logger.info(f"도메인 '{domain}'의 남은 배치 데이터 처리 완료: {len(batch_data)}개 항목")
+                        except Exception as batch_error:
+                            logger.error(f"배치 처리 오류: {str(batch_error)}, 개별 처리 시도 중")
+                            
+                            # 개별 처리 시도
+                            success_count = 0
+                            for item in batch_data:
+                                try:
+                                    instance._execute_batch_insert([item], domain)
+                                    success_count += 1
+                                except Exception as item_error:
+                                    logger.error(f"개별 항목 처리 실패: {str(item_error)}")
+                            
+                            logger.info(f"개별 처리 결과: {success_count}/{len(batch_data)}개 성공")
+                except Exception as domain_error:
+                    logger.error(f"도메인 '{domain}' 처리 중 오류: {str(domain_error)}")
+            
+            logger.info("모든 도메인의 남은 배치 데이터 처리 완료")
         except Exception as e:
-            print(f"[ERROR] 배치 데이터 정리 오류: {str(e)}")
+            import logging
+            logger = logging.getLogger('rag-backend')
+            logger.error(f"배치 데이터 정리 오류: {str(e)}")
+            import traceback
+            logger.error(f"오류 세부 정보: {traceback.format_exc()}")
 
     @classmethod
     def start_embedding_worker(cls):

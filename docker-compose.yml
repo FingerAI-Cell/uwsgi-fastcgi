@@ -148,7 +148,7 @@ services:
       - INSERT_CHUNK_THREADS=10
       - INSERT_DOCUMENT_THREADS=5
       - MAX_DB_CONNECTIONS=20
-      - BATCH_SIZE=100
+      - BATCH_SIZE=50
       - EMBEDDING_BATCH_SIZE=50
     depends_on:
       - standalone

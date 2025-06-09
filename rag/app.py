@@ -1113,6 +1113,15 @@ def insert_data():
                     logger.info(f"[TIMING] 문서 처리 완료: {len(docs_to_insert)}개 문서 -> {total_chunks}개 청크 성공, 소요시간: {chunking_end - chunking_start:.4f}초")
                     insert_logger.info(f"문서 처리 완료: {len(docs_to_insert)}개 문서 -> {total_chunks}개 청크 성공, 소요시간: {chunking_end - chunking_start:.4f}초")
                     
+                    # 남은 배치 데이터 강제 처리
+                    try:
+                        from src.pipe import InteractManager
+                        insert_logger.info("남은 배치 데이터 강제 처리 중...")
+                        InteractManager.flush_all_batches()
+                        insert_logger.info("남은 배치 데이터 처리 완료")
+                    except Exception as flush_err:
+                        insert_logger.error(f"남은 배치 데이터 처리 실패: {str(flush_err)}")
+                    
                     insert_end = time.time()
                     logger.info(f"[TIMING] 문서 삽입 처리 완료: 소요시간: {insert_end - insert_start:.4f}초")
                     insert_logger.info(f"문서 삽입 처리 완료: 소요시간: {insert_end - insert_start:.4f}초")
