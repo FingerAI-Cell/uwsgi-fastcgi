@@ -813,8 +813,72 @@ def insert_data():
                             insert_logger.error(f"배치 삭제 오류 (배치 {i//delete_batch_size + 1}): {str(e)}")
                     
                     # 삭제 후 즉시 flush하여 변경사항 적용
-                    collection.flush()
-                    insert_logger.info(f"삭제 후 flush 완료")
+                    try:
+                        flush_result = collection.flush()
+                        insert_logger.info(f"삭제 후 flush 호출 완료")
+                        
+                        # flush 결과 확인 (필요시 속성 확인)
+                        if hasattr(flush_result, 'success') and not flush_result.success:
+                            logger.error(f"Flush 실패: {flush_result}")
+                            insert_logger.error(f"Flush 실패: {flush_result}")
+                            return jsonify({
+                                "status": "error",
+                                "message": f"중복 문서 삭제 후 flush 실패",
+                                "details": str(flush_result)
+                            }), 500
+                        
+                        # 삭제 확인 - 실제로 문서가 삭제되었는지 확인
+                        verification_start = time.time()
+                        
+                        # 샘플 문서 ID로 검증 (최대 5개까지)
+                        verification_ids = delete_ids[:min(5, len(delete_ids))]
+                        verification_failures = []
+                        
+                        for doc_id in verification_ids:
+                            try:
+                                # 문서 ID로 검색
+                                verify_expr = f'doc_id == "{doc_id}"'
+                                verify_result = collection.query(
+                                    expr=verify_expr,
+                                    output_fields=["doc_id"],
+                                    limit=1
+                                )
+                                
+                                # 결과가 있으면 삭제되지 않은 것
+                                if verify_result and len(verify_result) > 0:
+                                    verification_failures.append(doc_id)
+                                    logger.warning(f"문서 삭제 확인 실패: {doc_id} - 여전히 존재함")
+                                    insert_logger.warning(f"문서 삭제 확인 실패: {doc_id} - 여전히 존재함")
+                            except Exception as e:
+                                logger.error(f"삭제 확인 중 오류 발생: {str(e)}")
+                                insert_logger.error(f"삭제 확인 중 오류 발생: {str(e)}")
+                        
+                        verification_end = time.time()
+                        logger.info(f"[TIMING] 삭제 확인 완료: 소요시간={verification_end - verification_start:.4f}초, 확인 개수={len(verification_ids)}개")
+                        
+                        # 삭제 확인 실패한 경우 처리
+                        if verification_failures:
+                            # 경고 로그만 남기고 계속 진행 (혹은 실패 처리로 변경 가능)
+                            logger.warning(f"일부 문서({len(verification_failures)}/{len(verification_ids)})가 제대로 삭제되지 않았습니다.")
+                            insert_logger.warning(f"일부 문서({len(verification_failures)}/{len(verification_ids)})가 제대로 삭제되지 않았습니다.")
+                            
+                            # 필요시 추가 대기 및 재시도
+                            time.sleep(1)  # 1초 대기
+                            try:
+                                # 다시 한번 flush 시도
+                                collection.flush()
+                                insert_logger.info("삭제 확인 후 추가 flush 완료")
+                            except Exception as e:
+                                logger.error(f"추가 flush 실패: {str(e)}")
+                                insert_logger.error(f"추가 flush 실패: {str(e)}")
+                    except Exception as e:
+                        logger.error(f"Flush 중 오류 발생: {str(e)}")
+                        insert_logger.error(f"Flush 중 오류 발생: {str(e)}")
+                        return jsonify({
+                            "status": "error",
+                            "message": "중복 문서 삭제 중 오류 발생",
+                            "details": str(e)
+                        }), 500
                     
                     delete_end = time.time()
                     logger.info(f"[TIMING] 문서 일괄 삭제 완료: {total_deleted}개 항목, 소요시간: {delete_end - delete_start:.4f}초")
