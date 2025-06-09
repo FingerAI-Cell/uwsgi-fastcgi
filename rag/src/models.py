@@ -76,7 +76,7 @@ class EmbModel(Model):
         self._model_loaded = False  # 모델 로드 상태 추적
         # GPU 동시 접근 제한 (환경변수로 설정 가능)
         # MAX_GPU_WORKERS 환경변수로 GPU 동시 접근 수 제한
-        self.max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '50'))  # pipe.py와 통일하여 50으로 설정
+        self.max_gpu_workers = int(os.getenv('MAX_GPU_WORKERS', '1'))  # 배치 임베딩을 위해 1로 설정
         # 세마포어는 초기화하지 않고 get_gpu_semaphore 메서드에서 획득
         # 활성 작업 수 추적을 위한 변수
         self._active_gpu_tasks = 0
@@ -438,6 +438,158 @@ class EmbModel(Model):
         logging.info(f"bge_embed_data 완료: 인스턴스 ID={self._instance_id}, 소요 시간 {duration:.4f}초")
         
         return result
+
+    def bge_batch_embed_data(self, texts):
+        """
+        여러 텍스트를 배치로 처리하여 임베딩 벡터를 생성합니다.
+        
+        Args:
+            texts (list): 임베딩할 텍스트 리스트
+            
+        Returns:
+            list: 임베딩 벡터 리스트 (각각 1024 차원)
+        """
+        if not texts:
+            return []
+        
+        # 로깅 추가 - 배치 처리 정보
+        logging.info(f"bge_batch_embed_data 호출됨: 인스턴스 ID={self._instance_id}, 배치 크기 {len(texts)}")
+        
+        # 시작 시간 기록
+        start_time = time.time()
+        
+        try:
+            # GPU 세마포어 획득 (배치 처리에도 동일하게 적용)
+            sem = self.get_gpu_semaphore()
+            sem_acquired = False
+            
+            try:
+                # 세마포어 획득 시도 (타임아웃 10초)
+                sem_acquired = sem.acquire(timeout=10)
+                if not sem_acquired:
+                    logging.warning(f"GPU 세마포어 획득 실패: 인스턴스 ID={self._instance_id}, 배치 크기={len(texts)}, 제한 시간 초과")
+                else:
+                    logging.info(f"세마포어 획득 성공: 인스턴스 ID={self._instance_id}, 배치 크기={len(texts)}")
+            
+                # GPU 메모리 상태 로깅
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated()/1024**2
+                    reserved = torch.cuda.memory_reserved()/1024**2
+                    logging.info(f"GPU 메모리 상태: 할당={allocated:.2f}MB, 예약={reserved:.2f}MB")
+            
+                # 활성 작업 수 증가
+                with self._task_lock:
+                    self._active_gpu_tasks += 1
+                    logging.info(f"활성 작업 증가: 인스턴스 ID={self._instance_id}, 작업 수={self._active_gpu_tasks}")
+            
+                # 배치 임베딩 계산 시작
+                compute_start = time.time()
+                
+                # BGE 모델 확인
+                if not hasattr(self, 'bge_emb') or self.bge_emb is None:
+                    logging.warning(f"모델 로드 필요: 인스턴스 ID={self._instance_id}")
+                    self.set_emb_model('bge')
+                
+                # BGE 모델로 배치 임베딩 계산
+                with torch.no_grad():
+                    logging.info(f"배치 임베딩 계산 시작: 인스턴스 ID={self._instance_id}, 배치 크기={len(texts)}")
+                    
+                    # 배치 단위로 직접 encode 호출 (FlagEmbedding의 배치 처리 활용)
+                    result = self.bge_emb.encode(texts, max_length=self.emb_config.get('max_length', 1024))
+                    
+                    logging.info(f"배치 임베딩 계산 완료: 인스턴스 ID={self._instance_id}")
+                
+                # 결과 추출 및 변환
+                embedding_vectors = []
+                
+                # 벡터 추출 및 처리
+                if isinstance(result, dict) and 'dense_vecs' in result:
+                    # dense_vecs가 2D 배열인 경우 (배치 처리)
+                    dense_vecs = result['dense_vecs']
+                    if isinstance(dense_vecs, np.ndarray) and len(dense_vecs.shape) == 2:
+                        # 각 벡터를 리스트로 변환
+                        for vec in dense_vecs:
+                            vec_list = vec.tolist()
+                            embedding_vectors.append(vec_list)
+                    else:
+                        # 단일 벡터만 반환된 경우 (예상치 못한 상황)
+                        logging.warning(f"예상치 못한 결과 형식: {type(dense_vecs)}, 형상: {dense_vecs.shape if hasattr(dense_vecs, 'shape') else 'unknown'}")
+                        # 안전하게 처리하기 위해 리스트 반환
+                        embedding_vectors = [dense_vecs.tolist()] * len(texts)
+                else:
+                    # 다른 형식의 결과 처리
+                    logging.warning(f"예상치 못한 결과 형식: {type(result)}")
+                    # 안전 처리: 모든 임베딩을 0 벡터로 설정
+                    embedding_vectors = [[0.0] * 1024 for _ in range(len(texts))]
+                
+                # 벡터 길이 확인 및 보정
+                expected_dim = 1024
+                for i, vec in enumerate(embedding_vectors):
+                    if len(vec) != expected_dim:
+                        logging.info(f"벡터 {i} 길이 부족하여 패딩: {len(vec)} → {expected_dim}")
+                        # 부족한 차원은 0으로 채움
+                        if len(vec) < expected_dim:
+                            vec.extend([0.0] * (expected_dim - len(vec)))
+                        # 초과 차원은 잘라냄
+                        else:
+                            embedding_vectors[i] = vec[:expected_dim]
+                
+                compute_end = time.time()
+                compute_time = compute_end - compute_start
+                
+                # 배치 임베딩 완료 시간 계산
+                end_time = time.time()
+                total_time = end_time - start_time
+                
+                # 장시간 소요된 경우 경고 로그
+                if total_time > 5.0:
+                    logging.warning(f"⚠️ 비정상적으로 긴 배치 임베딩 처리 시간: {total_time:.2f}초, 인스턴스 ID={self._instance_id}, 배치 크기={len(texts)}")
+                
+                # 일반 로그 (디버깅용)
+                logging.info(f"배치 임베딩 완료: 인스턴스 ID={self._instance_id}, 총 {total_time:.4f}초, 계산={compute_time:.4f}초, 항목 수={len(embedding_vectors)}")
+                
+                # GPU 메모리 상태 다시 로깅
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated()/1024**2
+                    reserved = torch.cuda.memory_reserved()/1024**2
+                    logging.info(f"임베딩 후 GPU 메모리: 할당={allocated:.2f}MB, 예약={reserved:.2f}MB")
+                
+                return embedding_vectors
+                
+            except Exception as e:
+                logging.error(f"배치 임베딩 생성 오류: 인스턴스 ID={self._instance_id}, 오류={str(e)}")
+                import traceback
+                logging.error(f"스택 트레이스: {traceback.format_exc()}")
+                # 오류 발생 시 0 벡터 반환
+                return [[0.0] * 1024 for _ in range(len(texts))]
+                
+            finally:
+                # 활성 작업 수 감소
+                with self._task_lock:
+                    self._active_gpu_tasks = max(0, self._active_gpu_tasks - 1)
+                    logging.info(f"활성 작업 감소: 인스턴스 ID={self._instance_id}, 작업 수={self._active_gpu_tasks}")
+                
+                # 세마포어 반환 (획득한 경우에만)
+                if sem_acquired:
+                    try:
+                        sem.release()
+                        logging.info(f"세마포어 반환: 인스턴스 ID={self._instance_id}")
+                    except Exception as release_error:
+                        logging.error(f"세마포어 반환 오류: 인스턴스 ID={self._instance_id}, 오류={str(release_error)}")
+                
+                # GPU 메모리 정리 (다른 작업이 없을 때만)
+                with self._task_lock:
+                    if self._active_gpu_tasks == 0 and torch.cuda.is_available():
+                        logging.info(f"GPU 메모리 정리 시작: 인스턴스 ID={self._instance_id}")
+                        torch.cuda.empty_cache()
+                        logging.info(f"GPU 메모리 정리 완료: 인스턴스 ID={self._instance_id}")
+        
+        except Exception as outer_error:
+            logging.error(f"배치 임베딩 외부 오류: 인스턴스 ID={self._instance_id}, 오류={str(outer_error)}")
+            import traceback
+            logging.error(f"외부 오류 스택 트레이스: {traceback.format_exc()}")
+            # 오류 발생 시 0 벡터 반환
+            return [[0.0] * 1024 for _ in range(len(texts))]
 
 
 class LLMOpenAI(Model):

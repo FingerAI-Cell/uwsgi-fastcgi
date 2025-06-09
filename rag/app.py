@@ -143,6 +143,14 @@ def cleanup_on_exit():
     """애플리케이션 종료 시 정리 작업을 수행합니다."""
     logger.info("Application shutting down, performing cleanup...")
     try:
+        # 임베딩 배치 워커 종료
+        try:
+            from src.pipe import InteractManager
+            logger.info("임베딩 배치 처리 워커 중지 중...")
+            InteractManager.stop_embedding_worker()
+        except Exception as emb_worker_error:
+            logger.error(f"임베딩 배치 워커 정리 실패: {str(emb_worker_error)}")
+        
         # 글로벌 배치 워커 스레드 정리
         try:
             from src.pipe import InteractManager
@@ -208,6 +216,11 @@ def load_collections_command():
 with app.app_context():
     # 앱이 시작될 때 컬렉션 로드
     load_common_collections()
+    
+    # 임베딩 배치 처리 워커 시작
+    from src.pipe import InteractManager
+    InteractManager.start_embedding_worker()
+    logger.info("임베딩 배치 처리 워커 시작됨")
 
 # app.cli에 명령 추가 (Flask CLI에서 실행 가능)
 app.cli.add_command(load_collections_command)

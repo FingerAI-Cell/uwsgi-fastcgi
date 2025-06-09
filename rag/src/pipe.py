@@ -22,7 +22,8 @@ import torch
 import hashlib
 
 # 전역 GPU 세마포어 설정 - 모든 임베딩 처리에서 공유
-GPU_WORKERS = int(os.getenv('MAX_GPU_WORKERS', '50'))
+# MAX_GPU_WORKERS=1 환경 변수가 반영되도록 수정
+GPU_WORKERS = int(os.getenv('MAX_GPU_WORKERS', '1'))
 _GPU_SEMAPHORE = threading.Semaphore(GPU_WORKERS)
 GPU_TASKS_ACTIVE = 0
 GPU_TASK_LOCK = threading.Lock()
@@ -86,12 +87,20 @@ class InteractManager:
     # 로깅 용도로만 사용
     last_batch_time = {}  # 도메인별 마지막 배치 추가 시간 {domain: timestamp}
     
+    # 임베딩 배치 처리 관련 변수 추가
+    embedding_batch_queue = []  # 임베딩 처리 대기 중인 청크 큐
+    embedding_batch_lock = threading.Lock()  # 임베딩 배치 큐 접근을 위한 락
+    embedding_batch_event = threading.Event()  # 임베딩 배치 처리 알림을 위한 이벤트
+    embedding_worker_thread = None  # 임베딩 배치 처리 워커 스레드
+    embedding_worker_running = False  # 임베딩 워커 스레드 실행 상태
+    embedding_batch_size = int(os.getenv('EMBEDDING_BATCH_SIZE', '50'))  # 임베딩 배치 크기 설정 (기본값: 50)
+    
     @classmethod
     def get_gpu_semaphore(cls):
         """모든 인스턴스에서 공유하는 GPU 세마포어를 반환합니다."""
         # 세마포어가 초기화되지 않았으면 초기화
         if cls._gpu_semaphore is None:
-            cls._gpu_semaphore = threading.BoundedSemaphore(int(os.getenv('MAX_GPU_WORKERS', '50')))
+            cls._gpu_semaphore = threading.BoundedSemaphore(int(os.getenv('MAX_GPU_WORKERS', '1')))
         return cls._gpu_semaphore
     
     @classmethod
@@ -105,7 +114,7 @@ class InteractManager:
     @classmethod
     def get_max_workers(cls):
         """최대 GPU 작업 수 설정을 반환합니다."""
-        return int(os.getenv('MAX_GPU_WORKERS', '50'))
+        return int(os.getenv('MAX_GPU_WORKERS', '1'))
     
     @classmethod
     def get_active_workers(cls):
@@ -1477,68 +1486,87 @@ class InteractManager:
         return []
     
     def embed_and_prepare_chunk(self, chunk_data):
-        """청크 데이터에 임베딩을 추가하고 DB 삽입을 위한 데이터로 변환합니다."""
+        """
+        청크 데이터에 임베딩을 추가하여 삽입 준비를 합니다.
+        
+        Args:
+            chunk_data (dict): 임베딩할 청크 데이터
+            
+        Returns:
+            dict: 임베딩이 추가된 청크 데이터 또는 None (오류 시)
+        """
         try:
-            import logging
-            self.insert_logger = logging.getLogger('insert')
+            # 인서트 로거 확인 및 설정
+            if not hasattr(self, 'insert_logger'):
+                import logging
+                self.insert_logger = logging.getLogger('insert')
+                if not self.insert_logger.handlers:
+                    # 로그 디렉토리 확인
+                    log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "logs"
+                    os.makedirs(log_dir, exist_ok=True)
+                    
+                    log_path = os.path.join(log_dir, 'insert.log')
+                    insert_handler = logging.FileHandler(log_path)
+                    insert_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                    insert_handler.setFormatter(insert_formatter)
+                    self.insert_logger.setLevel(logging.INFO)
+                    self.insert_logger.addHandler(insert_handler)
+                    self.insert_logger.propagate = False
             
-            # 시작 시간 기록
+            # 현재 스레드 ID 가져오기
+            thread_id = threading.get_ident()
+            
+            # 처리 시작 시간 기록
             start_time = time.time()
+            self.insert_logger.info(f"[Thread-{thread_id}] 청크 임베딩 처리 시작")
             
-            # 필요한 필드가 있는지 확인
-            if not all(field in chunk_data for field in ['doc_id', 'text']):
-                self.insert_logger.warning(f"필수 필드 누락: {chunk_data}")
+            # 필수 필드 검사
+            if 'text' not in chunk_data:
+                self.insert_logger.error(f"[Thread-{thread_id}] 필수 필드 누락: text")
                 return None
             
-            # 텍스트가 비어있는지 확인
-            if not chunk_data.get('text', '').strip():
-                self.insert_logger.warning(f"빈 텍스트 청크, 건너뜀: {chunk_data.get('doc_id', 'unknown')}")
-                return None
+            # 대용량 텍스트 처리
+            if len(chunk_data['text']) > self.MAX_TEXT_LENGTH:
+                self.insert_logger.warning(f"[Thread-{thread_id}] 텍스트 길이 초과: {len(chunk_data['text'])} > {self.MAX_TEXT_LENGTH}, 잘라내기 적용")
+                chunk_data['text'] = chunk_data['text'][:self.MAX_TEXT_LENGTH]
             
-            # 이미 임베딩이 있는지 확인
-            if 'text_emb' in chunk_data and chunk_data['text_emb'] is not None:
-                # 이미 임베딩이 있음
-                self.insert_logger.info(f"기존 임베딩 사용: {chunk_data.get('doc_id', 'unknown')}")
-                return chunk_data
+            # 배치 임베딩 처리를 위해 배치 큐에 추가
+            future = self.__class__.add_to_embedding_batch(chunk_data)
             
-            # 임베딩 모델 생성 (필요시)
-            if not hasattr(self, 'emb_model'):
-                from rag.src.models import EmbModel
-                from rag.config import config
-                
-                self.insert_logger.info("임베딩 모델 초기화 중...")
-                self.emb_model = EmbModel(config)
-                self.emb_model.set_emb_model('bge')
-                self.emb_model.set_embbeding_config()
-                self.insert_logger.info("임베딩 모델 초기화 완료")
-            
-            # 텍스트 임베딩 계산
+            # 결과 대기 (타임아웃 10초)
             try:
-                # 새로운 embed_text 메서드 사용
-                embedding_vector = self.emb_model.embed_text(chunk_data['text'], model_type='bge')
-                
-                # 임베딩 추가
-                chunk_data['text_emb'] = embedding_vector
+                processed_chunk = future.result(timeout=10.0)
                 
                 # 처리 시간 로깅
                 processing_time = time.time() - start_time
-                self.insert_logger.info(f"청크 임베딩 완료: {processing_time:.4f}초, 길이={len(embedding_vector)}, doc_id={chunk_data.get('doc_id', 'unknown')}")
+                self.insert_logger.info(f"[Thread-{thread_id}] 청크 임베딩 완료: {processing_time:.4f}초")
+                
+                # 임베딩 벡터 확인 (로깅 목적)
+                if 'text_emb' in processed_chunk and processed_chunk['text_emb'] is not None:
+                    emb_length = len(processed_chunk['text_emb'])
+                    self.insert_logger.info(f"[Thread-{thread_id}] 임베딩 벡터 길이: {emb_length}")
+                else:
+                    self.insert_logger.warning(f"[Thread-{thread_id}] 임베딩 벡터 누락 또는 None")
                 
                 # passage_uid 생성 (없는 경우)
-                if 'passage_uid' not in chunk_data:
+                if 'passage_uid' not in processed_chunk:
                     # 해시 기반 고유 ID 생성
                     import hashlib
-                    text_hash = hashlib.sha512(chunk_data['text'].encode('utf-8')).hexdigest()
-                    doc_id = str(chunk_data.get('doc_id', ''))
-                    passage_id = str(chunk_data.get('passage_id', '0'))
-                    chunk_data['passage_uid'] = f"{text_hash}_{passage_id}"
+                    text_hash = hashlib.sha512(processed_chunk['text'].encode('utf-8')).hexdigest()
+                    doc_id = str(processed_chunk.get('doc_id', ''))
+                    passage_id = str(processed_chunk.get('passage_id', '0'))
+                    processed_chunk['passage_uid'] = f"{text_hash}_{passage_id}"
+                    self.insert_logger.info(f"[Thread-{thread_id}] passage_uid 자동 생성: {processed_chunk['passage_uid'][:20]}...")
                 
-                return chunk_data
+                return processed_chunk
                 
-            except Exception as e:
-                self.insert_logger.error(f"임베딩 생성 오류: {str(e)}")
+            except concurrent.futures.TimeoutError:
+                self.insert_logger.error(f"[Thread-{thread_id}] 임베딩 처리 타임아웃 (10초 초과)")
+                return None
+            except Exception as future_error:
+                self.insert_logger.error(f"[Thread-{thread_id}] Future 처리 오류: {str(future_error)}")
                 import traceback
-                self.insert_logger.error(f"스택 트레이스: {traceback.format_exc()}")
+                self.insert_logger.error(f"[Thread-{thread_id}] Future 오류 스택 트레이스: {traceback.format_exc()}")
                 return None
                 
         except Exception as e:
@@ -1551,41 +1579,46 @@ class InteractManager:
 
     def prepare_data_with_embedding(self, chunk_data):
         """
-        app.py에서 호출하는 청크 임베딩 생성 함수
-        내부적으로 embed_and_prepare_chunk를 호출하여 임베딩 작업 수행
+        청크 데이터를 벡터 DB 삽입용으로 준비하고 임베딩을 추가합니다.
+        
+        Args:
+            chunk_data (dict): 임베딩할 청크 데이터
+            
+        Returns:
+            dict: 임베딩이 추가된 청크 데이터 또는 None (오류 시)
         """
         try:
+            # 인서트 로거 확인 및 설정
             import logging
-            logger = logging.getLogger('rag-backend')
             insert_logger = logging.getLogger('insert')
             
+            # 현재 스레드 ID 가져오기
             thread_id = threading.get_ident()
             
-            # 필수 필드 확인 (간소화)
-            if not all(field in chunk_data for field in ['text', 'doc_id', 'passage_uid']):
-                insert_logger.error(f"[Thread-{thread_id}] 필수 필드 누락: {[f for f in ['text', 'doc_id', 'passage_uid'] if f not in chunk_data]}")
+            # 처리 시작 시간 기록
+            start_time = time.time()
+            insert_logger.info(f"[Thread-{thread_id}] 청크 데이터 준비 시작")
+            
+            # 필수 필드 확인
+            if 'text' not in chunk_data:
+                insert_logger.error(f"[Thread-{thread_id}] 필수 필드 누락: text")
                 return None
-            
-            # 텍스트 간소화된 전처리
-            chunk_text = chunk_data.get('text', '')
-            if isinstance(chunk_text, tuple):
-                if len(chunk_text) > 0:
-                    chunk_data['text'] = chunk_text[0]  # 튜플의 첫 번째 요소만 사용
-                else:
-                    insert_logger.error(f"[Thread-{thread_id}] 빈 튜플 텍스트: {chunk_data.get('passage_uid', 'unknown')}")
-                    return None
-            
-            if not isinstance(chunk_data['text'], str):
-                try:
-                    chunk_data['text'] = str(chunk_data['text'])
-                except Exception as e:
-                    insert_logger.error(f"[Thread-{thread_id}] 텍스트 변환 실패: {str(e)}")
-                    return None
             
             # 텍스트가 비어 있는지 확인
-            if not chunk_data['text'] or len(chunk_data['text'].strip()) == 0:
-                insert_logger.error(f"[Thread-{thread_id}] 빈 텍스트: {chunk_data.get('passage_uid', 'unknown')}")
+            if not chunk_data.get('text', '').strip():
+                insert_logger.error(f"[Thread-{thread_id}] 빈 텍스트")
                 return None
+            
+            # doc_id 검증 및 설정
+            if 'doc_id' not in chunk_data:
+                # doc_id가 없으면 uuid로 생성
+                chunk_data['doc_id'] = str(uuid.uuid4())
+                insert_logger.info(f"[Thread-{thread_id}] doc_id 자동 생성: {chunk_data['doc_id']}")
+            
+            # 대용량 텍스트 처리
+            if len(chunk_data['text']) > self.MAX_TEXT_LENGTH:
+                insert_logger.warning(f"[Thread-{thread_id}] 텍스트 길이 초과: {len(chunk_data['text'])} > {self.MAX_TEXT_LENGTH}, 잘라내기 적용")
+                chunk_data['text'] = chunk_data['text'][:self.MAX_TEXT_LENGTH]
             
             # passage_id 확인 및 정수형 변환 (간소화)
             if 'passage_id' in chunk_data and not isinstance(chunk_data['passage_id'], int):
@@ -1598,32 +1631,43 @@ class InteractManager:
                     else:
                         chunk_data['passage_id'] = 0
             
-            # 임베딩 생성 - bge_embed_data 함수에서 GPU 작업 추적 처리
+            # 배치 임베딩 처리를 위해 배치 큐에 추가
+            future = self.__class__.add_to_embedding_batch(chunk_data)
+            
+            # 결과 대기 (타임아웃 10초)
             try:
-                # 로그 정보 추가 (최소화)
-                chunk_id = chunk_data.get('passage_uid', chunk_data.get('id', 'unknown'))
+                processed_chunk = future.result(timeout=10.0)
                 
-                # 임베딩 생성 (실제 임베딩은 bge_embed_data 함수에서 처리)
-                emb_vector = self.emb_model.bge_embed_data(chunk_data['text'])
+                # 처리 시간 로깅
+                processing_time = time.time() - start_time
+                insert_logger.info(f"[Thread-{thread_id}] 청크 데이터 준비 완료: {processing_time:.4f}초")
                 
-                # 임베딩 결과 저장
-                chunk_data['text_emb'] = emb_vector
+                # passage_uid 확인 (없으면 생성)
+                if 'passage_uid' not in processed_chunk:
+                    # 해시 기반 고유 ID 생성
+                    import hashlib
+                    text_hash = hashlib.sha512(processed_chunk['text'].encode('utf-8')).hexdigest()
+                    doc_id = str(processed_chunk.get('doc_id', ''))
+                    passage_id = str(processed_chunk.get('passage_id', '0'))
+                    processed_chunk['passage_uid'] = f"{doc_id}_{text_hash}_{passage_id}"
+                    insert_logger.info(f"[Thread-{thread_id}] passage_uid 자동 생성: {processed_chunk['passage_uid'][:20]}...")
                 
-                # 임베딩 완료 로그 (최소화)
-                emb_sample = str(emb_vector[:2])[:20] + "..." if len(emb_vector) > 0 else "비어있음"
-                insert_logger.info(f"[Thread-{thread_id}] 최종 데이터 검증: passage_id={chunk_data.get('passage_id', 'unknown')}, 타입={type(chunk_data.get('passage_id', 0))}, 벡터 타입={type(chunk_data['text_emb'])}")
+                return processed_chunk
                 
-                return chunk_data
-                
-            except Exception as emb_error:
-                insert_logger.error(f"[Thread-{thread_id}] 임베딩 생성 실패: {str(emb_error)}")
+            except concurrent.futures.TimeoutError:
+                insert_logger.error(f"[Thread-{thread_id}] 임베딩 처리 타임아웃 (10초 초과)")
+                return None
+            except Exception as future_error:
+                insert_logger.error(f"[Thread-{thread_id}] Future 처리 오류: {str(future_error)}")
+                import traceback
+                insert_logger.error(f"[Thread-{thread_id}] Future 오류 스택 트레이스: {traceback.format_exc()}")
                 return None
                 
         except Exception as e:
             import logging, traceback
             insert_logger = logging.getLogger('insert')
             error_trace = traceback.format_exc()
-            insert_logger.error(f"[Thread-{thread_id}] 청크 임베딩 처리 오류: {str(e)}\n{error_trace}")
+            insert_logger.error(f"[Thread-{thread_id}] 청크 데이터 준비 오류: {str(e)}\n{error_trace}")
             return None
 
     def batch_insert_data(self, domain, data_batch):
@@ -2265,51 +2309,169 @@ class InteractManager:
 
     @classmethod
     def flush_all_batches(cls):
-        """글로벌 배치 큐의 모든 데이터를 처리합니다."""
+        """모든 도메인의 남은 배치 데이터를 처리합니다."""
+        try:
+            with cls.global_batch_lock:
+                domains = list(cls.global_batch_queue.keys())
+            
+            for domain in domains:
+                # 각 도메인의 남은 배치 데이터 처리
+                instance = InteractManager()
+                remaining = instance._get_remaining_batches(domain)
+                if remaining:
+                    instance._execute_batch_insert(remaining, domain)
+                    print(f"[DEBUG] 남은 배치 데이터 처리 완료: 도메인={domain}, 항목 수={len(remaining)}")
+        except Exception as e:
+            print(f"[ERROR] 배치 데이터 정리 오류: {str(e)}")
+
+    @classmethod
+    def start_embedding_worker(cls):
+        """임베딩 배치 처리 워커 스레드를 시작합니다."""
+        if cls.embedding_worker_thread is None or not cls.embedding_worker_running:
+            cls.embedding_worker_running = True
+            cls.embedding_worker_thread = threading.Thread(target=cls._embedding_worker_loop, daemon=True)
+            cls.embedding_worker_thread.start()
+            print(f"[DEBUG] 임베딩 배치 처리 워커 스레드 시작됨")
+            
+            # 삽입 배치 워커도 함께 시작
+            cls.start_batch_worker()
+
+    @classmethod
+    def stop_embedding_worker(cls):
+        """임베딩 배치 처리 워커 스레드를 중지합니다."""
+        cls.embedding_worker_running = False
+        # 워커 스레드에 알림
+        cls.embedding_batch_event.set()
+        
+        if cls.embedding_worker_thread and cls.embedding_worker_thread.is_alive():
+            cls.embedding_worker_thread.join(timeout=2.0)
+            print(f"[DEBUG] 임베딩 배치 처리 워커 스레드 중지됨")
+        
+        # 남은 배치 처리를 위해 배치 워커 유지
+
+    @classmethod
+    def _embedding_worker_loop(cls):
+        """임베딩 배치 처리 워커 스레드의 메인 루프"""
         import logging
         logger = logging.getLogger('rag-backend')
-        logger.info("모든 배치 데이터 강제 처리 시작")
+        logger.info("임베딩 배치 처리 워커 스레드 시작")
+        
+        # 모델 인스턴스 생성 (공유)
+        from .models import EmbModel
+        emb_model = None
         
         try:
-            domains_to_process = []
-            batch_data_map = {}
-            
-            # 모든 배치 데이터를 안전하게 가져오기
-            with cls.global_batch_lock:
-                for domain, chunks in cls.global_batch_queue.items():
-                    if chunks:
-                        domains_to_process.append(domain)
-                        batch_data_map[domain] = chunks.copy()
-                        cls.global_batch_queue[domain] = []
-            
-            if not domains_to_process:
-                logger.info("처리할 배치 데이터가 없음")
-                return
-            
-            # 모든 도메인의 배치 데이터 처리
-            for domain in domains_to_process:
-                batch_data = batch_data_map[domain]
-                if batch_data:
-                    logger.info(f"도메인 {domain}의 {len(batch_data)}개 항목 처리 중")
-                    try:
-                        # 인스턴스 생성 필요 (클래스 메서드에서 인스턴스 메서드 호출)
-                        instance = InteractManager()
-                        instance._execute_batch_insert(batch_data, domain)
-                        logger.info(f"도메인 {domain} 배치 데이터 처리 완료")
-                    except Exception as e:
-                        logger.error(f"도메인 {domain} 배치 데이터 처리 실패: {str(e)}")
-                        # 중요 데이터이므로 항목별 처리 시도
-                        success_count = 0
-                        for item in batch_data:
-                            try:
-                                instance._execute_batch_insert([item], domain)
-                                success_count += 1
-                            except Exception as item_error:
-                                logger.error(f"항목 처리 실패: {str(item_error)}")
-                        logger.info(f"도메인 {domain} 항목별 처리 결과: {success_count}/{len(batch_data)}개 성공")
-            
-            logger.info("모든 배치 데이터 처리 완료")
-        except Exception as e:
-            logger.error(f"배치 데이터 강제 처리 중 오류 발생: {str(e)}")
+            # 임베딩 모델 초기화
+            emb_model = EmbModel({})
+            emb_model.set_emb_model('bge')
+            emb_model.set_embbeding_config()
+            logger.info("임베딩 배치 워커에서 모델 초기화 완료")
+        except Exception as model_error:
+            logger.error(f"임베딩 모델 초기화 오류: {str(model_error)}")
             import traceback
-            logger.error(f"오류 상세: {traceback.format_exc()}")
+            logger.error(f"모델 초기화 오류 스택 트레이스: {traceback.format_exc()}")
+        
+        while cls.embedding_worker_running:
+            try:
+                # 배치 처리할 청크 가져오기
+                batch_chunks = []
+                chunk_futures = []
+                
+                with cls.embedding_batch_lock:
+                    # 배치 크기만큼 또는 모든 청크 가져오기
+                    batch_size = min(len(cls.embedding_batch_queue), cls.embedding_batch_size)
+                    
+                    if batch_size > 0:
+                        # 청크 및 Future 객체 가져오기
+                        batch_chunks = [item[0] for item in cls.embedding_batch_queue[:batch_size]]
+                        chunk_futures = [item[1] for item in cls.embedding_batch_queue[:batch_size]]
+                        
+                        # 처리 중인 청크 큐에서 제거
+                        cls.embedding_batch_queue = cls.embedding_batch_queue[batch_size:]
+                        
+                        logger.info(f"임베딩 배치 처리 시작: 청크 수={batch_size}")
+                        
+                # 처리할 청크가 있는 경우
+                if batch_chunks:
+                    try:
+                        # 청크 텍스트 추출
+                        texts = [chunk['text'] for chunk in batch_chunks]
+                        
+                        # 배치 임베딩 처리
+                        start_time = time.time()
+                        embedding_vectors = emb_model.bge_batch_embed_data(texts)
+                        end_time = time.time()
+                        
+                        duration = end_time - start_time
+                        logger.info(f"임베딩 배치 처리 완료: 청크 수={len(batch_chunks)}, 소요 시간={duration:.4f}초")
+                        
+                        # 결과 검증
+                        if len(embedding_vectors) != len(batch_chunks):
+                            logger.error(f"임베딩 결과 개수 불일치: 입력={len(batch_chunks)}, 출력={len(embedding_vectors)}")
+                            # 누락된 결과를 0 벡터로 채우기
+                            embedding_vectors = embedding_vectors + [[0.0] * 1024] * (len(batch_chunks) - len(embedding_vectors))
+                        
+                        # 각 청크에 임베딩 결과 할당 및 Future 설정
+                        for i, (chunk, vector, future) in enumerate(zip(batch_chunks, embedding_vectors, chunk_futures)):
+                            try:
+                                # 임베딩 벡터 할당
+                                chunk['text_emb'] = vector
+                                
+                                # Future 결과 설정
+                                future.set_result(chunk)
+                                
+                            except Exception as e:
+                                logger.error(f"청크 {i} 임베딩 결과 처리 오류: {str(e)}")
+                                # Future 예외 설정
+                                future.set_exception(e)
+                        
+                    except Exception as batch_error:
+                        logger.error(f"배치 임베딩 처리 오류: {str(batch_error)}")
+                        import traceback
+                        logger.error(f"배치 처리 오류 스택 트레이스: {traceback.format_exc()}")
+                        
+                        # 모든 Future에 예외 설정
+                        for future in chunk_futures:
+                            if not future.done():
+                                future.set_exception(batch_error)
+                
+                # 처리할 청크가 없는 경우 대기
+                else:
+                    # 새 청크가 추가되거나 종료 신호가 올 때까지 대기
+                    cls.embedding_batch_event.wait(timeout=0.1)
+                    cls.embedding_batch_event.clear()
+                    
+            except Exception as e:
+                logger.error(f"임베딩 배치 워커 루프 오류: {str(e)}")
+                import traceback
+                logger.error(f"워커 루프 오류 스택 트레이스: {traceback.format_exc()}")
+                time.sleep(1.0)  # 오류 발생 시 더 긴 대기
+        
+        logger.info("임베딩 배치 처리 워커 스레드 종료")
+
+    @classmethod
+    def add_to_embedding_batch(cls, chunk_data):
+        """
+        청크를 임베딩 배치 큐에 추가하고 Future 객체를 반환합니다.
+        
+        Args:
+            chunk_data (dict): 임베딩할 청크 데이터
+            
+        Returns:
+            concurrent.futures.Future: 임베딩 완료 후 결과를 받을 Future 객체
+        """
+        # 임베딩 워커 시작 확인
+        if not cls.embedding_worker_running:
+            cls.start_embedding_worker()
+        
+        # Future 객체 생성
+        future = concurrent.futures.Future()
+        
+        # 배치 큐에 청크와 Future 추가
+        with cls.embedding_batch_lock:
+            cls.embedding_batch_queue.append((chunk_data, future))
+        
+        # 워커 스레드에 새 청크 추가 알림
+        cls.embedding_batch_event.set()
+        
+        return future
