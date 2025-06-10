@@ -151,6 +151,14 @@ def cleanup_on_exit():
         except Exception as emb_worker_error:
             logger.error(f"임베딩 배치 워커 정리 실패: {str(emb_worker_error)}")
         
+        # RAW API 배치 워커 종료
+        try:
+            from src.pipe import InteractManager
+            logger.info("RAW API 배치 처리 워커 중지 중...")
+            InteractManager.stop_raw_batch_worker()
+        except Exception as raw_worker_error:
+            logger.error(f"RAW API 배치 워커 정리 실패: {str(raw_worker_error)}")
+        
         # 글로벌 배치 워커 스레드 정리
         try:
             from src.pipe import InteractManager
@@ -212,6 +220,10 @@ with app.app_context():
     from src.pipe import InteractManager
     InteractManager.start_embedding_worker()
     logger.info("임베딩 배치 처리 워커 시작됨")
+    
+    # RAW API 전용 배치 처리 워커 시작
+    InteractManager.start_raw_batch_worker()
+    logger.info("RAW API 배치 처리 워커 시작됨")
 
 # app.cli에 명령 추가 (Flask CLI에서 실행 가능)
 app.cli.add_command(load_collections_command)
