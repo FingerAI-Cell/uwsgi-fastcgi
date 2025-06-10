@@ -2556,7 +2556,9 @@ class InteractManager:
                             # 50개씩 나누어 삭제 (대용량 쿼리 방지)
                             for i in range(0, len(delete_uids), 50):
                                 batch_uids = delete_uids[i:i+50]
-                                expr = f"passage_uid in [\"{'\", \"'.join(batch_uids)}\"]"
+                                # f-string 내 백슬래시 문제 해결을 위해 join 부분을 분리
+                                joined_uids = '", "'.join(batch_uids)
+                                expr = f'passage_uid in ["{joined_uids}"]'
                                 try:
                                     collection.delete(expr)
                                 except Exception as e:
