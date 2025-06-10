@@ -86,6 +86,12 @@ class EmbModel(Model):
         self._embedding_cache = {}
         self._cache_size = int(os.getenv('EMBEDDING_CACHE_SIZE', '1000'))
         self._cache_lock = threading.Lock()
+        logging.info(f"임베딩 캐시 초기화: 최대 크기 {self._cache_size}개 항목")
+        
+        # RAW API 전용 캐시 최적화 설정
+        self._raw_cache_hits = 0
+        self._raw_cache_misses = 0
+        self._enable_cache_stats = True  # 캐시 통계 수집 활성화
         
         # 인스턴스 카운터 증가
         with self.__class__._instances_lock:
@@ -438,6 +444,134 @@ class EmbModel(Model):
         logging.info(f"bge_embed_data 완료: 인스턴스 ID={self._instance_id}, 소요 시간 {duration:.4f}초")
         
         return result
+    
+    def bge_embed_data_raw(self, text):
+        """
+        RAW API 전용 임베딩 벡터 생성 메서드입니다. 
+        세마포어를 사용하지 않고 GPU에 직접 접근하여 빠르게 임베딩을 생성합니다.
+        
+        Args:
+            text (str): 임베딩할 텍스트
+            
+        Returns:
+            list: 임베딩 벡터 (1024 차원)
+        """
+        # 로깅 추가 - 메서드 호출 정보
+        logging.info(f"bge_embed_data_raw 호출됨: 인스턴스 ID={self._instance_id}, 텍스트 길이 {len(text)}")
+        
+        # 시작 시간 기록
+        start_time = time.time()
+        
+        # 캐시 확인 - 텍스트가 이미 임베딩된 경우 캐시된 값 반환
+        text_hash = hash(text)
+        with self._cache_lock:
+            if text_hash in self._embedding_cache:
+                cached_result = self._embedding_cache[text_hash]
+                logging.info(f"캐시 적중: 인스턴스 ID={self._instance_id}, 텍스트 길이 {len(text)}")
+                # 캐시 통계 업데이트
+                if self._enable_cache_stats:
+                    self._raw_cache_hits += 1
+                    if self._raw_cache_hits % 10 == 0:  # 10번마다 로깅
+                        hit_rate = self._raw_cache_hits / (self._raw_cache_hits + self._raw_cache_misses) * 100 if (self._raw_cache_hits + self._raw_cache_misses) > 0 else 0
+                        logging.info(f"RAW 캐시 통계: 적중={self._raw_cache_hits}, 실패={self._raw_cache_misses}, 적중률={hit_rate:.1f}%")
+                return cached_result
+        
+        # 캐시 실패 통계 업데이트
+        if self._enable_cache_stats:
+            self._raw_cache_misses += 1
+        
+        try:
+            # GPU 사용 가능 여부 확인
+            if not torch.cuda.is_available() or not self.gpu_initialized:
+                logging.warning(f"GPU 사용 불가: 인스턴스 ID={self._instance_id}, cuda_available={torch.cuda.is_available()}, gpu_initialized={self.gpu_initialized}")
+                # CPU 모드로 임베딩 생성
+                return self.embed_text(text, model_type='bge')
+            
+            # BGE 모델 확인
+            if not hasattr(self, 'bge_emb') or self.bge_emb is None:
+                logging.warning(f"모델 로드 필요: 인스턴스 ID={self._instance_id}")
+                self.set_emb_model('bge')
+            
+            # GPU 메모리 상태 로깅
+            allocated_before = torch.cuda.memory_allocated()/1024**2
+            reserved_before = torch.cuda.memory_reserved()/1024**2
+            logging.info(f"임베딩 전 GPU 메모리: 할당={allocated_before:.2f}MB, 예약={reserved_before:.2f}MB")
+            
+            # 임베딩 계산 시작
+            compute_start = time.time()
+            
+            # BGE 모델로 직접 임베딩 계산 - 세마포어 없이
+            with torch.no_grad():
+                logging.info(f"RAW 임베딩 계산 시작: 인스턴스 ID={self._instance_id}")
+                
+                # 직접 텍스트를 리스트로 감싸서 encode 호출 (단일 항목 배치 처리)
+                result = self.bge_emb.encode([text], max_length=self.emb_config.get('max_length', 1024))
+                
+                logging.info(f"RAW 임베딩 계산 완료: 인스턴스 ID={self._instance_id}")
+            
+            # 결과 추출 및 변환
+            if isinstance(result, dict) and 'dense_vecs' in result:
+                dense_vecs = result['dense_vecs']
+                if isinstance(dense_vecs, np.ndarray) and len(dense_vecs.shape) == 2:
+                    # 첫 번째 벡터만 추출 (단일 텍스트를 인코딩했으므로)
+                    embed_vector = dense_vecs[0].tolist()
+                else:
+                    logging.warning(f"예상치 못한 결과 형식: {type(dense_vecs)}, 형상: {dense_vecs.shape if hasattr(dense_vecs, 'shape') else 'unknown'}")
+                    # 안전하게 처리
+                    embed_vector = dense_vecs.tolist() if hasattr(dense_vecs, 'tolist') else [0.0] * 1024
+            else:
+                logging.warning(f"예상치 못한 결과 형식: {type(result)}")
+                # 안전 처리: 임베딩을 0 벡터로 설정
+                embed_vector = [0.0] * 1024
+            
+            # 벡터 길이 확인 및 보정
+            expected_dim = 1024
+            if len(embed_vector) != expected_dim:
+                logging.info(f"벡터 길이 부족하여 패딩: {len(embed_vector)} → {expected_dim}")
+                # 부족한 차원은 0으로 채움
+                if len(embed_vector) < expected_dim:
+                    embed_vector.extend([0.0] * (expected_dim - len(embed_vector)))
+                # 초과 차원은 잘라냄
+                else:
+                    embed_vector = embed_vector[:expected_dim]
+            
+            compute_end = time.time()
+            compute_time = compute_end - compute_start
+            
+            # 임베딩 완료 시간 계산
+            end_time = time.time()
+            total_time = end_time - start_time
+            
+            # 임베딩 후 GPU 메모리 상태 로깅
+            allocated_after = torch.cuda.memory_allocated()/1024**2
+            reserved_after = torch.cuda.memory_reserved()/1024**2
+            logging.info(f"임베딩 후 GPU 메모리: 할당={allocated_after:.2f}MB, 예약={reserved_after:.2f}MB")
+            
+            # 성능 로깅
+            logging.info(f"RAW 임베딩 완료: 인스턴스 ID={self._instance_id}, 총 {total_time:.4f}초, 계산={compute_time:.4f}초")
+            
+            # 결과 캐싱
+            with self._cache_lock:
+                # 캐시 크기 제한 확인
+                if len(self._embedding_cache) >= self._cache_size:
+                    # 임의의 항목 제거 (간단한 구현)
+                    try:
+                        key_to_remove = next(iter(self._embedding_cache))
+                        del self._embedding_cache[key_to_remove]
+                    except:
+                        # 캐시 비우기 실패 시 모두 제거
+                        self._embedding_cache.clear()
+                # 결과 캐싱
+                self._embedding_cache[text_hash] = embed_vector
+            
+            return embed_vector
+            
+        except Exception as e:
+            logging.error(f"RAW 임베딩 생성 오류: 인스턴스 ID={self._instance_id}, 오류={str(e)}")
+            import traceback
+            logging.error(f"스택 트레이스: {traceback.format_exc()}")
+            # 오류 발생 시 기존 방식으로 폴백
+            return self.embed_text(text, model_type='bge')
 
     def bge_batch_embed_data(self, texts):
         """

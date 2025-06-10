@@ -1225,20 +1225,33 @@ class InteractManager:
             timing_logger.info(f"RAW_EMBED_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}, text_length: {len(text)}")
             raw_insert_logger.info(f"임베딩 시작 - 텍스트 길이: {len(text)}")
 
-            # GPU 세마포어를 사용하여 임베딩 생성 - 배치 처리 워커 사용하지 않고 직접 처리
-            if self.emb_model and hasattr(self.emb_model, 'bge_embed_data'):
+            # RAW_INSERT 전용 직접 임베딩 처리 - 세마포어 사용하지 않고 GPU에 직접 접근
+            if self.emb_model and hasattr(self.emb_model, 'bge_embed_data_raw'):
                 try:
-                    with self.__class__.get_gpu_semaphore():
-                        text_emb = self.emb_model.bge_embed_data(text)
+                    # 새로 구현한 RAW 전용 직접 임베딩 함수 호출
+                    raw_insert_logger.info(f"RAW 전용 직접 임베딩 시작 - 세마포어 대기 없음")
+                    text_emb = self.emb_model.bge_embed_data_raw(text)
                     raw_insert_logger.info(f"직접 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
                 except Exception as emb_error:
                     raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
                     # 임베딩 실패 시 0 벡터 반환
                     text_emb = [0.0] * 1024
             else:
-                raw_insert_logger.error("임베딩 모델이 초기화되지 않음")
-                # 모델이 없는 경우 기본 임베딩 사용
-                text_emb = [0.0] * 1024
+                # 이전 방식으로 폴백
+                raw_insert_logger.warning("RAW 전용 임베딩 함수 없음, 기본 함수로 폴백")
+                try:
+                    # GPU 세마포어 사용하지 않고 직접 임베딩 수행 (기존 코드)
+                    import torch
+                    gpu_available = torch.cuda.is_available()
+                    raw_insert_logger.info(f"GPU 사용 가능 상태: {gpu_available}")
+                    
+                    # 직접 임베딩 생성
+                    text_emb = self.emb_model.bge_embed_data(text)
+                    raw_insert_logger.info(f"기본 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
+                except Exception as emb_error:
+                    raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
+                    # 임베딩 실패 시 0 벡터 반환
+                    text_emb = [0.0] * 1024
             
             embed_end = time.time()
             embed_duration = embed_end - embed_start
