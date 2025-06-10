@@ -1309,6 +1309,14 @@ def insert_raw_data():
         "ignore": true  # true: 중복 시 건너뜀, false: 중복 시 삭제 후 재생성
     }
     '''
+    # 로그 시작 표시 - 요청 수신 즉시
+    logger.info("=== RAW INSERT API 요청 수신 시작 ===")
+    
+    # 초기 시스템 상태 기록
+    start_time = time.time()
+    memory_before = get_memory_usage()
+    logger.info(f"RAW INSERT 처리 시작 - 초기 메모리: {memory_before:.2f} MB")
+    
     try:
         request_data = request.json
         if not request_data:
@@ -1408,6 +1416,10 @@ def insert_raw_data():
         # 각 도메인별 처리
         for domain, docs in domain_documents.items():
             try:
+                # 도메인 처리 시작 시간 기록
+                domain_start_time = time.time()
+                logger.info(f"도메인 '{domain}' 처리 시작 - 문서 수: {len(docs)}개")
+                
                 # 도메인이 없으면 생성
                 if domain not in milvus_db.get_list_collection():
                     interact_manager.create_domain(domain)
@@ -1515,6 +1527,10 @@ def insert_raw_data():
                 
                 logger.info(f"[TIMING] 도메인 '{domain}'의 문서 처리 완료: {len(doc_results)}개 결과")
                 
+                # 도메인 처리 완료 로깅
+                domain_end_time = time.time()
+                logger.info(f"도메인 '{domain}' 처리 완료 - 소요시간: {domain_end_time - domain_start_time:.4f}초, 메모리: {get_memory_usage():.2f} MB")
+                
             except Exception as e:
                 logger.error(f"Error processing domain {domain}: {str(e)}")
                 # 도메인 처리 실패 시 해당 도메인의 모든 문서를 오류로 처리
@@ -1542,6 +1558,13 @@ def insert_raw_data():
         else:
             overall_status = "partial_error"  # 일부 실패
             status_code = 207  # Multi-Status
+        
+        # API 전체 실행 시간 측정 완료
+        api_end_time = time.time()
+        api_duration = api_end_time - start_time
+        memory_end = get_memory_usage()
+        logger.info(f"=== RAW INSERT API 종료 === 총 소요시간: {api_duration:.4f}초, 최종 상태: {overall_status}, 문서: {len(request_data['documents'])}개, 성공: {status_counts['success']}개, 건너뜀: {status_counts['skipped']}개, 업데이트: {status_counts['updated']}개, 오류: {status_counts['error']}개")
+        logger.info(f"메모리 사용량 변화: {memory_before:.2f}MB → {memory_end:.2f}MB (변화: {memory_end-memory_before:.2f}MB)")
         
         return jsonify({
             "status": overall_status,
