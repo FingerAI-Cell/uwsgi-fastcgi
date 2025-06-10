@@ -168,30 +168,21 @@ def cleanup_on_exit():
             logger.info(f"Clearing {len(interact_manager.loaded_collections)} cached collections")
             interact_manager.loaded_collections.clear()
         
-        # GPU 메모리 정리
+        # GPU 메모리 정리 - 더 안전한 방식으로 수정
         if torch.cuda.is_available():
             try:
-                # 안전하게 GPU 메모리 정리
-                logger.info("Safely clearing GPU memory...")
-                # 명시적으로 모델 정리
+                # 명시적으로 모델 정리 - 참조 제거만 하고 추가 작업 하지 않음
+                logger.info("Releasing GPU model references...")
                 if hasattr(emb_model, 'model'):
-                    try:
-                        emb_model.model = None
-                    except:
-                        pass
+                    emb_model.model = None
                 
-                # 가비지 컬렉션 실행
+                # 가비지 컬렉션만 수행하고 empty_cache 호출 제거
                 import gc
                 gc.collect()
                 
-                # 조심스럽게 캐시 비우기 시도
-                try:
-                    torch.cuda.empty_cache()
-                    logger.info("GPU memory cache cleared")
-                except Exception as e:
-                    logger.error(f"Could not clear GPU cache: {str(e)}")
+                logger.info("GPU resources released")
             except Exception as e:
-                logger.error(f"Failed to clear GPU memory: {str(e)}")
+                logger.error(f"Failed to release GPU resources: {str(e)}")
                 
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
@@ -887,10 +878,10 @@ def insert_data():
                 if docs_to_insert:
                     insert_start = time.time()
                     
-                    # 임베딩 스레드 풀 생성
+                    # 임베딩 스레드 풀 생성 - GPU 사용량 제한
                     max_embed_threads = min(
-                        int(os.getenv('INSERT_CHUNK_THREADS', '10')),  # 기본값: 10
-                        10  # 최대 10개까지 제한
+                        int(os.getenv('INSERT_CHUNK_THREADS', '5')),  # 기본값: 10에서 5로 감소
+                        5  # 최대 5개로 제한하여 GPU 부하 감소
                     )
                     
                     # 문서 병렬 처리를 위한 스레드 풀 크기 설정
@@ -966,11 +957,11 @@ def insert_data():
                             # 2. 청크 임베딩 처리 단계 시간 측정
                             embedding_start = time.time()
                             
-                            # 청크 임베딩 병렬 처리 스레드 수 설정
+                            # 청크 임베딩 병렬 처리 스레드 수 설정 - 제한된 값 사용
                             max_chunk_threads = min(
-                                int(os.getenv('INSERT_CHUNK_THREADS', '10')),  # 기본값: 10
+                                int(os.getenv('INSERT_CHUNK_THREADS', '5')),  # 기본값: 10에서 5로 감소
                                 len(chunks),  # 청크 수보다 많은 스레드는 불필요
-                                10  # 최대 10개로 제한
+                                5  # 최대 5개로 제한하여 GPU 부하 감소
                             )
                             
                             # 청크 중복 처리 방지를 위한 집합 초기화
@@ -1470,6 +1461,8 @@ def insert_raw_data():
                         return result
                     except Exception as e:
                         logger.error(f"Error inserting document: {str(e)}")
+                        import traceback
+                        logger.error(f"Error details: {traceback.format_exc()}")
                         return {
                             "status": "error",
                             "result_code": "F000006",
@@ -1477,9 +1470,9 @@ def insert_raw_data():
                             "title": doc.get('title', 'unknown')
                         }
                 
-                # 문서 단위 병렬 처리 실행
+                # 문서 단위 병렬 처리 실행 - 스레드 수 제한하여 GPU 충돌 방지
                 max_document_threads = min(
-                    int(os.getenv('INSERT_DOCUMENT_THREADS', '5')),  # 기본값: 5
+                    int(os.getenv('INSERT_DOCUMENT_THREADS', '2')),  # 기본값을 5에서 2로 변경하여 동시성 문제 감소
                     len(docs)  # 문서 수보다 많은 스레드는 불필요
                 )
                 logger.info(f"[TIMING] 도메인 '{domain}'의 문서 병렬 처리 시작: {len(docs)}개 문서, 최대 {max_document_threads}개 스레드")
@@ -1559,6 +1552,8 @@ def insert_raw_data():
         
     except Exception as e:
         logger.error(f"Error in insert endpoint: {str(e)}")
+        import traceback
+        logger.error(f"Error in insert_raw_data: {traceback.format_exc()}")
         return jsonify({
             "status": "error",
             "result_code": "F000007",
