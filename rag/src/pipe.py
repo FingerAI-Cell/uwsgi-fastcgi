@@ -2171,9 +2171,8 @@ class InteractManager:
                             
                             batch_size = len(batch_data)
                             
-                            # 문서별 청크 그룹화 - 같은 문서의 청크는 함께 처리되도록
-                            doc_ids = set(item.get('doc_id', '') for item in batch_data)
-                            logger.info(f"글로벌 배치 처리: 도메인={domain}, 청크 수={batch_size}, 고유 문서 수={len(doc_ids)}")
+                            # 배치 크기 기준으로 처리
+                            logger.info(f"글로벌 배치 처리: 도메인={domain}, 항목 수={batch_size}")
                         else:
                             continue
                     
@@ -2183,40 +2182,59 @@ class InteractManager:
                             # 인스턴스 생성 필요 (클래스 메서드에서 인스턴스 메서드 호출)
                             instance = InteractManager()
                             
-                            # 문서별로 청크 그룹화
-                            doc_chunks = {}
-                            for chunk in batch_data:
-                                doc_id = chunk.get('doc_id', 'unknown')
-                                if doc_id not in doc_chunks:
-                                    doc_chunks[doc_id] = []
-                                doc_chunks[doc_id].append(chunk)
+                            # 문서 ID 그룹화 없이 전체 배치 데이터를 한 번에 처리
+                            logger.info(f"배치 {len(batch_data)}개 항목 처리 중 (도메인: {domain})")
+                            try:
+                                instance._execute_batch_insert(batch_data, domain)
+                                logger.info(f"배치 {len(batch_data)}개 항목 처리 완료")
+                            except Exception as batch_error:
+                                logger.error(f"배치 처리 오류: {str(batch_error)}")
+                                # 오류 발생 시 더 작은 배치로 나누어 시도
+                                max_sub_batch = 50  # 더 작은 배치 크기
+                                success_count = 0
+                                
+                                for i in range(0, len(batch_data), max_sub_batch):
+                                    sub_batch = batch_data[i:i+max_sub_batch]
+                                    try:
+                                        instance._execute_batch_insert(sub_batch, domain)
+                                        success_count += len(sub_batch)
+                                        logger.info(f"서브 배치 {len(sub_batch)}개 항목 처리 완료 ({i}~{i+len(sub_batch)-1})")
+                                    except Exception as sub_error:
+                                        logger.error(f"서브 배치 처리 오류: {str(sub_error)}, 개별 항목 처리 시도")
+                                        # 개별 항목 처리 시도
+                                        for item in sub_batch:
+                                            try:
+                                                instance._execute_batch_insert([item], domain)
+                                                success_count += 1
+                                            except Exception as item_error:
+                                                logger.error(f"개별 항목 처리 실패: {str(item_error)}")
+                                
+                                logger.info(f"대체 처리 완료: 총 {success_count}/{len(batch_data)}개 성공")
                             
-                            # 각 문서별로 배치 처리 실행
-                            for doc_id, chunks in doc_chunks.items():
-                                try:
-                                    logger.info(f"문서 '{doc_id}' 청크 {len(chunks)}개 처리 중")
-                                    instance._execute_batch_insert(chunks, domain)
-                                    logger.info(f"문서 '{doc_id}' 청크 처리 완료")
-                                except Exception as doc_error:
-                                    logger.error(f"문서 '{doc_id}' 처리 오류: {str(doc_error)}")
-                                    # 오류 발생 시 개별 청크 처리 시도
-                                    for chunk in chunks:
-                                        try:
-                                            instance._execute_batch_insert([chunk], domain)
-                                        except Exception as chunk_error:
-                                            logger.error(f"청크 개별 처리 실패: {str(chunk_error)}")
-                            
-                            logger.info(f"글로벌 배치 {batch_size}개 항목 처리 완료 (도메인: {domain}, 문서 수: {len(doc_chunks)})")
+                            logger.info(f"글로벌 배치 {batch_size}개 항목 처리 완료 (도메인: {domain})")
                             
                         except Exception as e:
                             logger.error(f"글로벌 배치 처리 오류: {str(e)}")
-                            # 오류 발생 시 개별 처리 시도
+                            # 오류 발생 시 개별 처리 시도 (기존 대체 로직과 중복될 수 있으므로 간소화)
                             try:
-                                for item in batch_data:
+                                max_sub_batch = 10  # 더 작은 배치 크기
+                                success_count = 0
+                                
+                                for i in range(0, len(batch_data), max_sub_batch):
+                                    sub_batch = batch_data[i:i+max_sub_batch]
                                     try:
-                                        instance._execute_batch_insert([item], domain)
-                                    except Exception as item_error:
-                                        logger.error(f"개별 항목 처리 실패: {str(item_error)}")
+                                        instance._execute_batch_insert(sub_batch, domain)
+                                        success_count += len(sub_batch)
+                                    except Exception:
+                                        # 최후의 수단으로 하나씩 처리
+                                        for item in sub_batch:
+                                            try:
+                                                instance._execute_batch_insert([item], domain)
+                                                success_count += 1
+                                            except Exception as item_error:
+                                                logger.error(f"항목 복구 처리 실패: {str(item_error)}")
+                                
+                                logger.info(f"글로벌 배치 복구 처리: 총 {success_count}/{len(batch_data)}개 항목 성공")
                             except Exception as recovery_error:
                                 logger.error(f"복구 시도 중 오류: {str(recovery_error)}")
             
