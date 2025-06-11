@@ -151,19 +151,6 @@ def cleanup_on_exit():
         except Exception as emb_worker_error:
             logger.error(f"임베딩 배치 워커 정리 실패: {str(emb_worker_error)}")
         
-        # RAW API 배치 워커 종료
-        try:
-            from src.pipe import InteractManager
-            logger.info("RAW API 배치 처리 워커 중지 중...")
-            # 실행 중인 경우에만 중지 시도
-            if InteractManager.raw_batch_worker_running:
-                InteractManager.stop_raw_batch_worker()
-                logger.info("RAW API 배치 처리 워커 중지 완료")
-            else:
-                logger.info("RAW API 배치 워커가 실행 중이 아닙니다")
-        except Exception as raw_worker_error:
-            logger.error(f"RAW API 배치 워커 정리 실패: {str(raw_worker_error)}")
-        
         # 글로벌 배치 워커 스레드 정리
         try:
             from src.pipe import InteractManager
@@ -172,12 +159,7 @@ def cleanup_on_exit():
             InteractManager.flush_all_batches()
             # 배치 워커 중지
             logger.info("배치 처리 워커 중지 중...")
-            # 실행 중인 경우에만 중지 시도
-            if InteractManager.batch_worker_running:
-                InteractManager.stop_batch_worker()
-                logger.info("배치 처리 워커 중지 완료")
-            else:
-                logger.info("글로벌 배치 워커가 실행 중이 아닙니다")
+            InteractManager.stop_batch_worker()
         except Exception as batch_error:
             logger.error(f"배치 워커 정리 실패: {str(batch_error)}")
         
@@ -186,23 +168,28 @@ def cleanup_on_exit():
             logger.info(f"Clearing {len(interact_manager.loaded_collections)} cached collections")
             interact_manager.loaded_collections.clear()
         
-        # GPU 리소스 해제
-        try:
-            logger.info("Releasing GPU model references...")
-            if hasattr(interact_manager, 'emb_model') and interact_manager.emb_model:
-                interact_manager.emb_model.release_resources()
-                interact_manager.emb_model = None
-            # 글로벌 변수로 남아있을 수 있는 모델 레퍼런스 정리
-            import gc
-            gc.collect()
-            logger.info("GPU resources released")
-        except Exception as gpu_error:
-            logger.error(f"GPU 리소스 해제 실패: {str(gpu_error)}")
-        
-        logger.info("Cleanup complete")
+        # GPU 메모리 정리 - 더 안전한 방식으로 수정
+        if torch.cuda.is_available():
+            try:
+                # 명시적으로 모델 정리 - 참조 제거만 하고 추가 작업 하지 않음
+                logger.info("Releasing GPU model references...")
+                if hasattr(emb_model, 'model'):
+                    emb_model.model = None
+                
+                # 가비지 컬렉션만 수행하고 empty_cache 호출 제거
+                import gc
+                gc.collect()
+                
+                logger.info("GPU resources released")
+            except Exception as e:
+                logger.error(f"Failed to release GPU resources: {str(e)}")
+                
     except Exception as e:
-        logger.error(f"애플리케이션 종료 정리 작업 중 오류 발생: {str(e)}")
-        # 최종적으로 모든 오류에도 불구하고 종료 진행
+        logger.error(f"Error during cleanup: {str(e)}")
+        import traceback
+        logger.error(f"Cleanup error details: {traceback.format_exc()}")
+    
+    logger.info("Cleanup complete")
 
 # 종료 핸들러 등록
 atexit.register(cleanup_on_exit)
@@ -221,32 +208,10 @@ with app.app_context():
     # 앱이 시작될 때 컬렉션 로드
     load_common_collections()
     
-    # 글로벌 배치 워커 시작 (기본 insert API 용)
+    # 임베딩 배치 처리 워커 시작
     from src.pipe import InteractManager
-    try:
-        InteractManager.start_batch_worker()
-        logger.info("글로벌 배치 처리 워커 시작됨")
-    except Exception as e:
-        logger.error(f"글로벌 배치 처리 워커 시작 실패: {str(e)}")
-    
-    # 임베딩 워커 시작 (직접 처리 방식 사용)
-    try:
-        InteractManager.start_embedding_worker()
-        logger.info("임베딩 처리 초기화 완료 (직접 처리 방식)")
-    except Exception as e:
-        logger.error(f"임베딩 처리 초기화 실패: {str(e)}")
-    
-    # RAW API 전용 배치 처리 워커 시작
-    try:
-        # 이미 실행 중인지 확인하여 중복 시작 방지
-        if hasattr(InteractManager, 'raw_batch_worker_running') and InteractManager.raw_batch_worker_running:
-            logger.info("RAW API 배치 처리 워커가 이미 실행 중입니다")
-        else:
-            InteractManager.start_raw_batch_worker()
-            logger.info("RAW API 배치 처리 워커 시작됨")
-    except Exception as e:
-        logger.error(f"RAW API 배치 처리 워커 시작 실패: {str(e)}")
-        # 실패해도 계속 진행 (앱 초기화 실패로 인한 재시작 루프 방지)
+    InteractManager.start_embedding_worker()
+    logger.info("임베딩 배치 처리 워커 시작됨")
 
 # app.cli에 명령 추가 (Flask CLI에서 실행 가능)
 app.cli.add_command(load_collections_command)
@@ -1074,15 +1039,6 @@ def insert_data():
                                     
                                     # 임베딩 추가
                                     processed_chunk = interact_manager.embed_and_prepare_chunk(chunk)
-                                    
-                                    # Future 객체인 경우 결과 기다리기
-                                    if hasattr(processed_chunk, 'result'):
-                                        try:
-                                            # 최대 20초까지 기다림
-                                            processed_chunk = processed_chunk.result(timeout=20)
-                                        except Exception as e:
-                                            logger.warning(f"임베딩 처리 실패: {doc_hashed_id}, 청크 #{index}, 오류: {str(e)}")
-                                            return None
                                     
                                     if processed_chunk is None:
                                         logger.warning(f"청크 처리 실패: {doc_hashed_id}, 청크 #{index}")

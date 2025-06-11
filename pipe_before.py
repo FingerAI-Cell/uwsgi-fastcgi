@@ -20,7 +20,6 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import torch
 import hashlib
-import inspect
 
 # 전역 GPU 세마포어 설정 - 모든 임베딩 처리에서 공유
 # MAX_GPU_WORKERS=1 환경 변수가 반영되도록 수정
@@ -95,20 +94,6 @@ class InteractManager:
     embedding_worker_thread = None  # 임베딩 배치 처리 워커 스레드
     embedding_worker_running = False  # 임베딩 워커 스레드 실행 상태
     embedding_batch_size = int(os.getenv('EMBEDDING_BATCH_SIZE', '50'))  # 임베딩 배치 크기 설정 (기본값: 50)
-    
-    # RAW API 전용 배치 큐 및 관련 변수 추가
-    raw_batch_queue = {}  # 도메인별 RAW API 배치 큐 {domain: [items...]}
-    raw_batch_lock = threading.Lock()  # RAW API 배치 큐 접근을 위한 락
-    raw_batch_worker_thread = None  # RAW API 배치 처리 워커 스레드
-    raw_batch_worker_running = False  # RAW API 워커 스레드 실행 상태
-    raw_batch_size = int(os.getenv('RAW_BATCH_SIZE', '20'))  # RAW API 배치 크기 설정 (기본값: 20)
-    raw_flush_interval = int(os.getenv('RAW_FLUSH_INTERVAL', '5'))  # 주기적 flush 간격(초) (기본값: 5초)
-    last_raw_batch_time = {}  # 도메인별 마지막 RAW 배치 추가 시간 {domain: timestamp}
-    raw_pending_deletes = {}  # 도메인별 삭제 대기 항목 {domain: [passage_uids...]}
-    raw_batch_event = threading.Event()  # RAW 배치 처리 알림을 위한 이벤트
-    
-    # 삭제 배치 관련 변수
-    delete_batch_size = int(os.getenv('DELETE_BATCH_SIZE', '50'))  # 삭제 배치 크기 설정 (기본값: 50)
     
     @classmethod
     def get_gpu_semaphore(cls):
@@ -1103,46 +1088,27 @@ class InteractManager:
             str: "success" (새로 생성) 또는 "skipped" (건너뜀) 또는 "updated" (업데이트)
         '''
         try:
-            # 호출 위치 확인을 위한 코드
-            import inspect
-            current_frame = inspect.currentframe()
-            calling_frame = inspect.getouterframes(current_frame, 2)
-            caller_name = calling_frame[1].function if len(calling_frame) > 1 else "unknown"
-            
-            # RAW API를 통한 호출인지 확인
-            should_log = 'insert_raw_data' in caller_name
-            
             # 시간 로깅을 위한 로거 설정
             import logging
             timing_logger = logging.getLogger('timing')
             
-            # raw_insert 전용 로거 설정 (호출 위치에 따라 로그 여부 결정)
-            raw_insert_logger = None
-            if should_log:
-                raw_insert_logger = logging.getLogger('raw_insert')
-                if not raw_insert_logger.handlers:
-                    # 로그 디렉토리 확인
-                    log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
-                    os.makedirs(log_dir, exist_ok=True)
-                    
-                    raw_handler = logging.FileHandler(os.path.join(log_dir, 'raw_insert.log'))
-                    raw_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-                    raw_handler.setFormatter(raw_formatter)
-                    raw_insert_logger.setLevel(logging.INFO)
-                    raw_insert_logger.addHandler(raw_handler)
-                    raw_insert_logger.propagate = False  # 다른 로거로 전파 방지
+            # raw_insert 전용 로거 설정
+            raw_insert_logger = logging.getLogger('raw_insert')
+            if not raw_insert_logger.handlers:
+                # 로그 디렉토리 확인
+                log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
+                os.makedirs(log_dir, exist_ok=True)
+                
+                raw_handler = logging.FileHandler(os.path.join(log_dir, 'raw_insert.log'))
+                raw_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                raw_handler.setFormatter(raw_formatter)
+                raw_insert_logger.setLevel(logging.INFO)
+                raw_insert_logger.addHandler(raw_handler)
+                raw_insert_logger.propagate = False  # 다른 로거로 전파 방지
             
             raw_start_time = time.time()
-            if should_log:
-                timing_logger.info(f"RAW_INSERT_START - doc_id: {doc_id}, passage_id: {passage_id}")
-                raw_insert_logger.info(f"=== RAW_INSERT_START - doc_id: {doc_id}, passage_id: {passage_id} ===")
-            
-            # 텍스트 필드 길이 제한
-            if len(text) > self.MAX_TEXT_LENGTH:
-                print(f"[WARNING] Text is too long ({len(text)} chars), truncating to {self.MAX_TEXT_LENGTH} chars")
-                if should_log:
-                    raw_insert_logger.warning(f"텍스트 길이 초과: {len(text)} > {self.MAX_TEXT_LENGTH}, 잘라내기 적용")
-                text = text[:self.MAX_TEXT_LENGTH]
+            timing_logger.info(f"RAW_INSERT_START - doc_id: {doc_id}, passage_id: {passage_id}")
+            raw_insert_logger.info(f"=== RAW_INSERT_START - doc_id: {doc_id}, passage_id: {passage_id} ===")
             
             # DB 세마포어 및 배치 처리 락 초기화 (한 번만)
             if self.__class__.db_semaphore is None:
@@ -1156,8 +1122,7 @@ class InteractManager:
             # 도메인이 없으면 생성
             if domain not in self.vectorenv.get_list_collection():
                 print(f"[DEBUG] Creating new collection: {domain}")
-                if should_log:
-                    raw_insert_logger.info(f"Creating new collection: {domain}")
+                raw_insert_logger.info(f"Creating new collection: {domain}")
                 self.create_domain(domain)
                 print(f"[DEBUG] Collection created successfully")
             
@@ -1168,8 +1133,7 @@ class InteractManager:
             
             hashed_doc_id = self.data_p.hash_text(doc_id, hash_type='blake')
             print(f"[DEBUG] Raw doc_id: {raw_doc_id}, Hashed doc_id: {hashed_doc_id}")
-            if should_log:
-                raw_insert_logger.info(f"Raw doc_id: {raw_doc_id}, Hashed doc_id: {hashed_doc_id}")
+            raw_insert_logger.info(f"Raw doc_id: {raw_doc_id}, Hashed doc_id: {hashed_doc_id}")
             
             # 컬렉션 로드
             collection = Collection(domain)
@@ -1178,21 +1142,18 @@ class InteractManager:
             
             # passage_uid 생성 (해시된 doc_id 사용)
             passage_uid = f"{hashed_doc_id}-p{passage_id}"
-            if should_log:
-                raw_insert_logger.info(f"생성된 passage_uid: {passage_uid}")
+            raw_insert_logger.info(f"생성된 passage_uid: {passage_uid}")
             
             # 중복 체크 - check_duplicates 함수 활용
             duplicate_results = self.check_duplicates([hashed_doc_id], domain)
-            if should_log:
-                raw_insert_logger.info(f"중복 체크 결과: 타입={type(duplicate_results)}, 값={duplicate_results}")
+            raw_insert_logger.info(f"중복 체크 결과: 타입={type(duplicate_results)}, 값={duplicate_results}")
             print(f"[DEBUG] 중복 체크 결과: {duplicate_results}")
             
             # 수정된 중복 처리 로직 - 단순화 및 버그 수정
             is_update = False
             # duplicate_results는 리스트 형태로 반환됨
             if duplicate_results and hashed_doc_id in duplicate_results:
-                if should_log:
-                    raw_insert_logger.info(f"문서 ID {hashed_doc_id}가 중복 발견됨")
+                raw_insert_logger.info(f"문서 ID {hashed_doc_id}가 중복 발견됨")
                 
                 # 중복 문서의 passage_id 직접 확인
                 try:
@@ -1203,34 +1164,29 @@ class InteractManager:
                         limit=100  # 충분한 결과 확보
                     )
                     
-                    if should_log:
-                        raw_insert_logger.info(f"중복 문서의 passage 정보: {passage_results}")
+                    raw_insert_logger.info(f"중복 문서의 passage 정보: {passage_results}")
                     
                     # 같은 passage_id가 있는지 확인
                     matching_passages = [p for p in passage_results if p.get('passage_id') == passage_id]
-                    if should_log:
-                        raw_insert_logger.info(f"일치하는 passage: {matching_passages}")
+                    raw_insert_logger.info(f"일치하는 passage: {matching_passages}")
                     
                     if matching_passages:
                         if ignore:
                             print(f"[DEBUG] Skipping insert due to ignore=True")
-                            if should_log:
-                                raw_insert_logger.info(f"ignore=True로 인해 삽입 건너뜀")
-                                timing_logger.info(f"RAW_INSERT_SKIPPED - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
+                            raw_insert_logger.info(f"ignore=True로 인해 삽입 건너뜀")
+                            timing_logger.info(f"RAW_INSERT_SKIPPED - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
                             return "skipped"
                         else:
                             print(f"[DEBUG] Deleting existing document due to ignore=False")
-                            if should_log:
-                                raw_insert_logger.info(f"ignore=False로 인해 기존 문서 삭제 후 재삽입")
-                                timing_logger.info(f"RAW_DELETE_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
+                            raw_insert_logger.info(f"ignore=False로 인해 기존 문서 삭제 후 재삽입")
+                            timing_logger.info(f"RAW_DELETE_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
                             
                             # 삭제 작업 시작
                             delete_start = time.time()
                             try:
                                 # passage_uid 기반 삭제가 doc_id & passage_id 쿼리보다 효율적
                                 del_expr = f'passage_uid == "{passage_uid}"'
-                                if should_log:
-                                    raw_insert_logger.info(f"삭제 쿼리: {del_expr}")
+                                raw_insert_logger.info(f"삭제 쿼리: {del_expr}")
                                 
                                 deleted_result = collection.delete(del_expr)
                                 
@@ -1245,75 +1201,62 @@ class InteractManager:
                                         # 다른 가능한 속성 이름 시도
                                         deleted_count = getattr(deleted_result, 'num_deleted', 0) or getattr(deleted_result, 'count', 0)
                                 
-                                if should_log:
-                                    raw_insert_logger.info(f"삭제 결과: {deleted_count}개 항목 삭제됨")
+                                raw_insert_logger.info(f"삭제 결과: {deleted_count}개 항목 삭제됨")
                                 
                                 delete_end = time.time()
                                 delete_duration = delete_end - delete_start
-                                if should_log:
-                                    timing_logger.info(f"RAW_DELETE_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s")
+                                timing_logger.info(f"RAW_DELETE_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s")
                                 print(f"[DEBUG] Successfully deleted existing document in {delete_duration:.4f}s")
                                 
                                 is_update = True
                             except Exception as delete_error:
                                 delete_error_time = time.time()
                                 delete_duration = delete_error_time - delete_start
-                                if should_log:
-                                    timing_logger.error(f"RAW_DELETE_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s, error: {str(delete_error)}")
-                                    raw_insert_logger.error(f"삭제 실패: {str(delete_error)}")
+                                timing_logger.error(f"RAW_DELETE_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s, error: {str(delete_error)}")
+                                raw_insert_logger.error(f"삭제 실패: {str(delete_error)}")
                                 print(f"[ERROR] Failed to delete existing document: {str(delete_error)}")
                                 raise Exception(f"Raw delete operation failed: {str(delete_error)}")
                 except Exception as query_error:
-                    if should_log:
-                        raw_insert_logger.error(f"passage 쿼리 오류: {str(query_error)}")
+                    raw_insert_logger.error(f"passage 쿼리 오류: {str(query_error)}")
                     print(f"[ERROR] Error querying passages: {str(query_error)}")
             
             # 텍스트 임베딩
             embed_start = time.time()
-            if should_log:
-                timing_logger.info(f"RAW_EMBED_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}, text_length: {len(text)}")
-                raw_insert_logger.info(f"임베딩 시작 - 텍스트 길이: {len(text)}")
+            timing_logger.info(f"RAW_EMBED_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}, text_length: {len(text)}")
+            raw_insert_logger.info(f"임베딩 시작 - 텍스트 길이: {len(text)}")
 
             # RAW_INSERT 전용 직접 임베딩 처리 - 세마포어 사용하지 않고 GPU에 직접 접근
             if self.emb_model and hasattr(self.emb_model, 'bge_embed_data_raw'):
                 try:
                     # 새로 구현한 RAW 전용 직접 임베딩 함수 호출
-                    if should_log:
-                        raw_insert_logger.info(f"RAW 전용 직접 임베딩 시작 - 세마포어 대기 없음")
+                    raw_insert_logger.info(f"RAW 전용 직접 임베딩 시작 - 세마포어 대기 없음")
                     text_emb = self.emb_model.bge_embed_data_raw(text)
-                    if should_log:
-                        raw_insert_logger.info(f"직접 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
+                    raw_insert_logger.info(f"직접 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
                 except Exception as emb_error:
-                    if should_log:
-                        raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
+                    raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
                     # 임베딩 실패 시 0 벡터 반환
                     text_emb = [0.0] * 1024
             else:
                 # 이전 방식으로 폴백
-                if should_log:
-                    raw_insert_logger.warning("RAW 전용 임베딩 함수 없음, 기본 함수로 폴백")
+                raw_insert_logger.warning("RAW 전용 임베딩 함수 없음, 기본 함수로 폴백")
                 try:
                     # GPU 세마포어 사용하지 않고 직접 임베딩 수행 (기존 코드)
                     import torch
                     gpu_available = torch.cuda.is_available()
-                    if should_log:
-                        raw_insert_logger.info(f"GPU 사용 가능 상태: {gpu_available}")
+                    raw_insert_logger.info(f"GPU 사용 가능 상태: {gpu_available}")
                     
                     # 직접 임베딩 생성
                     text_emb = self.emb_model.bge_embed_data(text)
-                    if should_log:
-                        raw_insert_logger.info(f"기본 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
+                    raw_insert_logger.info(f"기본 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
                 except Exception as emb_error:
-                    if should_log:
-                        raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
+                    raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
                     # 임베딩 실패 시 0 벡터 반환
                     text_emb = [0.0] * 1024
             
             embed_end = time.time()
             embed_duration = embed_end - embed_start
-            if should_log:
-                timing_logger.info(f"RAW_EMBED_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {embed_duration:.4f}s")
-                raw_insert_logger.info(f"임베딩 완료 - 소요시간: {embed_duration:.4f}초, 임베딩 벡터 길이: {len(text_emb)}")
+            timing_logger.info(f"RAW_EMBED_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {embed_duration:.4f}s")
+            raw_insert_logger.info(f"임베딩 완료 - 소요시간: {embed_duration:.4f}초, 임베딩 벡터 길이: {len(text_emb)}")
             print(f"[DEBUG] Generated embedding, length: {len(text_emb)}")
             
             # info와 tags가 문자열인 경우 파싱
@@ -1339,67 +1282,47 @@ class InteractManager:
             
             # 배치 처리 메커니즘 사용
             insert_start = time.time()
-            if should_log:
-                timing_logger.info(f"RAW_DB_INSERT_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
-                raw_insert_logger.info(f"DB 삽입 시작 - passage_uid: {passage_uid}")
+            timing_logger.info(f"RAW_DB_INSERT_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
+            raw_insert_logger.info(f"DB 삽입 시작 - passage_uid: {passage_uid}")
             print(f"[DEBUG] Preparing data with passage_uid: {passage_uid} for insert")
             
-            # RAW API 호출인 경우에만 RAW 배치 처리 사용
+            # 배치에 추가하고 필요시 삽입
             try:
-                if should_log and hasattr(self.__class__, 'add_to_raw_batch'):
-                    # RAW API 전용 배치 큐에 추가
-                    batch_inserted = self.__class__.add_to_raw_batch(domain, data)
-                    if batch_inserted:
-                        print(f"[DEBUG] Data triggered a RAW batch insert")
-                        if should_log:
-                            raw_insert_logger.info("RAW 배치 삽입 발생")
-                    else:
-                        print(f"[DEBUG] Data added to RAW batch (will be inserted later)")
-                        if should_log:
-                            raw_insert_logger.info("데이터가 RAW 배치에 추가됨 (나중에 삽입)")
+                batch_inserted = self._add_to_batch_and_insert(data, domain)
+                
+                if batch_inserted:
+                    print(f"[DEBUG] Data triggered a batch insert")
+                    raw_insert_logger.info("배치 삽입 발생")
                 else:
-                    # 일반 글로벌 배치 큐 사용
-                    batch_inserted = self._add_to_batch_and_insert(data, domain)
-                    if batch_inserted:
-                        print(f"[DEBUG] Data triggered a batch insert")
-                        if should_log:
-                            raw_insert_logger.info("배치 삽입 발생")
-                    else:
-                        print(f"[DEBUG] Data added to batch (will be inserted later)")
-                        if should_log:
-                            raw_insert_logger.info("데이터가 배치에 추가됨 (나중에 삽입)")
+                    print(f"[DEBUG] Data added to batch (will be inserted later)")
+                    raw_insert_logger.info("데이터가 배치에 추가됨 (나중에 삽입)")
                 
                 insert_end = time.time()
                 insert_duration = insert_end - insert_start
-                if should_log:
-                    timing_logger.info(f"RAW_DB_INSERT_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s")
-                    raw_insert_logger.info(f"DB 삽입 완료 - 소요시간: {insert_duration:.4f}초")
+                timing_logger.info(f"RAW_DB_INSERT_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s")
+                raw_insert_logger.info(f"DB 삽입 완료 - 소요시간: {insert_duration:.4f}초")
                 
                 # 업데이트 된 경우 즉시 flush하여 변경사항 적용
                 if is_update:
                     flush_start = time.time()
-                    if should_log:
-                        raw_insert_logger.info("업데이트로 인한 flush 시작")
+                    raw_insert_logger.info("업데이트로 인한 flush 시작")
                     collection.flush()
                     flush_end = time.time()
-                    if should_log:
-                        timing_logger.info(f"RAW_FLUSH - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {(flush_end - flush_start):.4f}s")
-                        raw_insert_logger.info(f"Flush 완료 - 소요시간: {(flush_end - flush_start):.4f}초")
+                    timing_logger.info(f"RAW_FLUSH - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {(flush_end - flush_start):.4f}s")
+                    raw_insert_logger.info(f"Flush 완료 - 소요시간: {(flush_end - flush_start):.4f}초")
                     print(f"[DEBUG] Collection flushed for update")
             except Exception as insert_error:
                 insert_error_time = time.time()
                 insert_duration = insert_error_time - insert_start
-                if should_log:
-                    timing_logger.error(f"RAW_DB_INSERT_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s, error: {str(insert_error)}")
-                    raw_insert_logger.error(f"DB 삽입 오류: {str(insert_error)}")
+                timing_logger.error(f"RAW_DB_INSERT_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s, error: {str(insert_error)}")
+                raw_insert_logger.error(f"DB 삽입 오류: {str(insert_error)}")
                 print(f"[ERROR] Failed to insert data: {str(insert_error)}")
                 raise
             
             # 인덱스가 있는지 확인하고 없으면 생성 (첫 삽입 시에만 필요)
             if not collection.has_index():
                 print(f"[DEBUG] Creating index for collection")
-                if should_log:
-                    raw_insert_logger.info("컬렉션에 인덱스 생성")
+                raw_insert_logger.info("컬렉션에 인덱스 생성")
                 self.vectorenv.create_index(collection, field_name='text_emb')
                 print(f"[DEBUG] Index created successfully")
                 
@@ -1409,9 +1332,8 @@ class InteractManager:
             
             raw_end_time = time.time()
             raw_duration = raw_end_time - raw_start_time
-            if should_log:
-                timing_logger.info(f"RAW_INSERT_TOTAL - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {raw_duration:.4f}s, status: {'updated' if is_update else 'success'}")
-                raw_insert_logger.info(f"=== RAW_INSERT_END - 총 소요시간: {raw_duration:.4f}초, 상태: {'updated' if is_update else 'success'} ===")
+            timing_logger.info(f"RAW_INSERT_TOTAL - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {raw_duration:.4f}s, status: {'updated' if is_update else 'success'}")
+            raw_insert_logger.info(f"=== RAW_INSERT_END - 총 소요시간: {raw_duration:.4f}초, 상태: {'updated' if is_update else 'success'} ===")
             print(f"[DEBUG] Raw insert completed in {raw_duration:.4f}s")
             
             return "updated" if is_update else "success"
@@ -2183,137 +2105,130 @@ class InteractManager:
 
     @classmethod
     def start_batch_worker(cls):
-        """글로벌 배치 처리 워커 스레드를 시작합니다."""
-        import logging
-        logger = logging.getLogger('rag-backend')
-        
-        # 이미 실행 중인 경우 처리
-        if cls.batch_worker_running:
-            logger.info("글로벌 배치 워커가 이미 실행 중입니다")
-            return
-            
-        try:
-            # 워커 스레드 시작
+        """배치 처리 워커 스레드를 시작합니다."""
+        if cls.batch_worker_thread is None or not cls.batch_worker_running:
             cls.batch_worker_running = True
-            cls.batch_worker_thread = threading.Thread(
-                target=cls._batch_worker_loop, 
-                daemon=True,
-                name="Global-Batch-Worker"
-            )
+            cls.batch_worker_thread = threading.Thread(target=cls._batch_worker_loop, daemon=True)
             cls.batch_worker_thread.start()
-            logger.info("글로벌 배치 처리 워커 시작됨")
-        except Exception as e:
-            cls.batch_worker_running = False
-            cls.batch_worker_thread = None
-            logger.error(f"글로벌 배치 워커 시작 중 오류 발생: {str(e)}")
-            # 오류를 호출자에게 전파하지 않고 여기서 처리
+            print(f"[DEBUG] 배치 처리 워커 스레드 시작됨")
 
     @classmethod
     def stop_batch_worker(cls):
-        """글로벌 배치 처리 워커 스레드를 중지합니다."""
-        import logging
-        logger = logging.getLogger('rag-backend')
-        
-        # 워커가 실행 중이 아닌 경우
-        if not cls.batch_worker_running:
-            logger.info("글로벌 배치 워커가 실행 중이 아닙니다")
-            return
-            
-        try:
-            # 워커 중지 플래그 설정
-            cls.batch_worker_running = False
-            
-            # 스레드 종료 대기
-            if cls.batch_worker_thread:
-                cls.batch_worker_thread.join(timeout=5)  # 최대 5초간 대기
-                cls.batch_worker_thread = None
-                logger.info("글로벌 배치 처리 워커 중지 완료")
-        except Exception as e:
-            logger.error(f"글로벌 배치 워커 중지 중 오류 발생: {str(e)}")
-            # 오류가 발생해도 워커를 강제로 중지 상태로 설정
-            cls.batch_worker_thread = None
+        """배치 처리 워커 스레드를 중지합니다."""
+        cls.batch_worker_running = False
+        if cls.batch_worker_thread and cls.batch_worker_thread.is_alive():
+            cls.batch_worker_thread.join(timeout=2.0)
+            print(f"[DEBUG] 배치 처리 워커 스레드 중지됨")
 
     @classmethod
     def _batch_worker_loop(cls):
-        """글로벌 배치 큐 워커 스레드 함수"""
+        """배치 처리 워커 스레드의 메인 루프"""
         import logging
         logger = logging.getLogger('rag-backend')
-        logger.info("글로벌 배치 처리 워커 시작됨")
+        logger.info("배치 처리 워커 스레드 시작")
+        
+        # 도메인별 마지막 처리 시간 추적 (타임아웃 처리용)
+        last_process_time = {}
+        # 배치 타임아웃 설정 (초) - 이 시간이 지나면 배치 크기가 차지 않아도 처리
+        batch_timeout = 10.0
         
         while cls.batch_worker_running:
             try:
-                # 처리할 도메인 확인
+                # 각 도메인에 대해 배치 처리 확인
                 domains_to_process = []
-                with cls.global_batch_lock:
-                    # 효율적인 처리를 위해 충분한 데이터가 쌓인 도메인만 처리
-                    current_time = time.time()
-                    for domain, batch in cls.global_batch_queue.items():
-                        if (len(batch) >= cls.batch_size or 
-                            (domain in cls.last_batch_time and 
-                             current_time - cls.last_batch_time[domain] > 5)):  # 5초 이상 지난 배치는 크기와 상관없이 처리
-                            domains_to_process.append(domain)
+                current_time = time.time()
                 
+                with cls.global_batch_lock:
+                    # 처리할 도메인 목록 생성
+                    for domain, chunks in cls.global_batch_queue.items():
+                        # 배치가 꽉 찬 경우에 처리
+                        if len(chunks) >= cls.batch_size:
+                            domains_to_process.append(domain)
+                        # 또는 일정 시간이 지난 경우에도 처리 (배치에 데이터가 있는 경우)
+                        elif len(chunks) > 0:
+                            time_since_last_process = current_time - last_process_time.get(domain, 0)
+                            if time_since_last_process >= batch_timeout or domain not in last_process_time:
+                                domains_to_process.append(domain)
+                                logger.info(f"배치 타임아웃 발생: 도메인={domain}, 항목 수={len(chunks)}, 경과 시간={time_since_last_process:.1f}초")
+                
+                # 처리할 도메인이 있으면 배치 처리 수행
+                for domain in domains_to_process:
+                    with cls.global_batch_lock:
+                        # 배치 데이터 가져오기
+                        if domain in cls.global_batch_queue and cls.global_batch_queue[domain]:
+                            # 배치 크기만큼 또는 모든 청크 가져오기
+                            if len(cls.global_batch_queue[domain]) <= cls.batch_size:
+                                batch_data = cls.global_batch_queue[domain]
+                                cls.global_batch_queue[domain] = []
+                            else:
+                                batch_data = cls.global_batch_queue[domain][:cls.batch_size]
+                                cls.global_batch_queue[domain] = cls.global_batch_queue[domain][cls.batch_size:]
+                            
+                            # 타임스탬프 갱신 (로깅용으로만 사용)
+                            cls.last_batch_time[domain] = current_time
+                            # 마지막 처리 시간 갱신 (타임아웃 계산용)
+                            last_process_time[domain] = current_time
+                            
+                            batch_size = len(batch_data)
+                            
+                            # 문서별 청크 그룹화 - 같은 문서의 청크는 함께 처리되도록
+                            doc_ids = set(item.get('doc_id', '') for item in batch_data)
+                            logger.info(f"글로벌 배치 처리: 도메인={domain}, 청크 수={batch_size}, 고유 문서 수={len(doc_ids)}")
+                        else:
+                            continue
+                    
+                    # 락 해제 상태에서 배치 처리 (다른 스레드가 큐에 추가할 수 있도록)
+                    if batch_data:
+                        try:
+                            # 인스턴스 생성 필요 (클래스 메서드에서 인스턴스 메서드 호출)
+                            instance = InteractManager()
+                            
+                            # 문서별로 청크 그룹화
+                            doc_chunks = {}
+                            for chunk in batch_data:
+                                doc_id = chunk.get('doc_id', 'unknown')
+                                if doc_id not in doc_chunks:
+                                    doc_chunks[doc_id] = []
+                                doc_chunks[doc_id].append(chunk)
+                            
+                            # 각 문서별로 배치 처리 실행
+                            for doc_id, chunks in doc_chunks.items():
+                                try:
+                                    logger.info(f"문서 '{doc_id}' 청크 {len(chunks)}개 처리 중")
+                                    instance._execute_batch_insert(chunks, domain)
+                                    logger.info(f"문서 '{doc_id}' 청크 처리 완료")
+                                except Exception as doc_error:
+                                    logger.error(f"문서 '{doc_id}' 처리 오류: {str(doc_error)}")
+                                    # 오류 발생 시 개별 청크 처리 시도
+                                    for chunk in chunks:
+                                        try:
+                                            instance._execute_batch_insert([chunk], domain)
+                                        except Exception as chunk_error:
+                                            logger.error(f"청크 개별 처리 실패: {str(chunk_error)}")
+                            
+                            logger.info(f"글로벌 배치 {batch_size}개 항목 처리 완료 (도메인: {domain}, 문서 수: {len(doc_chunks)})")
+                            
+                        except Exception as e:
+                            logger.error(f"글로벌 배치 처리 오류: {str(e)}")
+                            # 오류 발생 시 개별 처리 시도
+                            try:
+                                for item in batch_data:
+                                    try:
+                                        instance._execute_batch_insert([item], domain)
+                                    except Exception as item_error:
+                                        logger.error(f"개별 항목 처리 실패: {str(item_error)}")
+                            except Exception as recovery_error:
+                                logger.error(f"복구 시도 중 오류: {str(recovery_error)}")
+            
                 # 처리할 도메인이 없으면 잠시 대기
                 if not domains_to_process:
-                    time.sleep(0.5)  # 0.5초 대기 (CPU 사용량 감소)
-                    continue
-                
-                # 도메인별 처리
-                for domain in domains_to_process:
-                    try:
-                        # 도메인의 배치 데이터 가져오기
-                        batch_data = []
-                        with cls.global_batch_lock:
-                            if domain in cls.global_batch_queue and cls.global_batch_queue[domain]:
-                                batch_data = cls.global_batch_queue[domain]
-                                cls.global_batch_queue[domain] = []  # 배치 비우기
-                        
-                        if not batch_data:
-                            continue
-                        
-                        # 배치 데이터를 DB에 삽입 (효율적인 처리를 위해 미리 collection 객체 생성)
-                        try:
-                            if domain in utility.list_collections():
-                                collection = Collection(domain)
-                                # 데이터 포맷 확인 및 변환
-                                formatted_data = batch_data
-                                
-                                # 데이터가 단일 딕셔너리인 경우 (드물게 발생할 수 있음) 리스트로 변환
-                                if isinstance(batch_data, dict):
-                                    formatted_data = [batch_data]
-                                    
-                                logger.info(f"[BATCH] 도메인 '{domain}'에 {len(formatted_data)}개 항목 배치 삽입 시작")
-                                insert_start = time.time()
-                                
-                                try:
-                                    # 데이터 삽입
-                                    collection.insert(formatted_data)
-                                    # 즉시 flush
-                                    collection.flush()
-                                    
-                                    insert_end = time.time()
-                                    logger.info(f"[BATCH] 도메인 '{domain}'에 {len(formatted_data)}개 항목 배치 삽입 완료 (소요시간: {insert_end-insert_start:.4f}초)")
-                                except Exception as insert_error:
-                                    logger.error(f"[BATCH] 도메인 '{domain}' 배치 삽입 중 오류 발생: {str(insert_error)}")
-                                    
-                                    # 오류 발생 시 재시도 로직 또는 로깅 처리
-                                    # 중요한 데이터인 경우 재시도 큐에 추가하는 등의 처리 필요
-                                    # 현재는 간단히 로그만 남김
-                            else:
-                                logger.warning(f"[BATCH] 도메인 '{domain}'이 존재하지 않아 배치 처리를 건너뜁니다")
-                        except Exception as e:
-                            logger.error(f"[BATCH] 도메인 '{domain}' 컬렉션 접근 중 오류: {str(e)}")
-                    
-                    except Exception as domain_error:
-                        logger.error(f"[BATCH] 도메인 '{domain}' 처리 중 오류 발생: {str(domain_error)}")
-                        # 개별 도메인 오류는 건너뛰고 다른 도메인 처리 계속
-                        continue
+                    time.sleep(0.1)  # CPU 사용률 감소를 위한 짧은 대기
                     
             except Exception as e:
-                logger.error(f"[BATCH] 배치 워커 스레드 오류: {str(e)}")
-                time.sleep(1)  # 오류 발생 시 잠시 대기
+                logger.error(f"배치 워커 루프 오류: {str(e)}")
+                time.sleep(1.0)  # 오류 발생 시 더 긴 대기
         
-        logger.info("글로벌 배치 처리 워커 종료됨")
+        logger.info("배치 처리 워커 스레드 종료")
 
     @classmethod
     def add_to_global_batch(cls, data, domain):
@@ -2487,298 +2402,133 @@ class InteractManager:
 
     @classmethod
     def start_embedding_worker(cls):
-        """임베딩 배치 처리 워커 스레드를 시작합니다.
-        
-        기존 코드에서는 이 기능이 구현되지 않았으므로,
-        로그만 남기고 실제 스레드는 시작하지 않습니다.
-        대신 add_to_embedding_batch에서 직접 처리합니다.
-        """
-        import logging
-        logger = logging.getLogger('rag-backend')
-        
-        # 이미 실행 중인 경우 처리
-        if cls.embedding_worker_running:
-            logger.info("임베딩 배치 워커가 이미 실행 중입니다")
-            return
-        
-        try:
-            # 임베딩 워커 기능이 아직 구현되지 않았으므로 일단 스킵
-            logger.info("임베딩 배치 워커는 현재 구현되지 않았습니다 (직접 처리 방식 사용)")
-            # 아래 코드는 실행하지 않음
-            # cls.embedding_worker_running = True
-            # cls.embedding_worker_thread = threading.Thread(target=cls._embedding_worker_loop, daemon=True)
-            # cls.embedding_worker_thread.start()
+        """임베딩 배치 처리 워커 스레드를 시작합니다."""
+        if cls.embedding_worker_thread is None or not cls.embedding_worker_running:
+            cls.embedding_worker_running = True
+            cls.embedding_worker_thread = threading.Thread(target=cls._embedding_worker_loop, daemon=True)
+            cls.embedding_worker_thread.start()
+            print(f"[DEBUG] 임베딩 배치 처리 워커 스레드 시작됨")
             
-            # 삽입 배치 워커는 여전히 시작
+            # 삽입 배치 워커도 함께 시작
             cls.start_batch_worker()
-            logger.info("글로벌 배치 워커 시작됨")
-        except Exception as e:
-            logger.error(f"임베딩 배치 처리 워커 시작 실패: {str(e)}")
-            import traceback
-            logger.error(f"오류 세부 정보: {traceback.format_exc()}")
-    
+
     @classmethod
     def stop_embedding_worker(cls):
-        # 임베딩 워커 중지
-        import logging
-        logger = logging.getLogger('rag-backend')
+        """임베딩 배치 처리 워커 스레드를 중지합니다."""
         cls.embedding_worker_running = False
-        if cls.embedding_worker_thread:
-            cls.embedding_batch_event.set()  # 워커 스레드 깨움
-            cls.embedding_worker_thread.join(timeout=5)  # 최대 5초간 대기
-            cls.embedding_worker_thread = None
-            logger.info("임베딩 배치 워커 중지 완료")
-        else:
-            logger.info("임베딩 배치 워커가 실행 중이 아닙니다")
-    
+        # 워커 스레드에 알림
+        cls.embedding_batch_event.set()
+        
+        if cls.embedding_worker_thread and cls.embedding_worker_thread.is_alive():
+            cls.embedding_worker_thread.join(timeout=2.0)
+            print(f"[DEBUG] 임베딩 배치 처리 워커 스레드 중지됨")
+        
+        # 남은 배치 처리를 위해 배치 워커 유지
+
     @classmethod
-    def start_raw_batch_worker(cls):
-        """RAW API 전용 배치 처리 워커를 시작합니다."""
+    def _embedding_worker_loop(cls):
+        """임베딩 배치 처리 워커 스레드의 메인 루프"""
         import logging
         logger = logging.getLogger('rag-backend')
+        logger.info("임베딩 배치 처리 워커 스레드 시작")
         
-        # 이미 실행 중인 경우 처리
-        if cls.raw_batch_worker_running:
-            logger.info("RAW API 배치 워커가 이미 실행 중입니다")
-            return
+        # 모델 인스턴스 생성 (공유)
+        from .models import EmbModel
+        emb_model = None
         
         try:
-            # raw_batch_event 초기화 확인
-            if not hasattr(cls, 'raw_batch_event') or cls.raw_batch_event is None:
-                cls.raw_batch_event = threading.Event()
-                logger.info("RAW API 배치 이벤트 객체 초기화")
-            
-            # 워커 스레드 시작
-            cls.raw_batch_worker_running = True
-            cls.raw_batch_worker_thread = threading.Thread(
-                target=cls._raw_batch_worker_thread,
-                daemon=True,
-                name="RAW-Batch-Worker"
-            )
-            cls.raw_batch_worker_thread.start()
-            logger.info("RAW API 배치 처리 워커 시작됨")
-        except Exception as e:
-            cls.raw_batch_worker_running = False
-            cls.raw_batch_worker_thread = None
-            logger.error(f"RAW API 배치 워커 시작 중 오류 발생: {str(e)}")
-            # 오류를 호출자에게 전파하지 않고 여기서 처리
-    
-    @classmethod
-    def stop_raw_batch_worker(cls):
-        """RAW API 전용 배치 처리 워커를 중지합니다."""
-        import logging
-        logger = logging.getLogger('rag-backend')
+            # 임베딩 모델 초기화
+            emb_model = EmbModel({})
+            emb_model.set_emb_model('bge')
+            emb_model.set_embbeding_config()
+            logger.info("임베딩 배치 워커에서 모델 초기화 완료")
+        except Exception as model_error:
+            logger.error(f"임베딩 모델 초기화 오류: {str(model_error)}")
+            import traceback
+            logger.error(f"모델 초기화 오류 스택 트레이스: {traceback.format_exc()}")
         
-        # 워커가 실행 중이 아닌 경우
-        if not cls.raw_batch_worker_running:
-            logger.info("RAW API 배치 워커가 실행 중이 아닙니다")
-            return
-            
-        try:
-            cls.raw_batch_worker_running = False
-            
-            # 이벤트 객체 확인
-            if hasattr(cls, 'raw_batch_event') and cls.raw_batch_event is not None:
-                cls.raw_batch_event.set()  # 워커 스레드 깨움
-            
-            # 스레드 종료 대기
-            if cls.raw_batch_worker_thread:
-                cls.raw_batch_worker_thread.join(timeout=5)  # 최대 5초간 대기
-                cls.raw_batch_worker_thread = None
-                logger.info("RAW API 배치 처리 워커 중지 완료")
-        except Exception as e:
-            logger.error(f"RAW API 배치 워커 중지 중 오류 발생: {str(e)}")
-            # 오류가 발생해도 워커를 강제로 중지 상태로 설정
-            cls.raw_batch_worker_running = False
-            cls.raw_batch_worker_thread = None
-    
-    @classmethod
-    def _raw_batch_worker_thread(cls):
-        """RAW API 전용 배치 처리 워커 스레드 함수"""
-        import logging
-        logger = logging.getLogger('rag-backend')
-        logger.info("RAW API 배치 처리 워커 시작됨")
-        raw_batch_logger = logging.getLogger('raw_insert')
-        last_flush_time = {}  # 도메인별 마지막 flush 시간
-        
-        while cls.raw_batch_worker_running:
+        while cls.embedding_worker_running:
             try:
-                # 처리할 도메인과 배치 데이터 확인
-                domains_to_process = []
-                with cls.raw_batch_lock:
-                    current_time = time.time()
-                    
-                    # 처리할 도메인 확인 (배치 크기 충족 또는 시간 초과)
-                    for domain, batch in cls.raw_batch_queue.items():
-                        if (len(batch) >= cls.raw_batch_size or 
-                            (domain in cls.last_raw_batch_time and 
-                             current_time - cls.last_raw_batch_time[domain] > 3)):
-                            domains_to_process.append(domain)
+                # 배치 처리할 청크 가져오기
+                batch_chunks = []
+                chunk_futures = []
                 
-                # 삭제 배치 처리
-                with cls.raw_batch_lock:
-                    for domain, delete_ids in cls.raw_pending_deletes.items():
-                        if len(delete_ids) >= cls.delete_batch_size:
-                            # 처리 목록에 도메인 추가 (중복 방지)
-                            if domain not in domains_to_process:
-                                domains_to_process.append(domain)
-                
-                # 처리할 도메인이 없으면 대기
-                if not domains_to_process:
-                    # 주기적 flush 확인
-                    flush_domains = []
-                    current_time = time.time()
-                    with cls.raw_batch_lock:
-                        for domain in cls.raw_batch_queue.keys():
-                            if (domain in last_flush_time and 
-                                current_time - last_flush_time.get(domain, 0) > cls.raw_flush_interval and
-                                (domain in cls.raw_batch_queue and len(cls.raw_batch_queue[domain]) > 0)):
-                                flush_domains.append(domain)
+                with cls.embedding_batch_lock:
+                    # 배치 크기만큼 또는 모든 청크 가져오기
+                    batch_size = min(len(cls.embedding_batch_queue), cls.embedding_batch_size)
                     
-                    # flush가 필요한 도메인이 있으면 처리
-                    if flush_domains:
-                        for domain in flush_domains:
-                            try:
-                                # Milvus 컬렉션 가져오기
-                                if domain in utility.list_collections():
-                                    try:
-                                        collection = Collection(domain)
-                                        raw_batch_logger.info(f"주기적 flush 시작 - 도메인: {domain}")
-                                        flush_start = time.time()
-                                        collection.flush()
-                                        flush_end = time.time()
-                                        last_flush_time[domain] = current_time
-                                        raw_batch_logger.info(f"주기적 flush 완료 - 도메인: {domain}, 소요시간: {flush_end - flush_start:.4f}초")
-                                    except Exception as coll_e:
-                                        raw_batch_logger.error(f"컬렉션 생성 또는 flush 중 오류 발생 - 도메인: {domain}, 오류: {str(coll_e)}")
-                            except Exception as e:
-                                raw_batch_logger.error(f"주기적 flush 중 오류 발생 - 도메인: {domain}, 오류: {str(e)}")
-                    
-                    # 이벤트로 대기 (최대 1초)
+                    if batch_size > 0:
+                        # 청크 및 Future 객체 가져오기
+                        batch_chunks = [item[0] for item in cls.embedding_batch_queue[:batch_size]]
+                        chunk_futures = [item[1] for item in cls.embedding_batch_queue[:batch_size]]
+                        
+                        # 처리 중인 청크 큐에서 제거
+                        cls.embedding_batch_queue = cls.embedding_batch_queue[batch_size:]
+                        
+                        logger.info(f"임베딩 배치 처리 시작: 청크 수={batch_size}")
+                        
+                # 처리할 청크가 있는 경우
+                if batch_chunks:
                     try:
-                        cls.raw_batch_event.wait(timeout=1.0)
-                        cls.raw_batch_event.clear()
-                    except Exception as event_e:
-                        raw_batch_logger.error(f"이벤트 대기 중 오류 발생: {str(event_e)}")
-                        time.sleep(1.0)  # 이벤트 객체 오류 시 대체 대기
-                    continue
-                
-                # 도메인별 처리
-                for domain in domains_to_process:
-                    try:
-                        # Milvus 컬렉션 가져오기
-                        if domain not in utility.list_collections():
-                            raw_batch_logger.warning(f"도메인 {domain}이 존재하지 않아 배치 처리를 건너뜁니다")
-                            continue
+                        # 청크 텍스트 추출
+                        texts = [chunk['text'] for chunk in batch_chunks]
                         
-                        # 안전하게 컬렉션 객체 생성
-                        try:
-                            collection = Collection(domain)
-                        except Exception as coll_error:
-                            raw_batch_logger.error(f"컬렉션 생성 중 오류 발생 - 도메인: {domain}, 오류: {str(coll_error)}")
-                            continue  # 이 도메인 건너뛰기
+                        # 배치 임베딩 처리
+                        start_time = time.time()
+                        embedding_vectors = emb_model.bge_batch_embed_data(texts)
+                        end_time = time.time()
                         
-                        # 1. 삭제 배치 처리
-                        delete_uids = []
-                        with cls.raw_batch_lock:
-                            if domain in cls.raw_pending_deletes and cls.raw_pending_deletes[domain]:
-                                delete_uids = cls.raw_pending_deletes[domain].copy()
-                                cls.raw_pending_deletes[domain] = []
+                        duration = end_time - start_time
+                        logger.info(f"임베딩 배치 처리 완료: 청크 수={len(batch_chunks)}, 소요 시간={duration:.4f}초")
                         
-                        if delete_uids:
-                            delete_start = time.time()
-                            raw_batch_logger.info(f"배치 삭제 시작 - 도메인: {domain}, 항목 수: {len(delete_uids)}")
-                            
-                            # 50개씩 나누어 삭제 (대용량 쿼리 방지)
-                            for i in range(0, len(delete_uids), 50):
-                                batch_uids = delete_uids[i:i+50]
-                                # f-string 내 백슬래시 문제 해결을 위해 join 부분을 분리
-                                joined_uids = '", "'.join(batch_uids)
-                                expr = f'passage_uid in ["{joined_uids}"]'
-                                try:
-                                    collection.delete(expr)
-                                except Exception as e:
-                                    raw_batch_logger.error(f"배치 삭제 중 오류 발생 - 도메인: {domain}, 오류: {str(e)}")
-                            
-                            delete_end = time.time()
-                            raw_batch_logger.info(f"배치 삭제 완료 - 도메인: {domain}, 항목 수: {len(delete_uids)}, 소요시간: {delete_end - delete_start:.4f}초")
+                        # 결과 검증
+                        if len(embedding_vectors) != len(batch_chunks):
+                            logger.error(f"임베딩 결과 개수 불일치: 입력={len(batch_chunks)}, 출력={len(embedding_vectors)}")
+                            # 누락된 결과를 0 벡터로 채우기
+                            embedding_vectors = embedding_vectors + [[0.0] * 1024] * (len(batch_chunks) - len(embedding_vectors))
                         
-                        # 2. 삽입 배치 처리
-                        batch_data = []
-                        with cls.raw_batch_lock:
-                            if domain in cls.raw_batch_queue and cls.raw_batch_queue[domain]:
-                                batch_data = cls.raw_batch_queue[domain].copy()
-                                cls.raw_batch_queue[domain] = []
-                        
-                        if batch_data:
-                            insert_start = time.time()
-                            raw_batch_logger.info(f"배치 삽입 시작 - 도메인: {domain}, 항목 수: {len(batch_data)}")
-                            
-                            # 배치 삽입 실행
+                        # 각 청크에 임베딩 결과 할당 및 Future 설정
+                        for i, (chunk, vector, future) in enumerate(zip(batch_chunks, embedding_vectors, chunk_futures)):
                             try:
-                                collection.insert(batch_data)
-                                insert_end = time.time()
-                                raw_batch_logger.info(f"배치 삽입 완료 - 도메인: {domain}, 항목 수: {len(batch_data)}, 소요시간: {insert_end - insert_start:.4f}초")
+                                # 임베딩 벡터 할당
+                                chunk['text_emb'] = vector
+                                
+                                # Future 결과 설정
+                                future.set_result(chunk)
+                                
                             except Exception as e:
-                                raw_batch_logger.error(f"배치 삽입 중 오류 발생 - 도메인: {domain}, 오류: {str(e)}")
+                                logger.error(f"청크 {i} 임베딩 결과 처리 오류: {str(e)}")
+                                # Future 예외 설정
+                                future.set_exception(e)
                         
-                        # 3. Flush 실행 (삭제나 삽입이 있었을 경우)
-                        if delete_uids or batch_data:
-                            try:
-                                flush_start = time.time()
-                                raw_batch_logger.info(f"배치 처리 후 flush 시작 - 도메인: {domain}")
-                                collection.flush()
-                                flush_end = time.time()
-                                last_flush_time[domain] = time.time()
-                                raw_batch_logger.info(f"Flush 완료 - 도메인: {domain}, 소요시간: {flush_end - flush_start:.4f}초")
-                            except Exception as flush_e:
-                                raw_batch_logger.error(f"Flush 중 오류 발생 - 도메인: {domain}, 오류: {str(flush_e)}")
-                    
-                    except Exception as e:
-                        raw_batch_logger.error(f"도메인 {domain} 배치 처리 중 오류 발생: {str(e)}")
+                    except Exception as batch_error:
+                        logger.error(f"배치 임베딩 처리 오류: {str(batch_error)}")
+                        import traceback
+                        logger.error(f"배치 처리 오류 스택 트레이스: {traceback.format_exc()}")
+                        
+                        # 모든 Future에 예외 설정
+                        for future in chunk_futures:
+                            if not future.done():
+                                future.set_exception(batch_error)
                 
+                # 처리할 청크가 없는 경우 대기
+                else:
+                    # 새 청크가 추가되거나 종료 신호가 올 때까지 대기
+                    cls.embedding_batch_event.wait(timeout=0.1)
+                    cls.embedding_batch_event.clear()
+                    
             except Exception as e:
-                raw_batch_logger.error(f"RAW API 배치 워커 스레드 오류: {str(e)}")
-                time.sleep(1)  # 오류 발생 시 잠시 대기
+                logger.error(f"임베딩 배치 워커 루프 오류: {str(e)}")
+                import traceback
+                logger.error(f"워커 루프 오류 스택 트레이스: {traceback.format_exc()}")
+                time.sleep(1.0)  # 오류 발생 시 더 긴 대기
         
-        raw_batch_logger.info("RAW API 배치 처리 워커 종료됨")
-    
-    @classmethod
-    def add_to_raw_batch(cls, domain, doc_data):
-        """RAW API 전용 배치 큐에 문서 데이터를 추가합니다."""
-        with cls.raw_batch_lock:
-            # 도메인 큐가 없으면 생성
-            if domain not in cls.raw_batch_queue:
-                cls.raw_batch_queue[domain] = []
-            
-            # 배치 큐에 추가
-            cls.raw_batch_queue[domain].append(doc_data)
-            cls.last_raw_batch_time[domain] = time.time()
-            
-            # 배치 크기 확인 및 처리 알림
-            if len(cls.raw_batch_queue[domain]) >= cls.raw_batch_size:
-                cls.raw_batch_event.set()
-    
-    @classmethod
-    def add_to_raw_delete_batch(cls, domain, passage_uid):
-        """RAW API 전용 삭제 배치 큐에 passage_uid를 추가합니다."""
-        with cls.raw_batch_lock:
-            # 도메인 삭제 큐가 없으면 생성
-            if domain not in cls.raw_pending_deletes:
-                cls.raw_pending_deletes[domain] = []
-            
-            # 삭제 큐에 추가
-            cls.raw_pending_deletes[domain].append(passage_uid)
-            
-            # 배치 크기 확인 및 처리 알림
-            if len(cls.raw_pending_deletes[domain]) >= cls.delete_batch_size:
-                cls.raw_batch_event.set()
+        logger.info("임베딩 배치 처리 워커 스레드 종료")
 
     @classmethod
     def add_to_embedding_batch(cls, chunk_data):
         """
         청크를 임베딩 배치 큐에 추가하고 Future 객체를 반환합니다.
-        원래 임베딩 워커가 구현되지 않았으므로 기존 방식대로 즉시 처리합니다.
         
         Args:
             chunk_data (dict): 임베딩할 청크 데이터
@@ -2786,105 +2536,18 @@ class InteractManager:
         Returns:
             concurrent.futures.Future: 임베딩 완료 후 결과를 받을 Future 객체
         """
-        import logging
-        logger = logging.getLogger('rag-backend')
+        # 임베딩 워커 시작 확인
+        if not cls.embedding_worker_running:
+            cls.start_embedding_worker()
         
         # Future 객체 생성
         future = concurrent.futures.Future()
         
-        try:
-            # 임베딩 워커를 통하지 않고 직접 처리
-            # 임시 인스턴스 생성
-            from .models import EmbModel
-            emb_model = EmbModel({})
-            emb_model.set_emb_model('bge')
-            emb_model.set_embbeding_config()
-            
-            # 텍스트가 없으면 빈 임베딩 생성
-            if 'text' not in chunk_data or not chunk_data['text']:
-                logger.warning(f"임베딩 생성을 위한 텍스트 없음, 빈 벡터 생성")
-                chunk_data['text_emb'] = [0.0] * 1024
-                future.set_result(chunk_data)
-                return future
-            
-            # 직접 임베딩 생성
-            text = chunk_data['text']
-            try:
-                # 세마포어 사용하여 GPU 리소스 관리
-                with cls._gpu_semaphore:
-                    # 실제 임베딩 생성
-                    text_emb = emb_model.bge_embed_data(text)
-                    
-                    # 임베딩 추가
-                    chunk_data['text_emb'] = text_emb
-                    logger.debug(f"임베딩 생성 완료: 벡터 길이={len(text_emb)}")
-            except Exception as e:
-                logger.error(f"임베딩 생성 오류: {str(e)}")
-                # 오류 시 빈 벡터로 대체
-                chunk_data['text_emb'] = [0.0] * 1024
-            
-            # Future에 결과 설정
-            future.set_result(chunk_data)
-            
-        except Exception as e:
-            logger.error(f"임베딩 배치 처리 오류: {str(e)}")
-            # 오류 발생 시 예외 설정
-            future.set_exception(e)
+        # 배치 큐에 청크와 Future 추가
+        with cls.embedding_batch_lock:
+            cls.embedding_batch_queue.append((chunk_data, future))
+        
+        # 워커 스레드에 새 청크 추가 알림
+        cls.embedding_batch_event.set()
         
         return future
-
-    def process_chunk(self, chunk):
-        '''
-        청크를 데이터베이스에 삽입합니다.
-        
-        Args:
-            chunk: 삽입할 청크 데이터
-            
-        Returns:
-            str: 결과 (success, skipped, error)
-        '''
-        # 필수 필드 확인
-        if 'doc_id' not in chunk or 'domain' not in chunk:
-            print(f"[ERROR] Missing required fields in chunk: {chunk.keys()}")
-            return "error"
-        
-        try:
-            # 임베딩 생성 및 청크 준비
-            embed_result = self.embed_and_prepare_chunk(chunk)
-            
-            # 임베딩 결과가 Future 객체인 경우
-            if hasattr(embed_result, 'result'):
-                try:
-                    # 임베딩 결과 대기 (타임아웃 10초)
-                    chunk = embed_result.result(timeout=10)
-                    if chunk is None:
-                        # 로깅
-                        logger = logging.getLogger('rag-backend')
-                        logger.warning(f"청크 처리 실패: {chunk.get('doc_id', 'unknown')}, 청크 #{chunk.get('passage_id', 'unknown')}")
-                        return "error"
-                except concurrent.futures.TimeoutError:
-                    # 타임아웃 발생 시 로깅
-                    logger = logging.getLogger('rag-backend')
-                    logger.warning(f"청크 임베딩 타임아웃: {chunk.get('doc_id', 'unknown')}, 청크 #{chunk.get('passage_id', 'unknown')}")
-                    return "error"
-                except Exception as e:
-                    # 기타 예외 발생 시 로깅
-                    logger = logging.getLogger('rag-backend')
-                    logger.warning(f"청크 처리 실패: {chunk.get('doc_id', 'unknown')}, 청크 #{chunk.get('passage_id', 'unknown')}, 오류: {str(e)}")
-                    return "error"
-            else:
-                # 임베딩 결과가 직접 청크인 경우
-                chunk = embed_result
-            
-            # 배치 처리 메커니즘 사용
-            try:
-                # 배치에 데이터 추가
-                result = self._add_to_batch_and_insert(chunk, chunk['domain'])
-                return "success"
-            except Exception as e:
-                print(f"[ERROR] Failed to add chunk to batch: {str(e)}")
-                return "error"
-                
-        except Exception as e:
-            print(f"[ERROR] Failed to process chunk: {str(e)}")
-            return "error"
