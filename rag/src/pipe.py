@@ -20,6 +20,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import torch
 import hashlib
+import inspect
 
 # 전역 GPU 세마포어 설정 - 모든 임베딩 처리에서 공유
 # MAX_GPU_WORKERS=1 환경 변수가 반영되도록 수정
@@ -1102,27 +1103,28 @@ class InteractManager:
             str: "success" (새로 생성) 또는 "skipped" (건너뜀) 또는 "updated" (업데이트)
         '''
         try:
-            # 시간 로깅을 위한 로거 설정
+            # 시간 로깅을 위한 로거 설정 - 이미 존재하는 로거 사용
             import logging
             timing_logger = logging.getLogger('timing')
             
-            # raw_insert 전용 로거 설정
-            raw_insert_logger = logging.getLogger('raw_insert')
-            if not raw_insert_logger.handlers:
-                # 로그 디렉토리 확인
-                log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
-                os.makedirs(log_dir, exist_ok=True)
-                
-                raw_handler = logging.FileHandler(os.path.join(log_dir, 'raw_insert.log'))
-                raw_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-                raw_handler.setFormatter(raw_formatter)
-                raw_insert_logger.setLevel(logging.INFO)
-                raw_insert_logger.addHandler(raw_handler)
-                raw_insert_logger.propagate = False  # 다른 로거로 전파 방지
+            # 실제 RAW API 호출에서만 로깅되도록 확인
+            calling_frame = inspect.currentframe().f_back
+            caller_name = calling_frame.f_code.co_name if calling_frame else "unknown"
             
-            raw_start_time = time.time()
-            timing_logger.info(f"RAW_INSERT_START - doc_id: {doc_id}, passage_id: {passage_id}")
-            raw_insert_logger.info(f"=== RAW_INSERT_START - doc_id: {doc_id}, passage_id: {passage_id} ===")
+            # 호출 위치에 따라 로깅 여부 결정
+            should_log = True
+            if caller_name != "process_document" and "insert_raw_data" not in caller_name:
+                # API에서 직접 호출된 것이 아니라면 로깅 생략
+                should_log = False
+            
+            # 조건부 로깅
+            if should_log:
+                raw_start_time = time.time()
+                timing_logger.info(f"RAW_INSERT_START - doc_id: {doc_id}, passage_id: {passage_id}")
+                
+                # raw_insert 전용 로거 획득 (이미 app.py에서 초기화됨)
+                raw_insert_logger = logging.getLogger('raw_insert')
+                raw_insert_logger.info(f"=== RAW_INSERT_START - doc_id: {doc_id}, passage_id: {passage_id} ===")
             
             # DB 세마포어 및 배치 처리 락 초기화 (한 번만)
             if self.__class__.db_semaphore is None:
@@ -1136,7 +1138,8 @@ class InteractManager:
             # 도메인이 없으면 생성
             if domain not in self.vectorenv.get_list_collection():
                 print(f"[DEBUG] Creating new collection: {domain}")
-                raw_insert_logger.info(f"Creating new collection: {domain}")
+                if should_log:
+                    raw_insert_logger.info(f"Creating new collection: {domain}")
                 self.create_domain(domain)
                 print(f"[DEBUG] Collection created successfully")
             
@@ -1147,7 +1150,8 @@ class InteractManager:
             
             hashed_doc_id = self.data_p.hash_text(doc_id, hash_type='blake')
             print(f"[DEBUG] Raw doc_id: {raw_doc_id}, Hashed doc_id: {hashed_doc_id}")
-            raw_insert_logger.info(f"Raw doc_id: {raw_doc_id}, Hashed doc_id: {hashed_doc_id}")
+            if should_log:
+                raw_insert_logger.info(f"Raw doc_id: {raw_doc_id}, Hashed doc_id: {hashed_doc_id}")
             
             # 컬렉션 로드
             collection = Collection(domain)
@@ -1156,18 +1160,21 @@ class InteractManager:
             
             # passage_uid 생성 (해시된 doc_id 사용)
             passage_uid = f"{hashed_doc_id}-p{passage_id}"
-            raw_insert_logger.info(f"생성된 passage_uid: {passage_uid}")
+            if should_log:
+                raw_insert_logger.info(f"생성된 passage_uid: {passage_uid}")
             
             # 중복 체크 - check_duplicates 함수 활용
             duplicate_results = self.check_duplicates([hashed_doc_id], domain)
-            raw_insert_logger.info(f"중복 체크 결과: 타입={type(duplicate_results)}, 값={duplicate_results}")
+            if should_log:
+                raw_insert_logger.info(f"중복 체크 결과: 타입={type(duplicate_results)}, 값={duplicate_results}")
             print(f"[DEBUG] 중복 체크 결과: {duplicate_results}")
             
             # 수정된 중복 처리 로직 - 단순화 및 버그 수정
             is_update = False
             # duplicate_results는 리스트 형태로 반환됨
             if duplicate_results and hashed_doc_id in duplicate_results:
-                raw_insert_logger.info(f"문서 ID {hashed_doc_id}가 중복 발견됨")
+                if should_log:
+                    raw_insert_logger.info(f"문서 ID {hashed_doc_id}가 중복 발견됨")
                 
                 # 중복 문서의 passage_id 직접 확인
                 try:
@@ -1178,29 +1185,34 @@ class InteractManager:
                         limit=100  # 충분한 결과 확보
                     )
                     
-                    raw_insert_logger.info(f"중복 문서의 passage 정보: {passage_results}")
+                    if should_log:
+                        raw_insert_logger.info(f"중복 문서의 passage 정보: {passage_results}")
                     
                     # 같은 passage_id가 있는지 확인
                     matching_passages = [p for p in passage_results if p.get('passage_id') == passage_id]
-                    raw_insert_logger.info(f"일치하는 passage: {matching_passages}")
+                    if should_log:
+                        raw_insert_logger.info(f"일치하는 passage: {matching_passages}")
                     
                     if matching_passages:
                         if ignore:
                             print(f"[DEBUG] Skipping insert due to ignore=True")
-                            raw_insert_logger.info(f"ignore=True로 인해 삽입 건너뜀")
-                            timing_logger.info(f"RAW_INSERT_SKIPPED - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
+                            if should_log:
+                                raw_insert_logger.info(f"ignore=True로 인해 삽입 건너뜀")
+                                timing_logger.info(f"RAW_INSERT_SKIPPED - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
                             return "skipped"
                         else:
                             print(f"[DEBUG] Deleting existing document due to ignore=False")
-                            raw_insert_logger.info(f"ignore=False로 인해 기존 문서 삭제 후 재삽입")
-                            timing_logger.info(f"RAW_DELETE_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
+                            if should_log:
+                                raw_insert_logger.info(f"ignore=False로 인해 기존 문서 삭제 후 재삽입")
+                                timing_logger.info(f"RAW_DELETE_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
                             
                             # 삭제 작업 시작
                             delete_start = time.time()
                             try:
                                 # passage_uid 기반 삭제가 doc_id & passage_id 쿼리보다 효율적
                                 del_expr = f'passage_uid == "{passage_uid}"'
-                                raw_insert_logger.info(f"삭제 쿼리: {del_expr}")
+                                if should_log:
+                                    raw_insert_logger.info(f"삭제 쿼리: {del_expr}")
                                 
                                 deleted_result = collection.delete(del_expr)
                                 
@@ -1215,62 +1227,75 @@ class InteractManager:
                                         # 다른 가능한 속성 이름 시도
                                         deleted_count = getattr(deleted_result, 'num_deleted', 0) or getattr(deleted_result, 'count', 0)
                                 
-                                raw_insert_logger.info(f"삭제 결과: {deleted_count}개 항목 삭제됨")
+                                if should_log:
+                                    raw_insert_logger.info(f"삭제 결과: {deleted_count}개 항목 삭제됨")
                                 
                                 delete_end = time.time()
                                 delete_duration = delete_end - delete_start
-                                timing_logger.info(f"RAW_DELETE_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s")
+                                if should_log:
+                                    timing_logger.info(f"RAW_DELETE_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s")
                                 print(f"[DEBUG] Successfully deleted existing document in {delete_duration:.4f}s")
                                 
                                 is_update = True
                             except Exception as delete_error:
                                 delete_error_time = time.time()
                                 delete_duration = delete_error_time - delete_start
-                                timing_logger.error(f"RAW_DELETE_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s, error: {str(delete_error)}")
-                                raw_insert_logger.error(f"삭제 실패: {str(delete_error)}")
+                                if should_log:
+                                    timing_logger.error(f"RAW_DELETE_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {delete_duration:.4f}s, error: {str(delete_error)}")
+                                    raw_insert_logger.error(f"삭제 실패: {str(delete_error)}")
                                 print(f"[ERROR] Failed to delete existing document: {str(delete_error)}")
                                 raise Exception(f"Raw delete operation failed: {str(delete_error)}")
                 except Exception as query_error:
-                    raw_insert_logger.error(f"passage 쿼리 오류: {str(query_error)}")
+                    if should_log:
+                        raw_insert_logger.error(f"passage 쿼리 오류: {str(query_error)}")
                     print(f"[ERROR] Error querying passages: {str(query_error)}")
             
             # 텍스트 임베딩
             embed_start = time.time()
-            timing_logger.info(f"RAW_EMBED_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}, text_length: {len(text)}")
-            raw_insert_logger.info(f"임베딩 시작 - 텍스트 길이: {len(text)}")
+            if should_log:
+                timing_logger.info(f"RAW_EMBED_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}, text_length: {len(text)}")
+                raw_insert_logger.info(f"임베딩 시작 - 텍스트 길이: {len(text)}")
 
             # RAW_INSERT 전용 직접 임베딩 처리 - 세마포어 사용하지 않고 GPU에 직접 접근
             if self.emb_model and hasattr(self.emb_model, 'bge_embed_data_raw'):
                 try:
                     # 새로 구현한 RAW 전용 직접 임베딩 함수 호출
-                    raw_insert_logger.info(f"RAW 전용 직접 임베딩 시작 - 세마포어 대기 없음")
+                    if should_log:
+                        raw_insert_logger.info(f"RAW 전용 직접 임베딩 시작 - 세마포어 대기 없음")
                     text_emb = self.emb_model.bge_embed_data_raw(text)
-                    raw_insert_logger.info(f"직접 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
+                    if should_log:
+                        raw_insert_logger.info(f"직접 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
                 except Exception as emb_error:
-                    raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
+                    if should_log:
+                        raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
                     # 임베딩 실패 시 0 벡터 반환
                     text_emb = [0.0] * 1024
             else:
                 # 이전 방식으로 폴백
-                raw_insert_logger.warning("RAW 전용 임베딩 함수 없음, 기본 함수로 폴백")
+                if should_log:
+                    raw_insert_logger.warning("RAW 전용 임베딩 함수 없음, 기본 함수로 폴백")
                 try:
                     # GPU 세마포어 사용하지 않고 직접 임베딩 수행 (기존 코드)
                     import torch
                     gpu_available = torch.cuda.is_available()
-                    raw_insert_logger.info(f"GPU 사용 가능 상태: {gpu_available}")
+                    if should_log:
+                        raw_insert_logger.info(f"GPU 사용 가능 상태: {gpu_available}")
                     
                     # 직접 임베딩 생성
                     text_emb = self.emb_model.bge_embed_data(text)
-                    raw_insert_logger.info(f"기본 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
+                    if should_log:
+                        raw_insert_logger.info(f"기본 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
                 except Exception as emb_error:
-                    raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
+                    if should_log:
+                        raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
                     # 임베딩 실패 시 0 벡터 반환
                     text_emb = [0.0] * 1024
             
             embed_end = time.time()
             embed_duration = embed_end - embed_start
-            timing_logger.info(f"RAW_EMBED_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {embed_duration:.4f}s")
-            raw_insert_logger.info(f"임베딩 완료 - 소요시간: {embed_duration:.4f}초, 임베딩 벡터 길이: {len(text_emb)}")
+            if should_log:
+                timing_logger.info(f"RAW_EMBED_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {embed_duration:.4f}s")
+                raw_insert_logger.info(f"임베딩 완료 - 소요시간: {embed_duration:.4f}초, 임베딩 벡터 길이: {len(text_emb)}")
             print(f"[DEBUG] Generated embedding, length: {len(text_emb)}")
             
             # info와 tags가 문자열인 경우 파싱
@@ -1279,26 +1304,29 @@ class InteractManager:
             if isinstance(tags, str):
                 tags = json.loads(tags)
             
-            # 데이터 삽입 (해시된 doc_id 사용)
-            data = {
-                "passage_uid": passage_uid,
-                "doc_id": hashed_doc_id,
-                "raw_doc_id": raw_doc_id,
-                "passage_id": passage_id,
-                "domain": domain,
-                "title": title,
-                "author": author,
-                "text": text,
-                "text_emb": text_emb,
-                "info": info,
-                "tags": tags
-            }
+            # 텍스트 필드 길이 제한
+            if len(text) > self.MAX_TEXT_LENGTH:
+                print(f"[WARNING] Text is too long ({len(text)} chars), truncating to {self.MAX_TEXT_LENGTH} chars")
+                text = text[:self.MAX_TEXT_LENGTH]
             
-            # 배치 처리 메커니즘 사용
+            # 데이터 객체 생성
             insert_start = time.time()
-            timing_logger.info(f"RAW_DB_INSERT_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
-            raw_insert_logger.info(f"DB 삽입 시작 - passage_uid: {passage_uid}")
-            print(f"[DEBUG] Preparing data with passage_uid: {passage_uid} for insert")
+            
+            data = [
+                {
+                    "passage_uid": passage_uid,
+                    "doc_id": hashed_doc_id,
+                    "raw_doc_id": raw_doc_id,
+                    "passage_id": passage_id,
+                    "domain": domain,
+                    "title": title,
+                    "author": author,
+                    "text": text,
+                    "text_emb": text_emb,
+                    "info": info,
+                    "tags": tags
+                }
+            ]
             
             # 새로운 RAW API 전용 배치 처리 메커니즘 사용
             try:
@@ -1308,55 +1336,66 @@ class InteractManager:
                 
                 # 중복 확인 후 삭제 필요 시 삭제 배치에 추가
                 if is_update:
-                    raw_insert_logger.info(f"업데이트를 위해 삭제 배치에 추가 - passage_uid: {passage_uid}")
+                    if should_log:
+                        raw_insert_logger.info(f"업데이트를 위해 삭제 배치에 추가 - passage_uid: {passage_uid}")
                     self.__class__.add_to_raw_delete_batch(domain, passage_uid)
                 
                 # 데이터를 삽입 배치에 추가
-                raw_insert_logger.info(f"삽입 배치에 데이터 추가 - passage_uid: {passage_uid}")
+                if should_log:
+                    raw_insert_logger.info(f"삽입 배치에 데이터 추가 - passage_uid: {passage_uid}")
                 self.__class__.add_to_raw_batch(domain, data)
                 
                 insert_end = time.time()
                 insert_duration = insert_end - insert_start
-                timing_logger.info(f"RAW_DB_INSERT_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s")
-                raw_insert_logger.info(f"배치 처리를 위해 큐에 추가 완료 - 소요시간: {insert_duration:.4f}초")
+                if should_log:
+                    timing_logger.info(f"RAW_DB_INSERT_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s")
+                    raw_insert_logger.info(f"배치 처리를 위해 큐에 추가 완료 - 소요시간: {insert_duration:.4f}초")
                 print(f"[DEBUG] Data added to RAW batch queue for batch processing")
                 
             except Exception as insert_error:
                 insert_error_time = time.time()
                 insert_duration = insert_error_time - insert_start
-                timing_logger.error(f"RAW_DB_INSERT_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s, error: {str(insert_error)}")
-                raw_insert_logger.error(f"DB 배치 처리 오류: {str(insert_error)}")
+                if should_log:
+                    timing_logger.error(f"RAW_DB_INSERT_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s, error: {str(insert_error)}")
+                    raw_insert_logger.error(f"DB 배치 처리 오류: {str(insert_error)}")
                 print(f"[ERROR] Failed to add data to batch: {str(insert_error)}")
                 raise
             
             # 인덱스가 있는지 확인하고 없으면 생성 (첫 삽입 시에만 필요)
             collection = Collection(domain)
-            if not collection.has_index():
-                print(f"[DEBUG] Creating index for collection")
-                raw_insert_logger.info("컬렉션에 인덱스 생성")
-                self.vectorenv.create_index(collection, field_name='text_emb')
-                print(f"[DEBUG] Index created successfully")
-                
-                # 인덱스 생성 후 컬렉션 다시 로드
-                collection.load()
-                print(f"[DEBUG] Collection reloaded with index")
+            try:
+                index_info = collection.index().info
+                if should_log:
+                    raw_insert_logger.info(f"인덱스 정보: {index_info}")
+            except Exception as index_error:
+                if should_log:
+                    raw_insert_logger.warning(f"인덱스 정보 조회 실패: {str(index_error)}, 인덱스 생성 시도")
+                try:
+                    self.vectorenv.create_index(collection, field_name='text_emb')
+                    if should_log:
+                        raw_insert_logger.info("인덱스 생성 성공")
+                except Exception as create_index_error:
+                    if should_log:
+                        raw_insert_logger.error(f"인덱스 생성 실패: {str(create_index_error)}")
             
+            # 작업 완료 로깅
             raw_end_time = time.time()
-            raw_duration = raw_end_time - raw_start_time
-            timing_logger.info(f"RAW_INSERT_TOTAL - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {raw_duration:.4f}s, status: {'updated' if is_update else 'success'}")
-            raw_insert_logger.info(f"=== RAW_INSERT_END - 총 소요시간: {raw_duration:.4f}초, 상태: {'updated' if is_update else 'success'} ===")
-            print(f"[DEBUG] Raw insert completed in {raw_duration:.4f}s")
+            total_duration = raw_end_time - raw_start_time if should_log else 0
+            if should_log:
+                timing_logger.info(f"RAW_INSERT_COMPLETE - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {total_duration:.4f}s")
+                raw_insert_logger.info(f"=== RAW_INSERT_COMPLETE - 총 소요시간: {total_duration:.4f}초 ===")
+            print(f"[DEBUG] Raw insert completed in {total_duration:.4f}s")
             
-            return "updated" if is_update else "success"
+            # 업데이트인지 여부에 따라 결과 반환
+            if is_update:
+                return "updated"
+            else:
+                return "success"
             
         except Exception as e:
-            print(f"Error in raw_insert_data: {str(e)}")
-            # 예외 발생 시에도 로그 기록
-            import logging
-            raw_insert_logger = logging.getLogger('raw_insert')
-            raw_insert_logger.error(f"심각한 오류: {str(e)}")
+            print(f"[ERROR] Failed to raw_insert_data: {str(e)}")
             import traceback
-            raw_insert_logger.error(f"스택 트레이스: {traceback.format_exc()}")
+            print(traceback.format_exc())
             raise
     
     # 배치 삽입 처리 메소드 (새로 추가)
