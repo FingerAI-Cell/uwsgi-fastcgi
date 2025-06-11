@@ -218,12 +218,19 @@ with app.app_context():
     
     # 임베딩 배치 처리 워커 시작
     from src.pipe import InteractManager
-    InteractManager.start_embedding_worker()
-    logger.info("임베딩 배치 처리 워커 시작됨")
+    try:
+        InteractManager.start_embedding_worker()
+        logger.info("임베딩 배치 처리 워커 시작됨")
+    except Exception as e:
+        logger.error(f"임베딩 배치 처리 워커 시작 실패: {str(e)}")
     
     # RAW API 전용 배치 처리 워커 시작
-    InteractManager.start_raw_batch_worker()
-    logger.info("RAW API 배치 처리 워커 시작됨")
+    try:
+        InteractManager.start_raw_batch_worker()
+        logger.info("RAW API 배치 처리 워커 시작됨")
+    except Exception as e:
+        logger.error(f"RAW API 배치 처리 워커 시작 실패: {str(e)}")
+        # 실패해도 계속 진행 (앱 초기화 실패로 인한 재시작 루프 방지)
 
 # app.cli에 명령 추가 (Flask CLI에서 실행 가능)
 app.cli.add_command(load_collections_command)

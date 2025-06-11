@@ -2155,130 +2155,137 @@ class InteractManager:
 
     @classmethod
     def start_batch_worker(cls):
-        """배치 처리 워커 스레드를 시작합니다."""
-        if cls.batch_worker_thread is None or not cls.batch_worker_running:
+        """글로벌 배치 처리 워커 스레드를 시작합니다."""
+        import logging
+        logger = logging.getLogger('rag-backend')
+        
+        # 이미 실행 중인 경우 처리
+        if cls.batch_worker_running:
+            logger.info("글로벌 배치 워커가 이미 실행 중입니다")
+            return
+            
+        try:
+            # 워커 스레드 시작
             cls.batch_worker_running = True
-            cls.batch_worker_thread = threading.Thread(target=cls._batch_worker_loop, daemon=True)
+            cls.batch_worker_thread = threading.Thread(
+                target=cls._batch_worker_loop, 
+                daemon=True,
+                name="Global-Batch-Worker"
+            )
             cls.batch_worker_thread.start()
-            print(f"[DEBUG] 배치 처리 워커 스레드 시작됨")
+            logger.info("글로벌 배치 처리 워커 시작됨")
+        except Exception as e:
+            cls.batch_worker_running = False
+            cls.batch_worker_thread = None
+            logger.error(f"글로벌 배치 워커 시작 중 오류 발생: {str(e)}")
+            # 오류를 호출자에게 전파하지 않고 여기서 처리
 
     @classmethod
     def stop_batch_worker(cls):
-        """배치 처리 워커 스레드를 중지합니다."""
-        cls.batch_worker_running = False
-        if cls.batch_worker_thread and cls.batch_worker_thread.is_alive():
-            cls.batch_worker_thread.join(timeout=2.0)
-            print(f"[DEBUG] 배치 처리 워커 스레드 중지됨")
+        """글로벌 배치 처리 워커 스레드를 중지합니다."""
+        import logging
+        logger = logging.getLogger('rag-backend')
+        
+        # 워커가 실행 중이 아닌 경우
+        if not cls.batch_worker_running:
+            logger.info("글로벌 배치 워커가 실행 중이 아닙니다")
+            return
+            
+        try:
+            # 워커 중지 플래그 설정
+            cls.batch_worker_running = False
+            
+            # 스레드 종료 대기
+            if cls.batch_worker_thread:
+                cls.batch_worker_thread.join(timeout=5)  # 최대 5초간 대기
+                cls.batch_worker_thread = None
+                logger.info("글로벌 배치 처리 워커 중지 완료")
+        except Exception as e:
+            logger.error(f"글로벌 배치 워커 중지 중 오류 발생: {str(e)}")
+            # 오류가 발생해도 워커를 강제로 중지 상태로 설정
+            cls.batch_worker_thread = None
 
     @classmethod
     def _batch_worker_loop(cls):
-        """배치 처리 워커 스레드의 메인 루프"""
+        """글로벌 배치 큐 워커 스레드 함수"""
         import logging
         logger = logging.getLogger('rag-backend')
-        logger.info("배치 처리 워커 스레드 시작")
-        
-        # 도메인별 마지막 처리 시간 추적 (타임아웃 처리용)
-        last_process_time = {}
-        # 배치 타임아웃 설정 (초) - 이 시간이 지나면 배치 크기가 차지 않아도 처리
-        batch_timeout = 10.0
+        logger.info("글로벌 배치 처리 워커 시작됨")
         
         while cls.batch_worker_running:
             try:
-                # 각 도메인에 대해 배치 처리 확인
+                # 처리할 도메인 확인
                 domains_to_process = []
-                current_time = time.time()
-                
                 with cls.global_batch_lock:
-                    # 처리할 도메인 목록 생성
-                    for domain, chunks in cls.global_batch_queue.items():
-                        # 배치가 꽉 찬 경우에 처리
-                        if len(chunks) >= cls.batch_size:
+                    # 효율적인 처리를 위해 충분한 데이터가 쌓인 도메인만 처리
+                    current_time = time.time()
+                    for domain, batch in cls.global_batch_queue.items():
+                        if (len(batch) >= cls.batch_size or 
+                            (domain in cls.last_batch_time and 
+                             current_time - cls.last_batch_time[domain] > 5)):  # 5초 이상 지난 배치는 크기와 상관없이 처리
                             domains_to_process.append(domain)
-                        # 또는 일정 시간이 지난 경우에도 처리 (배치에 데이터가 있는 경우)
-                        elif len(chunks) > 0:
-                            time_since_last_process = current_time - last_process_time.get(domain, 0)
-                            if time_since_last_process >= batch_timeout or domain not in last_process_time:
-                                domains_to_process.append(domain)
-                                logger.info(f"배치 타임아웃 발생: 도메인={domain}, 항목 수={len(chunks)}, 경과 시간={time_since_last_process:.1f}초")
                 
-                # 처리할 도메인이 있으면 배치 처리 수행
-                for domain in domains_to_process:
-                    with cls.global_batch_lock:
-                        # 배치 데이터 가져오기
-                        if domain in cls.global_batch_queue and cls.global_batch_queue[domain]:
-                            # 배치 크기만큼 또는 모든 청크 가져오기
-                            if len(cls.global_batch_queue[domain]) <= cls.batch_size:
-                                batch_data = cls.global_batch_queue[domain]
-                                cls.global_batch_queue[domain] = []
-                            else:
-                                batch_data = cls.global_batch_queue[domain][:cls.batch_size]
-                                cls.global_batch_queue[domain] = cls.global_batch_queue[domain][cls.batch_size:]
-                            
-                            # 타임스탬프 갱신 (로깅용으로만 사용)
-                            cls.last_batch_time[domain] = current_time
-                            # 마지막 처리 시간 갱신 (타임아웃 계산용)
-                            last_process_time[domain] = current_time
-                            
-                            batch_size = len(batch_data)
-                            
-                            # 문서별 청크 그룹화 - 같은 문서의 청크는 함께 처리되도록
-                            doc_ids = set(item.get('doc_id', '') for item in batch_data)
-                            logger.info(f"글로벌 배치 처리: 도메인={domain}, 청크 수={batch_size}, 고유 문서 수={len(doc_ids)}")
-                        else:
-                            continue
-                    
-                    # 락 해제 상태에서 배치 처리 (다른 스레드가 큐에 추가할 수 있도록)
-                    if batch_data:
-                        try:
-                            # 인스턴스 생성 필요 (클래스 메서드에서 인스턴스 메서드 호출)
-                            instance = InteractManager()
-                            
-                            # 문서별로 청크 그룹화
-                            doc_chunks = {}
-                            for chunk in batch_data:
-                                doc_id = chunk.get('doc_id', 'unknown')
-                                if doc_id not in doc_chunks:
-                                    doc_chunks[doc_id] = []
-                                doc_chunks[doc_id].append(chunk)
-                            
-                            # 각 문서별로 배치 처리 실행
-                            for doc_id, chunks in doc_chunks.items():
-                                try:
-                                    logger.info(f"문서 '{doc_id}' 청크 {len(chunks)}개 처리 중")
-                                    instance._execute_batch_insert(chunks, domain)
-                                    logger.info(f"문서 '{doc_id}' 청크 처리 완료")
-                                except Exception as doc_error:
-                                    logger.error(f"문서 '{doc_id}' 처리 오류: {str(doc_error)}")
-                                    # 오류 발생 시 개별 청크 처리 시도
-                                    for chunk in chunks:
-                                        try:
-                                            instance._execute_batch_insert([chunk], domain)
-                                        except Exception as chunk_error:
-                                            logger.error(f"청크 개별 처리 실패: {str(chunk_error)}")
-                            
-                            logger.info(f"글로벌 배치 {batch_size}개 항목 처리 완료 (도메인: {domain}, 문서 수: {len(doc_chunks)})")
-                            
-                        except Exception as e:
-                            logger.error(f"글로벌 배치 처리 오류: {str(e)}")
-                            # 오류 발생 시 개별 처리 시도
-                            try:
-                                for item in batch_data:
-                                    try:
-                                        instance._execute_batch_insert([item], domain)
-                                    except Exception as item_error:
-                                        logger.error(f"개별 항목 처리 실패: {str(item_error)}")
-                            except Exception as recovery_error:
-                                logger.error(f"복구 시도 중 오류: {str(recovery_error)}")
-            
                 # 처리할 도메인이 없으면 잠시 대기
                 if not domains_to_process:
-                    time.sleep(0.1)  # CPU 사용률 감소를 위한 짧은 대기
+                    time.sleep(0.5)  # 0.5초 대기 (CPU 사용량 감소)
+                    continue
+                
+                # 도메인별 처리
+                for domain in domains_to_process:
+                    try:
+                        # 도메인의 배치 데이터 가져오기
+                        batch_data = []
+                        with cls.global_batch_lock:
+                            if domain in cls.global_batch_queue and cls.global_batch_queue[domain]:
+                                batch_data = cls.global_batch_queue[domain]
+                                cls.global_batch_queue[domain] = []  # 배치 비우기
+                        
+                        if not batch_data:
+                            continue
+                        
+                        # 배치 데이터를 DB에 삽입 (효율적인 처리를 위해 미리 collection 객체 생성)
+                        try:
+                            if domain in utility.list_collections():
+                                collection = Collection(domain)
+                                # 데이터 포맷 확인 및 변환
+                                formatted_data = batch_data
+                                
+                                # 데이터가 단일 딕셔너리인 경우 (드물게 발생할 수 있음) 리스트로 변환
+                                if isinstance(batch_data, dict):
+                                    formatted_data = [batch_data]
+                                    
+                                logger.info(f"[BATCH] 도메인 '{domain}'에 {len(formatted_data)}개 항목 배치 삽입 시작")
+                                insert_start = time.time()
+                                
+                                try:
+                                    # 데이터 삽입
+                                    collection.insert(formatted_data)
+                                    # 즉시 flush
+                                    collection.flush()
+                                    
+                                    insert_end = time.time()
+                                    logger.info(f"[BATCH] 도메인 '{domain}'에 {len(formatted_data)}개 항목 배치 삽입 완료 (소요시간: {insert_end-insert_start:.4f}초)")
+                                except Exception as insert_error:
+                                    logger.error(f"[BATCH] 도메인 '{domain}' 배치 삽입 중 오류 발생: {str(insert_error)}")
+                                    
+                                    # 오류 발생 시 재시도 로직 또는 로깅 처리
+                                    # 중요한 데이터인 경우 재시도 큐에 추가하는 등의 처리 필요
+                                    # 현재는 간단히 로그만 남김
+                            else:
+                                logger.warning(f"[BATCH] 도메인 '{domain}'이 존재하지 않아 배치 처리를 건너뜁니다")
+                        except Exception as e:
+                            logger.error(f"[BATCH] 도메인 '{domain}' 컬렉션 접근 중 오류: {str(e)}")
+                    
+                    except Exception as domain_error:
+                        logger.error(f"[BATCH] 도메인 '{domain}' 처리 중 오류 발생: {str(domain_error)}")
+                        # 개별 도메인 오류는 건너뛰고 다른 도메인 처리 계속
+                        continue
                     
             except Exception as e:
-                logger.error(f"배치 워커 루프 오류: {str(e)}")
-                time.sleep(1.0)  # 오류 발생 시 더 긴 대기
+                logger.error(f"[BATCH] 배치 워커 스레드 오류: {str(e)}")
+                time.sleep(1)  # 오류 발생 시 잠시 대기
         
-        logger.info("배치 처리 워커 스레드 종료")
+        logger.info("글로벌 배치 처리 워커 종료됨")
 
     @classmethod
     def add_to_global_batch(cls, data, domain):
@@ -2481,33 +2488,61 @@ class InteractManager:
         """RAW API 전용 배치 처리 워커를 시작합니다."""
         import logging
         logger = logging.getLogger('rag-backend')
+        
+        # 이미 실행 중인 경우 처리
         if cls.raw_batch_worker_running:
             logger.info("RAW API 배치 워커가 이미 실행 중입니다")
             return
         
-        # 워커 스레드 시작
-        cls.raw_batch_worker_running = True
-        cls.raw_batch_worker_thread = threading.Thread(
-            target=cls._raw_batch_worker_thread,
-            daemon=True,
-            name="RAW-Batch-Worker"
-        )
-        cls.raw_batch_worker_thread.start()
-        logger.info("RAW API 배치 처리 워커 시작됨")
+        try:
+            # raw_batch_event 초기화 확인
+            if not hasattr(cls, 'raw_batch_event') or cls.raw_batch_event is None:
+                cls.raw_batch_event = threading.Event()
+                logger.info("RAW API 배치 이벤트 객체 초기화")
+            
+            # 워커 스레드 시작
+            cls.raw_batch_worker_running = True
+            cls.raw_batch_worker_thread = threading.Thread(
+                target=cls._raw_batch_worker_thread,
+                daemon=True,
+                name="RAW-Batch-Worker"
+            )
+            cls.raw_batch_worker_thread.start()
+            logger.info("RAW API 배치 처리 워커 시작됨")
+        except Exception as e:
+            cls.raw_batch_worker_running = False
+            cls.raw_batch_worker_thread = None
+            logger.error(f"RAW API 배치 워커 시작 중 오류 발생: {str(e)}")
+            # 오류를 호출자에게 전파하지 않고 여기서 처리
     
     @classmethod
     def stop_raw_batch_worker(cls):
         """RAW API 전용 배치 처리 워커를 중지합니다."""
         import logging
         logger = logging.getLogger('rag-backend')
-        cls.raw_batch_worker_running = False
-        if cls.raw_batch_worker_thread:
-            cls.raw_batch_event.set()  # 워커 스레드 깨움
-            cls.raw_batch_worker_thread.join(timeout=5)  # 최대 5초간 대기
-            cls.raw_batch_worker_thread = None
-            logger.info("RAW API 배치 처리 워커 중지 완료")
-        else:
+        
+        # 워커가 실행 중이 아닌 경우
+        if not cls.raw_batch_worker_running:
             logger.info("RAW API 배치 워커가 실행 중이 아닙니다")
+            return
+            
+        try:
+            cls.raw_batch_worker_running = False
+            
+            # 이벤트 객체 확인
+            if hasattr(cls, 'raw_batch_event') and cls.raw_batch_event is not None:
+                cls.raw_batch_event.set()  # 워커 스레드 깨움
+            
+            # 스레드 종료 대기
+            if cls.raw_batch_worker_thread:
+                cls.raw_batch_worker_thread.join(timeout=5)  # 최대 5초간 대기
+                cls.raw_batch_worker_thread = None
+                logger.info("RAW API 배치 처리 워커 중지 완료")
+        except Exception as e:
+            logger.error(f"RAW API 배치 워커 중지 중 오류 발생: {str(e)}")
+            # 오류가 발생해도 워커를 강제로 중지 상태로 설정
+            cls.raw_batch_worker_running = False
+            cls.raw_batch_worker_thread = None
     
     @classmethod
     def _raw_batch_worker_thread(cls):
@@ -2533,22 +2568,24 @@ class InteractManager:
                             domains_to_process.append(domain)
                 
                 # 삭제 배치 처리
-                for domain, delete_ids in cls.raw_pending_deletes.items():
-                    if len(delete_ids) >= cls.delete_batch_size:
-                        # 처리 목록에 도메인 추가 (중복 방지)
-                        if domain not in domains_to_process:
-                            domains_to_process.append(domain)
+                with cls.raw_batch_lock:
+                    for domain, delete_ids in cls.raw_pending_deletes.items():
+                        if len(delete_ids) >= cls.delete_batch_size:
+                            # 처리 목록에 도메인 추가 (중복 방지)
+                            if domain not in domains_to_process:
+                                domains_to_process.append(domain)
                 
                 # 처리할 도메인이 없으면 대기
                 if not domains_to_process:
                     # 주기적 flush 확인
                     flush_domains = []
                     current_time = time.time()
-                    for domain in cls.raw_batch_queue.keys():
-                        if (domain in last_flush_time and 
-                            current_time - last_flush_time.get(domain, 0) > cls.raw_flush_interval and
-                            (domain in cls.raw_batch_queue and len(cls.raw_batch_queue[domain]) > 0)):
-                            flush_domains.append(domain)
+                    with cls.raw_batch_lock:
+                        for domain in cls.raw_batch_queue.keys():
+                            if (domain in last_flush_time and 
+                                current_time - last_flush_time.get(domain, 0) > cls.raw_flush_interval and
+                                (domain in cls.raw_batch_queue and len(cls.raw_batch_queue[domain]) > 0)):
+                                flush_domains.append(domain)
                     
                     # flush가 필요한 도메인이 있으면 처리
                     if flush_domains:
@@ -2556,19 +2593,26 @@ class InteractManager:
                             try:
                                 # Milvus 컬렉션 가져오기
                                 if domain in utility.list_collections():
-                                    collection = Collection(domain)
-                                    raw_batch_logger.info(f"주기적 flush 시작 - 도메인: {domain}")
-                                    flush_start = time.time()
-                                    collection.flush()
-                                    flush_end = time.time()
-                                    last_flush_time[domain] = current_time
-                                    raw_batch_logger.info(f"주기적 flush 완료 - 도메인: {domain}, 소요시간: {flush_end - flush_start:.4f}초")
+                                    try:
+                                        collection = Collection(domain)
+                                        raw_batch_logger.info(f"주기적 flush 시작 - 도메인: {domain}")
+                                        flush_start = time.time()
+                                        collection.flush()
+                                        flush_end = time.time()
+                                        last_flush_time[domain] = current_time
+                                        raw_batch_logger.info(f"주기적 flush 완료 - 도메인: {domain}, 소요시간: {flush_end - flush_start:.4f}초")
+                                    except Exception as coll_e:
+                                        raw_batch_logger.error(f"컬렉션 생성 또는 flush 중 오류 발생 - 도메인: {domain}, 오류: {str(coll_e)}")
                             except Exception as e:
                                 raw_batch_logger.error(f"주기적 flush 중 오류 발생 - 도메인: {domain}, 오류: {str(e)}")
                     
                     # 이벤트로 대기 (최대 1초)
-                    cls.raw_batch_event.wait(timeout=1.0)
-                    cls.raw_batch_event.clear()
+                    try:
+                        cls.raw_batch_event.wait(timeout=1.0)
+                        cls.raw_batch_event.clear()
+                    except Exception as event_e:
+                        raw_batch_logger.error(f"이벤트 대기 중 오류 발생: {str(event_e)}")
+                        time.sleep(1.0)  # 이벤트 객체 오류 시 대체 대기
                     continue
                 
                 # 도메인별 처리
@@ -2579,7 +2623,12 @@ class InteractManager:
                             raw_batch_logger.warning(f"도메인 {domain}이 존재하지 않아 배치 처리를 건너뜁니다")
                             continue
                         
-                        collection = Collection(domain)
+                        # 안전하게 컬렉션 객체 생성
+                        try:
+                            collection = Collection(domain)
+                        except Exception as coll_error:
+                            raw_batch_logger.error(f"컬렉션 생성 중 오류 발생 - 도메인: {domain}, 오류: {str(coll_error)}")
+                            continue  # 이 도메인 건너뛰기
                         
                         # 1. 삭제 배치 처리
                         delete_uids = []
@@ -2627,12 +2676,15 @@ class InteractManager:
                         
                         # 3. Flush 실행 (삭제나 삽입이 있었을 경우)
                         if delete_uids or batch_data:
-                            flush_start = time.time()
-                            raw_batch_logger.info(f"배치 처리 후 flush 시작 - 도메인: {domain}")
-                            collection.flush()
-                            flush_end = time.time()
-                            last_flush_time[domain] = time.time()
-                            raw_batch_logger.info(f"Flush 완료 - 도메인: {domain}, 소요시간: {flush_end - flush_start:.4f}초")
+                            try:
+                                flush_start = time.time()
+                                raw_batch_logger.info(f"배치 처리 후 flush 시작 - 도메인: {domain}")
+                                collection.flush()
+                                flush_end = time.time()
+                                last_flush_time[domain] = time.time()
+                                raw_batch_logger.info(f"Flush 완료 - 도메인: {domain}, 소요시간: {flush_end - flush_start:.4f}초")
+                            except Exception as flush_e:
+                                raw_batch_logger.error(f"Flush 중 오류 발생 - 도메인: {domain}, 오류: {str(flush_e)}")
                     
                     except Exception as e:
                         raw_batch_logger.error(f"도메인 {domain} 배치 처리 중 오류 발생: {str(e)}")
