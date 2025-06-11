@@ -2460,15 +2460,30 @@ class InteractManager:
     @classmethod
     def start_embedding_worker(cls):
         """임베딩 배치 처리 워커 스레드를 시작합니다."""
-        if cls.embedding_worker_thread is None or not cls.embedding_worker_running:
-            cls.embedding_worker_running = True
-            cls.embedding_worker_thread = threading.Thread(target=cls._embedding_worker_loop, daemon=True)
-            cls.embedding_worker_thread.start()
-            print(f"[DEBUG] 임베딩 배치 처리 워커 스레드 시작됨")
+        import logging
+        logger = logging.getLogger('rag-backend')
+        
+        # 이미 실행 중인 경우 처리
+        if cls.embedding_worker_running:
+            logger.info("임베딩 배치 워커가 이미 실행 중입니다")
+            return
+        
+        try:
+            # 임베딩 워커 기능이 아직 구현되지 않았으므로 일단 스킵
+            logger.info("임베딩 배치 워커는 현재 구현되지 않았습니다")
+            # 아래 코드는 실행하지 않음
+            # cls.embedding_worker_running = True
+            # cls.embedding_worker_thread = threading.Thread(target=cls._embedding_worker_loop, daemon=True)
+            # cls.embedding_worker_thread.start()
             
             # 삽입 배치 워커도 함께 시작
             cls.start_batch_worker()
-
+        except Exception as e:
+            cls.embedding_worker_running = False
+            cls.embedding_worker_thread = None
+            logger.error(f"임베딩 배치 워커 시작 중 오류 발생: {str(e)}")
+            # 오류를 호출자에게 전파하지 않고 여기서 처리
+    
     @classmethod
     def stop_embedding_worker(cls):
         # 임베딩 워커 중지
