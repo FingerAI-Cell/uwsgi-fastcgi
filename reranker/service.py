@@ -506,13 +506,29 @@ class RerankerService:
                 flashrank_scores = [p.get("score", 0.0) for p in flashrank_result["results"]]
                 
                 # 하이브리드 재랭킹 수행
-                reranked_passages = self.mrc_reranker.hybrid_rerank(
+                hybrid_start_time = time.time()
+                reranked_passages, mrc_scores = self.mrc_reranker.hybrid_rerank(
                     query, 
                     flashrank_result["results"], 
                     flashrank_scores, 
                     weight_mrc=self.hybrid_weight_mrc,
-                    top_k=top_k
+                    top_k=top_k,
+                    return_mrc_scores=True  # MRC 점수도 함께 반환
                 )
+                mrc_processing_time = time.time() - hybrid_start_time
+                
+                # 결과에 세부 점수 추가
+                for i, passage in enumerate(reranked_passages):
+                    if "metadata" not in passage:
+                        passage["metadata"] = {}
+                    
+                    # 원본 메타데이터 유지하면서 세부 점수 추가
+                    metadata = passage.get("metadata", {})
+                    metadata.update({
+                        "flashrank_score": float(flashrank_scores[i]) if i < len(flashrank_scores) else 0.0,
+                        "mrc_score": float(mrc_scores[i]) if i < len(mrc_scores) else 0.0
+                    })
+                    passage["metadata"] = metadata
                 
                 # 결과 포맷팅
                 result = {
@@ -520,8 +536,11 @@ class RerankerService:
                     "results": reranked_passages,
                     "total": len(reranked_passages),
                     "reranked": True,
-                    "reranker_type": "hybrid",
-                    "processing_time": time.time() - start_time
+                    "reranker_type": "hybrid",  # hybrid로 명확하게 표시
+                    "processing_time": time.time() - start_time,
+                    "flashrank_time": flashrank_result.get("processing_time", 0.0),
+                    "mrc_time": mrc_processing_time,
+                    "mrc_weight": self.hybrid_weight_mrc
                 }
                 
                 return result

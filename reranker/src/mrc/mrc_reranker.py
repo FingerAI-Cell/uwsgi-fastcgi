@@ -1,5 +1,5 @@
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union, Tuple
 
 from .controller import MRCController
 
@@ -115,7 +115,8 @@ class MRCReranker:
     def hybrid_rerank(self, query: str, passages: List[Dict[str, Any]], 
                       flashrank_scores: List[float], 
                       weight_mrc: float = 0.7,
-                      top_k: Optional[int] = None) -> List[Dict[str, Any]]:
+                      top_k: Optional[int] = None,
+                      return_mrc_scores: bool = False) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], List[float]]]:
         """
         FlashRank 결과와 MRC 결과를 조합한 하이브리드 재랭킹
         
@@ -125,9 +126,10 @@ class MRCReranker:
             flashrank_scores: FlashRank에서 계산한 점수 목록
             weight_mrc: MRC 점수 가중치 (0~1 사이)
             top_k: 반환할 상위 결과 수
+            return_mrc_scores: MRC 점수 목록도 함께 반환할지 여부
             
         Returns:
-            하이브리드 재랭킹된 패시지 목록
+            하이브리드 재랭킹된 패시지 목록, 또는 (패시지 목록, MRC 점수 목록) 튜플
         """
         logger.info(f"하이브리드 재랭킹 시작: query='{query}', passages={len(passages)}, weight_mrc={weight_mrc}")
         
@@ -141,28 +143,48 @@ class MRCReranker:
             })
         
         mrc_results = self.mrc_controller.infer_multi(samples)
+        mrc_scores = []  # MRC 점수 목록 저장
         
         # 점수 결합 및 결과 업데이트
         weight_flashrank = 1.0 - weight_mrc
         for i, (passage, mrc_result, flashrank_score) in enumerate(zip(passages, mrc_results, flashrank_scores)):
+            # MRC 점수 저장
+            mrc_score = mrc_result['answerability']
+            mrc_scores.append(mrc_score)
+            
             # MRC 결과 저장
             passage['mrc_answer'] = mrc_result['answer']
             passage['mrc_char_ids'] = mrc_result['char_ids']
-            passage['mrc_score'] = mrc_result['answerability']
+            passage['mrc_score'] = mrc_score
             passage['flashrank_score'] = flashrank_score
             
             # 하이브리드 점수 계산
-            passage['hybrid_score'] = (flashrank_score * weight_flashrank) + (mrc_result['answerability'] * weight_mrc)
+            passage['hybrid_score'] = (flashrank_score * weight_flashrank) + (mrc_score * weight_mrc)
             passage['score'] = passage['hybrid_score']  # 기본 score 필드 업데이트
             
-            logger.debug(f"Passage {i}: flashrank={flashrank_score:.4f}, mrc={mrc_result['answerability']:.4f}, hybrid={passage['hybrid_score']:.4f}")
+            logger.debug(f"Passage {i}: flashrank={flashrank_score:.4f}, mrc={mrc_score:.4f}, hybrid={passage['hybrid_score']:.4f}")
         
         # 하이브리드 점수로 정렬
         reranked_passages = sorted(passages, key=lambda x: x.get('hybrid_score', 0), reverse=True)
         
-        # top_k 적용
+        # top_k 적용 (점수 목록도 함께 정렬)
         if top_k and isinstance(top_k, int) and top_k > 0:
-            reranked_passages = reranked_passages[:top_k]
+            # 인덱스와 함께 정렬된 패시지 목록 생성
+            indexed_passages = [(i, p) for i, p in enumerate(reranked_passages)]
+            # top_k까지만 선택
+            top_indexed_passages = indexed_passages[:top_k]
+            # 인덱스와 패시지 분리
+            indices, reranked_passages = zip(*top_indexed_passages) if top_indexed_passages else ([], [])
+            # 같은 순서로 mrc_scores 재정렬 (필요한 경우)
+            if return_mrc_scores:
+                mrc_scores = [mrc_scores[i] for i in indices]
+                
+            # 리스트로 변환 (zip 결과는 튜플)
+            reranked_passages = list(reranked_passages)
             
         logger.info(f"하이브리드 재랭킹 완료: {len(reranked_passages)} 결과 반환")
-        return reranked_passages 
+        
+        if return_mrc_scores:
+            return reranked_passages, mrc_scores
+        else:
+            return reranked_passages 
