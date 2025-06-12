@@ -32,9 +32,22 @@ logger = logging.getLogger(__name__)
 
 # MRC 모듈 임포트
 try:
-    from src.mrc import MRCReranker
-    MRC_AVAILABLE = True
-    logger.info("MRC 모듈 가져오기 성공")
+    # 여러 경로에서 MRCReranker 임포트 시도
+    try:
+        from src.mrc import MRCReranker
+        MRC_AVAILABLE = True
+        logger.info("MRC 모듈 가져오기 성공 (from src.mrc)")
+    except ImportError:
+        try:
+            # 직접 경로 지정
+            from reranker.src.mrc import MRCReranker
+            MRC_AVAILABLE = True
+            logger.info("MRC 모듈 가져오기 성공 (from reranker.src.mrc)")
+        except ImportError:
+            # 상대 경로 시도
+            from .src.mrc import MRCReranker
+            MRC_AVAILABLE = True
+            logger.info("MRC 모듈 가져오기 성공 (from .src.mrc)")
 except ImportError:
     MRC_AVAILABLE = False
     logger.warning("MRC 모듈을 가져올 수 없습니다")
@@ -293,7 +306,18 @@ class RerankerService:
                         # 설정 파일 체크 및 다운로드
                         if config_gdrive_id and not os.path.exists(mrc_config_path):
                             try:
-                                from src.mrc import download_checkpoints
+                                # 여러 경로에서 다운로드 함수 임포트 시도
+                                try:
+                                    from src.mrc import download_checkpoints
+                                    logger.info("다운로드 함수 임포트 성공 (from src.mrc)")
+                                except ImportError:
+                                    try:
+                                        from reranker.src.mrc import download_checkpoints
+                                        logger.info("다운로드 함수 임포트 성공 (from reranker.src.mrc)")
+                                    except ImportError:
+                                        from .src.mrc import download_checkpoints
+                                        logger.info("다운로드 함수 임포트 성공 (from .src.mrc)")
+                                
                                 logger.info(f"MRC 설정 파일 다운로드 중: {mrc_config_path}")
                                 download_checkpoints(mrc_config_path, config_gdrive_id)
                             except Exception as e:
@@ -303,7 +327,18 @@ class RerankerService:
                         # 모델 체크포인트 체크 및 다운로드
                         if model_gdrive_id and not os.path.exists(mrc_model_path):
                             try:
-                                from src.mrc import download_checkpoints
+                                # 여러 경로에서 다운로드 함수 임포트 시도
+                                try:
+                                    from src.mrc import download_checkpoints
+                                    logger.info("다운로드 함수 임포트 성공 (from src.mrc)")
+                                except ImportError:
+                                    try:
+                                        from reranker.src.mrc import download_checkpoints
+                                        logger.info("다운로드 함수 임포트 성공 (from reranker.src.mrc)")
+                                    except ImportError:
+                                        from .src.mrc import download_checkpoints
+                                        logger.info("다운로드 함수 임포트 성공 (from .src.mrc)")
+                                
                                 logger.info(f"MRC 모델 파일 다운로드 중: {mrc_model_path}")
                                 download_checkpoints(mrc_model_path, model_gdrive_id)
                             except Exception as e:
