@@ -168,8 +168,23 @@ def add_header(response):
 def get_reranker_service():
     """Get reranker service instance"""
     try:
+        # 절대 경로로 설정된 환경 변수 확인
         config_path = os.environ.get("RERANKER_CONFIG", "/reranker/config.json")
-        logger.info(f"Getting RerankerService with config: {config_path}")
+        
+        # 절대 경로에서 파일을 찾지 못한 경우 상대 경로로 시도
+        if not os.path.exists(config_path) and config_path.startswith("/reranker/"):
+            relative_config_path = config_path[10:]  # "/reranker/" 제거
+            if os.path.exists(relative_config_path):
+                logger.info(f"환경 변수의 절대 경로를 상대 경로로 변환: {config_path} -> {relative_config_path}")
+                config_path = relative_config_path
+                
+        # 그래도 파일이 없으면 현재 디렉토리에서 config.json 찾기
+        if not os.path.exists(config_path):
+            if os.path.exists("config.json"):
+                logger.info(f"환경 변수 대신 현재 디렉토리의 config.json 사용")
+                config_path = "config.json"
+                
+        logger.info(f"Getting RerankerService with config: {config_path} (exists: {os.path.exists(config_path)})")
         
         # 싱글톤 패턴으로 서비스 인스턴스 가져오기
         from service import RerankerService
@@ -497,8 +512,32 @@ def check_mrc_configuration():
             model_path = mrc_config.get('model_ckpt_path')
         
         # 파일 존재 여부 확인
-        config_exists = os.path.exists(config_path) if config_path else False
-        model_exists = os.path.exists(model_path) if model_path else False
+        config_exists = False
+        model_exists = False
+        
+        # 절대 경로로 확인
+        if config_path:
+            config_exists = os.path.exists(config_path)
+            logger.debug(f"절대 경로 MRC 설정 파일 확인: {config_path} -> {config_exists}")
+        
+        if model_path:
+            model_exists = os.path.exists(model_path)
+            logger.debug(f"절대 경로 MRC 모델 파일 확인: {model_path} -> {model_exists}")
+            
+        # 절대 경로에서 파일을 찾지 못한 경우 상대 경로로 시도
+        if config_path and not config_exists and config_path.startswith("/reranker/"):
+            relative_config_path = config_path[10:]  # "/reranker/" 제거
+            relative_config_exists = os.path.exists(relative_config_path)
+            logger.debug(f"상대 경로 MRC 설정 파일 확인: {relative_config_path} -> {relative_config_exists}")
+            if relative_config_exists:
+                config_exists = True
+                
+        if model_path and not model_exists and model_path.startswith("/reranker/"):
+            relative_model_path = model_path[10:]  # "/reranker/" 제거
+            relative_model_exists = os.path.exists(relative_model_path)
+            logger.debug(f"상대 경로 MRC 모델 파일 확인: {relative_model_path} -> {relative_model_exists}")
+            if relative_model_exists:
+                model_exists = True
         
         return {
             "mrc_enabled": mrc_enabled,

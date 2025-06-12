@@ -17,6 +17,9 @@ ENV PYTHONPATH=/usr/local/lib/python3.10/site-packages:$PYTHONPATH
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 필수 의존성 명시적 설치 (requirements.txt에 있지만 확실히 하기 위해)
+RUN pip install --no-cache-dir munch>=2.5.0 pytorch-lightning==1.7.2 gdown>=4.4.0
+
 # flashrank 기본 패키지 설치
 RUN pip install flashrank
 

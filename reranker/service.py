@@ -27,15 +27,17 @@ except ImportError:
     print("ujson not available, using default json")
 
 # Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('reranker_detail.log')
-    ]
-)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# 파일 로그 추가 (볼륨에 저장)
+try:
+    file_handler = logging.FileHandler('/reranker/reranker_detail.log')
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(file_handler)
+    logger.info("상세 로그 파일 설정 완료: /reranker/reranker_detail.log")
+except Exception as e:
+    logger.warning(f"로그 파일 설정 실패: {str(e)}")
 
 # MRC 모듈 임포트
 try:
@@ -369,9 +371,24 @@ class RerankerService:
                                 logger.warning(f"MRC 모델 파일 다운로드 실패: {e}")
                                 logger.info(f"모델 파일을 '{mrc_model_path}' 경로에 수동으로 추가해주세요.")
                     
+                    # 경로 처리 (절대 경로에서 상대 경로로 변환)
+                    if not os.path.exists(mrc_config_path) and mrc_config_path.startswith("/reranker/"):
+                        relative_config_path = mrc_config_path[10:]  # "/reranker/" 제거
+                        if os.path.exists(relative_config_path):
+                            logger.info(f"상대 경로로 변환: {mrc_config_path} -> {relative_config_path}")
+                            mrc_config_path = relative_config_path
+                            
+                    if not os.path.exists(mrc_model_path) and mrc_model_path.startswith("/reranker/"):
+                        relative_model_path = mrc_model_path[10:]  # "/reranker/" 제거
+                        if os.path.exists(relative_model_path):
+                            logger.info(f"상대 경로로 변환: {mrc_model_path} -> {relative_model_path}")
+                            mrc_model_path = relative_model_path
+                
                     # MRC 재랭커 인스턴스 생성
                     logger.debug("MRCReranker.get_instance 호출 시작")
                     try:
+                        logger.debug(f"최종 MRC 설정 파일 경로: {mrc_config_path}")
+                        logger.debug(f"최종 MRC 모델 파일 경로: {mrc_model_path}")
                         self.mrc_reranker = MRCReranker.get_instance(mrc_config_path, mrc_model_path)
                         logger.info("MRC 재랭커 초기화 완료")
                         logger.debug(f"MRC 재랭커 객체: {self.mrc_reranker}")
@@ -452,15 +469,58 @@ class RerankerService:
             "model_name": os.getenv("FLASHRANK_MODEL", "ms-marco-TinyBERT-L-2-v2"),
             "cache_dir": os.getenv("FLASHRANK_CACHE_DIR", "/reranker/models"),
             "max_length": int(os.getenv("FLASHRANK_MAX_LENGTH", "512")),
-            "batch_size": default_batch_size
+            "batch_size": default_batch_size,
+            "mrc": {
+                "enabled": False
+            }
         }
         
         if not config_path:
+            logger.warning("No config path provided, using default configuration")
             return default_config
             
         try:
+            # 파일 존재 여부 확인
+            if not os.path.exists(config_path):
+                logger.warning(f"Config file not found at {config_path}")
+                
+                # 상대 경로 시도
+                if config_path.startswith("/reranker/"):
+                    relative_path = config_path[10:]  # "/reranker/" 제거
+                    if os.path.exists(relative_path):
+                        logger.info(f"Using relative path instead: {relative_path}")
+                        config_path = relative_path
+                    else:
+                        logger.warning(f"Config file not found at relative path {relative_path} either")
+                        return default_config
+                else:
+                    return default_config
+            
+            logger.info(f"Loading config from {config_path}")
             with open(config_path, 'r') as f:
                 config = json.load(f)
+                logger.debug(f"Loaded config content: {json.dumps(config)}")
+                
+                # MRC 설정 검증 및 디버그 로깅
+                if "mrc" in config:
+                    logger.info(f"MRC 설정 확인: {json.dumps(config['mrc'])}")
+                    
+                    # 파일 경로 변환 (절대 경로에서 상대 경로로)
+                    mrc_config = config.get("mrc", {})
+                    config_path = mrc_config.get("model_config_path")
+                    model_path = mrc_config.get("model_ckpt_path")
+                    
+                    if config_path and config_path.startswith("/reranker/"):
+                        relative_path = config_path[10:]
+                        if os.path.exists(relative_path):
+                            logger.info(f"MRC 설정 파일 상대 경로로 변환: {config_path} -> {relative_path}")
+                            config["mrc"]["model_config_path"] = relative_path
+                            
+                    if model_path and model_path.startswith("/reranker/"):
+                        relative_path = model_path[10:]
+                        if os.path.exists(relative_path):
+                            logger.info(f"MRC 모델 파일 상대 경로로 변환: {model_path} -> {relative_path}")
+                            config["mrc"]["model_ckpt_path"] = relative_path
                 
                 # GPU 여부에 따라 배치 사이즈 선택
                 if isinstance(config.get("batch_size"), dict):
@@ -470,10 +530,13 @@ class RerankerService:
                     # 이전 형식의 설정을 위한 하위 호환성 유지
                     config["batch_size"] = int(config["batch_size"])
                     
-                return {**default_config, **config}
+                # 설정 병합 및 반환
+                merged_config = {**default_config, **config}
+                logger.debug(f"Final merged config: {json.dumps(merged_config)}")
+                return merged_config
         except Exception as e:
-            logger.warning(f"Failed to load config from {config_path}: {e}")
-            logger.info("Using default configuration")
+            logger.error(f"Failed to load config from {config_path}: {e}", exc_info=True)
+            logger.warning("Using default configuration due to error")
             return default_config
     
     def process_search_results(self, query: str, search_result: Dict[str, Any], top_k: int = 5) -> Dict[str, Any]:
