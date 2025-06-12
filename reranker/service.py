@@ -461,28 +461,8 @@ class RerankerService:
             
             log_step("데이터 포맷 변환")
             
-            # 캐시 키 생성 및 캐시 조회
-            passages_hash = hash_passages(passages)
-            cache_key = get_cache_key(query, passages_hash)
-            
-            if cache_key in _RERANK_CACHE:
-                logger.info(f"Cache hit for query: '{query}'")
-                cached_result = _RERANK_CACHE[cache_key]
-                
-                # top_k가 다른 경우 조정
-                if top_k is not None:
-                    cached_result["results"] = cached_result["results"][:top_k]
-                    cached_result["total"] = len(cached_result["results"])
-                
-                # 캐시된 결과 반환, 처리 시간은 현재 시간으로 업데이트
-                elapsed_time = time.time() - start_time
-                cached_result["processing_time"] = elapsed_time
-                cached_result["cached"] = True
-                
-                log_step("캐시 히트 처리")
-                return cached_result
-            
-            log_step("캐시 확인")
+            # 캐시 사용하지 않음 (디버깅 및 테스트용으로 비활성화)
+            log_step("캐시 사용 안함")
             
             # 재랭킹 메소드 결정 (환경변수로 제어 가능)
             rerank_method = os.getenv("RERANK_METHOD", "auto").lower()
@@ -550,13 +530,8 @@ class RerankerService:
                 logger.info("FlashRank 방식으로 재랭킹 수행")
                 result = self.perform_flashrank_reranking(query, passages, top_k, search_result)
                 
-                # 결과 캐싱
-                if len(_RERANK_CACHE) >= _CACHE_SIZE_LIMIT:
-                    # 캐시가 가득 찬 경우 오래된 항목 제거
-                    _RERANK_CACHE.pop(next(iter(_RERANK_CACHE)))
-                _RERANK_CACHE[cache_key] = result
-                
-                log_step("캐시 업데이트")
+                # 캐시 사용하지 않음 (디버깅 및 테스트용으로 비활성화)
+                log_step("캐시 업데이트 안함")
                 
                 # 최종 단계 로깅
                 log_step("최종 결과 준비")
