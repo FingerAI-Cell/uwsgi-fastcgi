@@ -1428,20 +1428,130 @@ def insert_raw_data():
                     collection.load()
                     print(f"[DEBUG] New collection {domain} created and loaded")
                 
-                # 문서 처리 함수 정의
+                # ---------- 중복 문서 일괄 검사 및 삭제 처리 시작 ----------
+                if not ignore:  # ignore=False인 경우만 중복 검사 및 삭제 수행
+                    duplicate_check_start = time.time()
+                    
+                    # 문서 ID 목록 생성 및 해시 처리
+                    doc_ids = []
+                    doc_id_to_passage_ids = {}  # {doc_id: [passage_id1, passage_id2, ...]}
+                    
+                    for doc in docs:
+                        raw_doc_id = doc['doc_id']
+                        hashed_doc_id = interact_manager.data_p.hash_text(raw_doc_id, hash_type='blake')
+                        passage_id = doc['passage_id']
+                        
+                        if hashed_doc_id not in doc_id_to_passage_ids:
+                            doc_id_to_passage_ids[hashed_doc_id] = []
+                            doc_ids.append(hashed_doc_id)
+                        
+                        doc_id_to_passage_ids[hashed_doc_id].append(passage_id)
+                    
+                    # 중복 체크 (일괄 처리)
+                    logger.info(f"도메인 '{domain}'에서 {len(doc_ids)}개 문서의 중복 여부 일괄 확인")
+                    duplicate_results = interact_manager.check_duplicates(doc_ids, domain)
+                    
+                    if duplicate_results:
+                        # 일괄 삭제를 위한 passage_uid 목록 생성
+                        passage_uids_to_delete = []
+                        for hashed_doc_id in duplicate_results:
+                            for passage_id in doc_id_to_passage_ids.get(hashed_doc_id, []):
+                                passage_uid = f"{hashed_doc_id}-p{passage_id}"
+                                passage_uids_to_delete.append(passage_uid)
+                        
+                        if passage_uids_to_delete:
+                            # 일괄 삭제 실행
+                            logger.info(f"도메인 '{domain}'에서 {len(passage_uids_to_delete)}개 중복 passage 일괄 삭제 시작")
+                            
+                            try:
+                                collection = Collection(domain)
+                                collection.load()
+                                
+                                # 효율적인 일괄 삭제를 위한 쿼리 생성
+                                # 최대 100개씩 나누어 삭제 (OR 연산자 과부하 방지)
+                                batch_size = 100
+                                total_deleted = 0
+                                
+                                for i in range(0, len(passage_uids_to_delete), batch_size):
+                                    batch = passage_uids_to_delete[i:i+batch_size]
+                                    expr_parts = [f'passage_uid == "{uid}"' for uid in batch]
+                                    del_expr = " || ".join(expr_parts)
+                                    
+                                    # 삭제 실행
+                                    deleted_result = collection.delete(del_expr)
+                                    
+                                    # 삭제 결과 처리
+                                    if hasattr(deleted_result, 'delete_count'):
+                                        deleted_count = deleted_result.delete_count
+                                    else:
+                                        try:
+                                            deleted_count = int(deleted_result)
+                                        except (TypeError, ValueError):
+                                            deleted_count = getattr(deleted_result, 'num_deleted', 0) or getattr(deleted_result, 'count', 0)
+                                    
+                                    total_deleted += deleted_count
+                                
+                                # 변경사항 즉시 적용
+                                collection.flush()
+                                logger.info(f"도메인 '{domain}'에서 총 {total_deleted}개 중복 passage 삭제 완료")
+                                
+                            except Exception as delete_error:
+                                logger.error(f"일괄 삭제 오류: {str(delete_error)}")
+                                # 일괄 삭제 실패 시 개별 삭제로 폴백
+                                total_deleted = 0
+                                for passage_uid in passage_uids_to_delete:
+                                    try:
+                                        del_expr = f'passage_uid == "{passage_uid}"'
+                                        deleted_result = collection.delete(del_expr)
+                                        total_deleted += 1
+                                    except Exception as e:
+                                        logger.error(f"개별 passage 삭제 실패: {passage_uid}, 오류: {str(e)}")
+                                
+                                collection.flush()
+                                logger.info(f"도메인 '{domain}'에서 개별 삭제로 총 {total_deleted}개 passage 삭제 완료")
+                    
+                    duplicate_check_end = time.time()
+                    logger.info(f"중복 검사 및 삭제 소요 시간: {duplicate_check_end - duplicate_check_start:.4f}초")
+                # ---------- 중복 문서 일괄 검사 및 삭제 처리 종료 ----------
+                
+                # 문서 처리 함수 정의 (이제 중복 검사 및 삭제는 하지 않음)
                 def process_document(doc):
                     try:
-                        # 데이터 삽입 시도 (raw_insert_data 메소드 사용)
-                        insert_status = interact_manager.raw_insert_data(
-                            doc['domain'], 
-                            doc['doc_id'],  # 사용자가 제공한 doc_id 사용
-                            doc['passage_id'],  # 사용자가 제공한 passage_id 사용
-                            doc['title'], 
-                            doc['author'], 
-                            doc['text'], 
+                        # 문서 ID 해시 및 passage_uid 생성
+                        raw_doc_id = doc['doc_id']
+                        hashed_doc_id = interact_manager.data_p.hash_text(raw_doc_id, hash_type='blake')
+                        passage_id = doc['passage_id']
+                        passage_uid = f"{hashed_doc_id}-p{passage_id}"
+                        
+                        # 중복 체크 결과 활용
+                        is_duplicate = duplicate_results and hashed_doc_id in duplicate_results if not ignore else False
+                        
+                        # 임베딩 생성 및 데이터 삽입
+                        # 중복인 경우와 ignore=true인 경우 건너뛰기
+                        if ignore and is_duplicate:
+                            return {
+                                "doc_id": doc['doc_id'],
+                                "passage_id": doc['passage_id'],
+                                "domain": doc['domain'],
+                                "title": doc['title'],
+                                "status": "skipped",
+                                "result_code": "F000000",
+                                "message": "이미 존재하는 문서로 건너뛰었습니다."
+                            }
+                        
+                        # 실제 임베딩 및 데이터 삽입 수행
+                        # raw_insert_data 메소드에서 중복 검사 및 삭제 로직 없이 임베딩 및 배치 삽입만 수행
+                        status = interact_manager.raw_insert_data_improved(
+                            doc['domain'],
+                            hashed_doc_id,  # 이미 해시된 doc_id 전달
+                            raw_doc_id,     # 원본 doc_id도 전달
+                            doc['passage_id'],
+                            passage_uid,    # 미리 생성된 passage_uid 전달
+                            doc['title'],
+                            doc['author'],
+                            doc['text'],
                             doc.get('info', {}),
-                            doc['tags'],
-                            ignore=ignore  # 전체 요청에 대한 ignore 값 사용
+                            doc['tags']
                         )
                         
                         result = {
@@ -1451,19 +1561,13 @@ def insert_raw_data():
                             "title": doc['title']
                         }
                         
-                        if insert_status == "skipped":
-                            result.update({
-                                "status": "skipped",
-                                "result_code": "F000000",
-                                "message": "이미 존재하는 문서로 건너뛰었습니다."
-                            })
-                        elif insert_status == "updated":
+                        if is_duplicate:
                             result.update({
                                 "status": "updated",
                                 "result_code": "F000000",
                                 "message": "기존 문서를 삭제하고 새로운 문서로 업데이트했습니다."
                             })
-                        else:  # success
+                        else:
                             result.update({
                                 "status": "success",
                                 "result_code": "F000000",

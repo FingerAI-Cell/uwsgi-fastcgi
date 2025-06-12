@@ -1348,6 +1348,175 @@ class InteractManager:
             raw_insert_logger.error(f"스택 트레이스: {traceback.format_exc()}")
             raise
     
+    def raw_insert_data_improved(self, domain, hashed_doc_id, raw_doc_id, passage_id, passage_uid, title, author, text, info={}, tags={}):
+        '''
+        텍스트를 분할하지 않고 그대로 저장하는 최적화된 메소드
+        중복 검사 및 삭제 로직 없이 임베딩 생성과 배치 큐 추가만 수행
+        
+        Args:
+            domain (str): 컬렉션 이름
+            hashed_doc_id (str): 이미 해시된 문서 ID
+            raw_doc_id (str): 원본 문서 ID
+            passage_id (int): 패시지 ID
+            passage_uid (str): 이미 생성된 passage_uid
+            title (str): 문서 제목
+            author (str): 작성자
+            text (str): 문서 본문
+            info (dict): 추가 정보
+            tags (dict): 태그 정보
+            
+        Returns:
+            str: "success" (성공적으로 처리됨)
+        '''
+        try:
+            # 시간 로깅을 위한 로거 설정
+            import logging
+            timing_logger = logging.getLogger('timing')
+            
+            # raw_insert 전용 로거 설정
+            raw_insert_logger = logging.getLogger('raw_insert')
+            if not raw_insert_logger.handlers:
+                # 로그 디렉토리 확인
+                log_dir = "/var/log/rag" if os.path.exists("/var/log/rag") else "../logs"
+                os.makedirs(log_dir, exist_ok=True)
+                
+                raw_handler = logging.FileHandler(os.path.join(log_dir, 'raw_insert.log'))
+                raw_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                raw_handler.setFormatter(raw_formatter)
+                raw_insert_logger.setLevel(logging.INFO)
+                raw_insert_logger.addHandler(raw_handler)
+                raw_insert_logger.propagate = False  # 다른 로거로 전파 방지
+            
+            raw_start_time = time.time()
+            timing_logger.info(f"RAW_INSERT_IMPROVED_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
+            raw_insert_logger.info(f"=== RAW_INSERT_IMPROVED_START - doc_id: {hashed_doc_id}, passage_id: {passage_id} ===")
+            
+            # DB 세마포어 및 배치 처리 락 초기화 (한 번만)
+            if self.__class__.db_semaphore is None:
+                max_db_connections = int(os.getenv('MAX_DB_CONNECTIONS', '20'))  # 최대 20개 동시 연결 기본값
+                batch_size = int(os.getenv('BATCH_SIZE', '10'))  # 배치 크기 설정
+                self.__class__.db_semaphore = threading.BoundedSemaphore(max_db_connections)
+                self.__class__.batch_lock = threading.Lock()
+                self.__class__.batch_size = batch_size
+                print(f"[DEBUG] Initialized DB connection semaphore with max {max_db_connections} connections and batch size {batch_size}")
+            
+            # 도메인이 없으면 생성
+            if domain not in self.vectorenv.get_list_collection():
+                print(f"[DEBUG] Creating new collection: {domain}")
+                raw_insert_logger.info(f"Creating new collection: {domain}")
+                self.create_domain(domain)
+                print(f"[DEBUG] Collection created successfully")
+            
+            raw_insert_logger.info(f"Hashed doc_id: {hashed_doc_id}, Raw doc_id: {raw_doc_id}, Passage_uid: {passage_uid}")
+            
+            # 텍스트 임베딩
+            embed_start = time.time()
+            timing_logger.info(f"RAW_EMBED_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}, text_length: {len(text)}")
+            raw_insert_logger.info(f"임베딩 시작 - 텍스트 길이: {len(text)}")
+
+            # RAW_INSERT 전용 직접 임베딩 처리 - 세마포어 사용하지 않고 GPU에 직접 접근
+            if self.emb_model and hasattr(self.emb_model, 'bge_embed_data_raw'):
+                try:
+                    # 새로 구현한 RAW 전용 직접 임베딩 함수 호출
+                    raw_insert_logger.info(f"RAW 전용 직접 임베딩 시작 - 세마포어 대기 없음")
+                    text_emb = self.emb_model.bge_embed_data_raw(text)
+                    raw_insert_logger.info(f"직접 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
+                except Exception as emb_error:
+                    raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
+                    # 임베딩 실패 시 0 벡터 반환
+                    text_emb = [0.0] * 1024
+            else:
+                # 이전 방식으로 폴백
+                raw_insert_logger.warning("RAW 전용 임베딩 함수 없음, 기본 함수로 폴백")
+                try:
+                    # GPU 세마포어 사용하지 않고 직접 임베딩 수행 (기존 코드)
+                    import torch
+                    gpu_available = torch.cuda.is_available()
+                    raw_insert_logger.info(f"GPU 사용 가능 상태: {gpu_available}")
+                    
+                    # 직접 임베딩 생성
+                    text_emb = self.emb_model.bge_embed_data(text)
+                    raw_insert_logger.info(f"기본 임베딩 생성 성공 - 벡터 길이: {len(text_emb)}")
+                except Exception as emb_error:
+                    raw_insert_logger.error(f"임베딩 생성 오류: {str(emb_error)}")
+                    # 임베딩 실패 시 0 벡터 반환
+                    text_emb = [0.0] * 1024
+            
+            embed_end = time.time()
+            embed_duration = embed_end - embed_start
+            timing_logger.info(f"RAW_EMBED_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {embed_duration:.4f}s")
+            raw_insert_logger.info(f"임베딩 완료 - 소요시간: {embed_duration:.4f}초, 임베딩 벡터 길이: {len(text_emb)}")
+            print(f"[DEBUG] Generated embedding, length: {len(text_emb)}")
+            
+            # info와 tags가 문자열인 경우 파싱
+            if isinstance(info, str):
+                info = json.loads(info)
+            if isinstance(tags, str):
+                tags = json.loads(tags)
+            
+            # 데이터 삽입 (해시된 doc_id 사용)
+            data = {
+                "passage_uid": passage_uid,
+                "doc_id": hashed_doc_id,
+                "raw_doc_id": raw_doc_id,
+                "passage_id": passage_id,
+                "domain": domain,
+                "title": title,
+                "author": author,
+                "text": text,
+                "text_emb": text_emb,
+                "info": info,
+                "tags": tags
+            }
+            
+            # 배치 처리 메커니즘 사용
+            insert_start = time.time()
+            timing_logger.info(f"RAW_DB_INSERT_START - doc_id: {hashed_doc_id}, passage_id: {passage_id}")
+            raw_insert_logger.info(f"DB 삽입 시작 - passage_uid: {passage_uid}")
+            print(f"[DEBUG] Preparing data with passage_uid: {passage_uid} for insert")
+            
+            # 배치에 추가하고 필요시 삽입
+            try:
+                batch_inserted = self._add_to_batch_and_insert(data, domain)
+                
+                if batch_inserted:
+                    print(f"[DEBUG] Data triggered a batch insert")
+                    raw_insert_logger.info("배치 삽입 발생")
+                else:
+                    print(f"[DEBUG] Data added to batch (will be inserted later)")
+                    raw_insert_logger.info("데이터가 배치에 추가됨 (나중에 삽입)")
+                
+                insert_end = time.time()
+                insert_duration = insert_end - insert_start
+                timing_logger.info(f"RAW_DB_INSERT_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s")
+                raw_insert_logger.info(f"DB 삽입 완료 (또는 배치에 추가됨) - 소요시간: {insert_duration:.4f}초")
+                
+                # 전체 처리 시간 로깅
+                raw_end_time = time.time()
+                raw_duration = raw_end_time - raw_start_time
+                timing_logger.info(f"RAW_INSERT_IMPROVED_END - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {raw_duration:.4f}s")
+                raw_insert_logger.info(f"=== RAW_INSERT_IMPROVED_END - 총 소요시간: {raw_duration:.4f}초 ===")
+                
+                return "success"
+                
+            except Exception as insert_error:
+                # 삽입 오류 처리
+                insert_error_time = time.time()
+                insert_duration = insert_error_time - insert_start
+                timing_logger.error(f"RAW_DB_INSERT_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {insert_duration:.4f}s, error: {str(insert_error)}")
+                raw_insert_logger.error(f"DB 삽입 오류: {str(insert_error)}")
+                print(f"[ERROR] Error during batch insert: {str(insert_error)}")
+                raise Exception(f"Raw insert operation failed: {str(insert_error)}")
+                
+        except Exception as e:
+            # 전체 오류 처리
+            raw_end_time = time.time()
+            raw_duration = raw_end_time - raw_start_time
+            timing_logger.error(f"RAW_INSERT_IMPROVED_ERROR - doc_id: {hashed_doc_id}, passage_id: {passage_id}, duration: {raw_duration:.4f}s, error: {str(e)}")
+            raw_insert_logger.error(f"=== RAW_INSERT_IMPROVED_ERROR - 총 소요시간: {raw_duration:.4f}초, 오류: {str(e)} ===")
+            print(f"[ERROR] Failed to insert raw data: {str(e)}")
+            raise
+    
     # 배치 삽입 처리 메소드 (새로 추가)
     def _add_to_batch_and_insert(self, data, domain):
         """
