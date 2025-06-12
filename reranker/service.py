@@ -27,7 +27,14 @@ except ImportError:
     print("ujson not available, using default json")
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('reranker_detail.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # MRC 모듈 임포트
@@ -288,11 +295,28 @@ class RerankerService:
             self.mrc_reranker = None
             self.hybrid_weight_mrc = self.config.get("mrc", {}).get("hybrid_weight_mrc", 0.7)
             
+            logger.debug(f"MRC 초기화 시작: enabled={self.mrc_enabled}, MRC_AVAILABLE={MRC_AVAILABLE}")
+            logger.debug(f"MRC 설정: {self.config.get('mrc', {})}")
+            
             if self.mrc_enabled and MRC_AVAILABLE:
                 try:
                     logger.info("MRC 재랭커 초기화 중...")
                     mrc_config_path = self.config.get("mrc", {}).get("model_config_path")
                     mrc_model_path = self.config.get("mrc", {}).get("model_ckpt_path")
+                    
+                    # 절대 경로 변환 시도
+                    if not os.path.isabs(mrc_config_path) and not os.path.exists(mrc_config_path):
+                        abs_config_path = os.path.abspath(mrc_config_path)
+                        logger.debug(f"절대 경로로 변환: {mrc_config_path} -> {abs_config_path}")
+                        mrc_config_path = abs_config_path
+                        
+                    if not os.path.isabs(mrc_model_path) and not os.path.exists(mrc_model_path):
+                        abs_model_path = os.path.abspath(mrc_model_path)
+                        logger.debug(f"절대 경로로 변환: {mrc_model_path} -> {abs_model_path}")
+                        mrc_model_path = abs_model_path
+                    
+                    logger.debug(f"MRC 설정 파일 경로: {mrc_config_path}, 존재 여부: {os.path.exists(mrc_config_path)}")
+                    logger.debug(f"MRC 모델 파일 경로: {mrc_model_path}, 존재 여부: {os.path.exists(mrc_model_path)}")
                     
                     # MRC 모델 디렉토리 확인 및 생성
                     if mrc_config_path and mrc_model_path:
@@ -346,13 +370,21 @@ class RerankerService:
                                 logger.info(f"모델 파일을 '{mrc_model_path}' 경로에 수동으로 추가해주세요.")
                     
                     # MRC 재랭커 인스턴스 생성
-                    self.mrc_reranker = MRCReranker.get_instance(mrc_config_path, mrc_model_path)
-                    logger.info("MRC 재랭커 초기화 완료")
+                    logger.debug("MRCReranker.get_instance 호출 시작")
+                    try:
+                        self.mrc_reranker = MRCReranker.get_instance(mrc_config_path, mrc_model_path)
+                        logger.info("MRC 재랭커 초기화 완료")
+                        logger.debug(f"MRC 재랭커 객체: {self.mrc_reranker}")
+                    except Exception as inner_e:
+                        logger.error(f"MRCReranker.get_instance 호출 실패: {str(inner_e)}", exc_info=True)
+                        raise inner_e
                 except Exception as e:
-                    logger.error(f"MRC 재랭커 초기화 실패: {str(e)}")
+                    logger.error(f"MRC 재랭커 초기화 실패: {str(e)}", exc_info=True)
+                    logger.error(f"상세 오류 정보: {type(e).__name__}", exc_info=True)
                     self.mrc_enabled = False
             elif self.mrc_enabled and not MRC_AVAILABLE:
                 logger.warning("MRC 모듈을 가져올 수 없어 MRC 재랭킹이 비활성화됩니다")
+                logger.warning(f"Python 경로: {sys.path}")
                 self.mrc_enabled = False
                 
         except Exception as e:
