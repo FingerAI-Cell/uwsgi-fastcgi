@@ -6,6 +6,7 @@ import os
 import logging
 import requests
 import requests_unixsocket
+import traceback
 from typing import Dict, List, Any, Optional
 from flask import Flask, request, Response, jsonify
 from pydantic import BaseModel, Field
@@ -478,6 +479,65 @@ def mrc_rerank():
         }), 500
 
 
+# MRC 설정 확인 함수
+def check_mrc_configuration():
+    """MRC 모델 설정 및 파일 존재 여부 확인"""
+    try:
+        service = get_reranker_service()
+        mrc_enabled = service.mrc_enabled if hasattr(service, 'mrc_enabled') else False
+        mrc_reranker = service.mrc_reranker if hasattr(service, 'mrc_reranker') else None
+        
+        # 설정 파일 및 모델 파일 경로
+        config_path = None
+        model_path = None
+        
+        if hasattr(service, 'config') and isinstance(service.config, dict):
+            mrc_config = service.config.get('mrc', {})
+            config_path = mrc_config.get('model_config_path')
+            model_path = mrc_config.get('model_ckpt_path')
+        
+        # 파일 존재 여부 확인
+        config_exists = os.path.exists(config_path) if config_path else False
+        model_exists = os.path.exists(model_path) if model_path else False
+        
+        return {
+            "mrc_enabled": mrc_enabled,
+            "mrc_reranker_loaded": mrc_reranker is not None,
+            "config_path": config_path,
+            "model_path": model_path,
+            "config_exists": config_exists,
+            "model_exists": model_exists
+        }
+    except Exception as e:
+        logger.error(f"MRC 설정 확인 중 오류 발생: {str(e)}")
+        return {
+            "error": str(e),
+            "mrc_enabled": False,
+            "mrc_reranker_loaded": False,
+            "config_exists": False,
+            "model_exists": False
+        }
+
+@app.route("/reranker/mrc-status", methods=['GET'])
+def mrc_status():
+    """MRC 모듈 상태 확인 API"""
+    try:
+        # MRC 설정 확인
+        mrc_status = check_mrc_configuration()
+        
+        return jsonify({
+            "status": "ok",
+            "mrc_configuration": mrc_status,
+            "timestamp": time.time()
+        })
+    except Exception as e:
+        logger.error(f"MRC 상태 확인 API 오류: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "timestamp": time.time()
+        }), 500
+
 @app.route("/reranker/hybrid-rerank", methods=['POST'])
 def hybrid_rerank():
     """
@@ -495,6 +555,15 @@ def hybrid_rerank():
         
         # 하이브리드 방식으로 강제 설정
         os.environ["RERANK_METHOD"] = "hybrid"
+        logger.info("하이브리드 재랭킹 모드로 설정됨")
+        
+        # MRC 설정 확인 및 로깅
+        mrc_config = check_mrc_configuration()
+        logger.info(f"MRC 설정 상태: 활성화={mrc_config['mrc_enabled']}, 모델 로드됨={mrc_config['mrc_reranker_loaded']}")
+        
+        # 필요한 파일 존재 확인
+        if not mrc_config['config_exists'] or not mrc_config['model_exists']:
+            logger.warning(f"MRC 모델 파일 누락: 설정파일={mrc_config['config_exists']}, 모델파일={mrc_config['model_exists']}")
         
         # Get request body
         data = request.get_json()
@@ -506,7 +575,9 @@ def hybrid_rerank():
         # Validate input
         try:
             search_result = SearchResultModel(**data)
+            logger.info(f"재랭킹 요청: query='{search_result.query}', 결과 수={len(search_result.results)}")
         except Exception as e:
+            logger.error(f"요청 검증 실패: {str(e)}")
             return jsonify({
                 "error": f"Invalid input format: {str(e)}"
             }), 400
@@ -516,19 +587,35 @@ def hybrid_rerank():
         
         # MRC 가중치 설정
         if mrc_weight is not None:
+            logger.info(f"MRC 가중치 변경: {getattr(reranker_service, 'hybrid_weight_mrc', '기본값')} -> {mrc_weight}")
             reranker_service.hybrid_weight_mrc = mrc_weight
             
+        # 재랭킹 처리 시작
+        logger.info("하이브리드 재랭킹 처리 시작")
+        process_start_time = time.time()
+        
         reranked = reranker_service.process_search_results(
             search_result.query,
             search_result.dict(),
             top_k
         )
         
+        process_time = time.time() - process_start_time
+        logger.info(f"하이브리드 재랭킹 처리 완료: {process_time:.3f}초")
+        
         # 전체 요청 처리 시간 계산
         processing_time = time.time() - total_start_time
+        
         # API 명세에 맞게 processing_time 필드 추가
         reranked["processing_time"] = processing_time
         reranked["mrc_weight"] = reranker_service.hybrid_weight_mrc
+        
+        # 재랭커 타입 확인 및 로깅
+        reranker_type = reranked.get("reranker_type", "unknown")
+        if reranker_type != "hybrid":
+            logger.warning(f"하이브리드 재랭킹 요청했으나 결과 타입은 '{reranker_type}'입니다. MRC 설정을 확인하세요.")
+        else:
+            logger.info(f"하이브리드 재랭킹 성공적으로 완료됨")
         
         logger.info(f"Total hybrid-rerank endpoint processing time: {processing_time:.3f} seconds")
         
@@ -546,7 +633,7 @@ def hybrid_rerank():
         return response
         
     except Exception as e:
-        logger.error(f"Hybrid reranking failed: {str(e)}")
+        logger.error(f"하이브리드 재랭킹 실패: {str(e)}", exc_info=True)
         return jsonify({
             "error": f"Hybrid reranking failed: {str(e)}"
         }), 500

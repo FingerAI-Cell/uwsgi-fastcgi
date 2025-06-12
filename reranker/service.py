@@ -7,7 +7,7 @@ import logging
 import torch
 import time
 import threading
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union, Tuple
 from pydantic import BaseModel
 from flashrank import Ranker, RerankRequest
 
@@ -154,6 +154,12 @@ class RerankerService:
             logger.debug("Loading configuration...")
             self.config = self._load_config(config_path)
             logger.info(f"Configuration loaded in {(time.time() - init_start_time)*1000:.2f}ms")
+            
+            # 로그 레벨 설정
+            log_level = self.config.get("log_level", "INFO")
+            log_level_int = getattr(logging, log_level.upper(), logging.INFO)
+            logger.setLevel(log_level_int)
+            logger.info(f"Log level set to {log_level}")
             
             self.model_name = os.getenv("FLASHRANK_MODEL", self.config.get("model_name", "ms-marco-TinyBERT-L-2-v2"))
             self.cache_dir = os.getenv("FLASHRANK_CACHE_DIR", self.config.get("cache_dir", "/reranker/models"))
@@ -480,22 +486,49 @@ class RerankerService:
             elif rerank_method == "hybrid" and self.mrc_enabled and self.mrc_reranker:
                 # 하이브리드 방식 (FlashRank + MRC)
                 logger.info("하이브리드 방식으로 재랭킹 수행")
+                logger.info(f"MRC 모듈 활성화 상태: {self.mrc_enabled}, MRC 리랭커 객체 존재: {self.mrc_reranker is not None}")
                 
-                # FlashRank 재랭킹 수행
-                flashrank_result = self.perform_flashrank_reranking(query, passages, top_k)
-                flashrank_scores = [p.get("score", 0.0) for p in flashrank_result["results"]]
+                if not self.mrc_enabled or self.mrc_reranker is None:
+                    logger.error("MRC 모듈이 비활성화되었거나 초기화되지 않았습니다. 하이브리드 재랭킹을 수행할 수 없습니다.")
+                    logger.error("MRC 모델 파일이 올바르게 설치되었는지 확인하세요: /reranker/models/mrc/config.json, /reranker/models/mrc/model.ckpt")
+                    # FlashRank 방식으로 폴백
+                    logger.info("FlashRank 방식으로 대체 수행합니다.")
+                    return self.perform_flashrank_reranking(query, passages, top_k, search_result)
                 
-                # 하이브리드 재랭킹 수행
-                hybrid_start_time = time.time()
-                reranked_passages, mrc_scores = self.mrc_reranker.hybrid_rerank(
-                    query, 
-                    flashrank_result["results"], 
-                    flashrank_scores, 
-                    weight_mrc=self.hybrid_weight_mrc,
-                    top_k=top_k,
-                    return_mrc_scores=True  # MRC 점수도 함께 반환
-                )
-                mrc_processing_time = time.time() - hybrid_start_time
+                try:
+                    # FlashRank 재랭킹 수행
+                    logger.debug("FlashRank 재랭킹 시작")
+                    flashrank_result = self.perform_flashrank_reranking(query, passages, top_k)
+                    flashrank_scores = [p.get("score", 0.0) for p in flashrank_result["results"]]
+                    logger.debug(f"FlashRank 재랭킹 완료, 결과 수: {len(flashrank_scores)}")
+                    
+                    # 하이브리드 재랭킹 수행
+                    logger.debug("MRC 하이브리드 재랭킹 시작")
+                    hybrid_start_time = time.time()
+                    
+                    # MRC 리랭커 존재 여부 확인 (불필요한 예외 방지)
+                    if not hasattr(self.mrc_reranker, 'hybrid_rerank'):
+                        logger.error("MRC 리랭커에 hybrid_rerank 메소드가 없습니다.")
+                        raise AttributeError("hybrid_rerank method missing in MRC reranker")
+                    
+                    reranked_passages, mrc_scores = self.mrc_reranker.hybrid_rerank(
+                        query, 
+                        flashrank_result["results"], 
+                        flashrank_scores, 
+                        weight_mrc=self.hybrid_weight_mrc,
+                        top_k=top_k,
+                        return_mrc_scores=True  # MRC 점수도 함께 반환
+                    )
+                    mrc_processing_time = time.time() - hybrid_start_time
+                    logger.debug(f"MRC 하이브리드 재랭킹 완료, 소요 시간: {mrc_processing_time:.3f}초, 결과 수: {len(reranked_passages)}")
+                    
+                    # MRC 점수 확인
+                    logger.info(f"MRC 점수 샘플 (최대 3개): {mrc_scores[:3]}")
+                    
+                except Exception as e:
+                    logger.error(f"하이브리드 재랭킹 중 오류 발생: {str(e)}", exc_info=True)
+                    logger.error("FlashRank 방식으로 대체 수행합니다.")
+                    return self.perform_flashrank_reranking(query, passages, top_k, search_result)
                 
                 # 결과에 세부 점수 추가
                 for i, passage in enumerate(reranked_passages):

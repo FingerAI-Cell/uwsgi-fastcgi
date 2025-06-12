@@ -7,6 +7,7 @@
         "gpu": 512
     },
     "profile_enabled": false,
+    "log_level": "DEBUG",
     "memory_optimize": {
         "use_fp16": true,
         "empty_cache_interval": 3,
