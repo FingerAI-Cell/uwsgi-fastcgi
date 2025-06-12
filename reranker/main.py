@@ -359,6 +359,12 @@ def rerank():
         # Get top_k parameter from query string
         top_k = request.args.get('top_k', type=int)
         
+        # Get reranker type parameter (flashrank, mrc, hybrid)
+        rerank_type = request.args.get('type', 'auto').lower()
+        
+        # Set environment variable for reranker method
+        os.environ["RERANK_METHOD"] = rerank_type
+        
         # Get request body
         data = request.get_json()
         if not data:
@@ -405,6 +411,144 @@ def rerank():
         logger.error(f"Reranking failed: {str(e)}")
         return jsonify({
             "error": f"Reranking failed: {str(e)}"
+        }), 500
+
+
+@app.route("/reranker/mrc-rerank", methods=['POST'])
+def mrc_rerank():
+    """
+    MRC 기반 재랭킹 엔드포인트
+    """
+    try:
+        # 전체 요청 처리 시간 측정 시작
+        total_start_time = time.time()
+        
+        # Get top_k parameter from query string
+        top_k = request.args.get('top_k', type=int)
+        
+        # MRC 방식으로 강제 설정
+        os.environ["RERANK_METHOD"] = "mrc"
+        
+        # Get request body
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "error": "No JSON data provided"
+            }), 400
+            
+        # Validate input
+        try:
+            search_result = SearchResultModel(**data)
+        except Exception as e:
+            return jsonify({
+                "error": f"Invalid input format: {str(e)}"
+            }), 400
+            
+        # Process reranking
+        reranked = get_reranker_service().process_search_results(
+            search_result.query,
+            search_result.dict(),
+            top_k
+        )
+        
+        # 전체 요청 처리 시간 계산
+        processing_time = time.time() - total_start_time
+        # API 명세에 맞게 processing_time 필드 추가
+        reranked["processing_time"] = processing_time
+        
+        logger.info(f"Total mrc-rerank endpoint processing time: {processing_time:.3f} seconds")
+        
+        # 최적화된 응답 생성
+        response_data = json.dumps(reranked, ensure_ascii=False)
+        response = Response(
+            response_data,
+            mimetype='application/json; charset=utf-8'
+        )
+        
+        # FastCGI 응답 지연 해결을 위한 핵심 헤더 설정
+        response.headers['X-Accel-Buffering'] = 'no'
+        response.headers['Content-Length'] = str(len(response.data))
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"MRC reranking failed: {str(e)}")
+        return jsonify({
+            "error": f"MRC reranking failed: {str(e)}"
+        }), 500
+
+
+@app.route("/reranker/hybrid-rerank", methods=['POST'])
+def hybrid_rerank():
+    """
+    하이브리드 재랭킹 엔드포인트 (FlashRank + MRC)
+    """
+    try:
+        # 전체 요청 처리 시간 측정 시작
+        total_start_time = time.time()
+        
+        # Get top_k parameter from query string
+        top_k = request.args.get('top_k', type=int)
+        
+        # Get mrc weight parameter
+        mrc_weight = request.args.get('mrc_weight', type=float)
+        
+        # 하이브리드 방식으로 강제 설정
+        os.environ["RERANK_METHOD"] = "hybrid"
+        
+        # Get request body
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "error": "No JSON data provided"
+            }), 400
+            
+        # Validate input
+        try:
+            search_result = SearchResultModel(**data)
+        except Exception as e:
+            return jsonify({
+                "error": f"Invalid input format: {str(e)}"
+            }), 400
+            
+        # Process reranking
+        reranker_service = get_reranker_service()
+        
+        # MRC 가중치 설정
+        if mrc_weight is not None:
+            reranker_service.hybrid_weight_mrc = mrc_weight
+            
+        reranked = reranker_service.process_search_results(
+            search_result.query,
+            search_result.dict(),
+            top_k
+        )
+        
+        # 전체 요청 처리 시간 계산
+        processing_time = time.time() - total_start_time
+        # API 명세에 맞게 processing_time 필드 추가
+        reranked["processing_time"] = processing_time
+        reranked["mrc_weight"] = reranker_service.hybrid_weight_mrc
+        
+        logger.info(f"Total hybrid-rerank endpoint processing time: {processing_time:.3f} seconds")
+        
+        # 최적화된 응답 생성
+        response_data = json.dumps(reranked, ensure_ascii=False)
+        response = Response(
+            response_data,
+            mimetype='application/json; charset=utf-8'
+        )
+        
+        # FastCGI 응답 지연 해결을 위한 핵심 헤더 설정
+        response.headers['X-Accel-Buffering'] = 'no'
+        response.headers['Content-Length'] = str(len(response.data))
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Hybrid reranking failed: {str(e)}")
+        return jsonify({
+            "error": f"Hybrid reranking failed: {str(e)}"
         }), 500
 
 

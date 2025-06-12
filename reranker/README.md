@@ -35,6 +35,18 @@ python download_models.py
 python download_models.py --model intfloat/e5-base-v2 --dir ./models
 ```
 
+### MRC 모델 파일 설치 (하이브리드 재랭킹)
+
+하이브리드 재랭킹 기능을 사용하려면 MRC 모델 파일이 필요합니다:
+
+1. 자동 다운로드: 서비스 시작 시 파일이 없으면 Google Drive에서 자동으로 다운로드합니다.
+
+2. 수동 설치 방법: 자동 다운로드가 실패하거나 온프레미스 환경에서는 다음 경로에 수동으로 파일을 설치할 수 있습니다:
+   - MRC 설정 파일: `reranker/models/mrc/config.json` (Google Drive ID: `1JSuDygqET5Tg7wFWsqUy2Lgfa9yoTRm0`)
+   - MRC 모델 체크포인트: `reranker/models/mrc/model.ckpt` (Google Drive ID: `1KEFpxaBYrp7q8uck4r_m8pJspZGMQodl`)
+
+3. 서버 배포 시: config.json의 "mrc" 섹션에서 파일 경로가 올바른지 확인하세요. 파일이 없으면 하이브리드 재랭킹 기능이 비활성화됩니다.
+
 ## 사용법
 
 ### 환경 변수 설정

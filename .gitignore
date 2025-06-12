@@ -1,6 +1,9 @@
 # Large model files
 models/**/pytorch_model.bin
 
+/mrc/
+/reranker/src/mrc/mrc.ckpt
+
 # Unnecessary model directories
 models/**/onnx/
 models/**/1_Pooling/

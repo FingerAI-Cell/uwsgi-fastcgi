@@ -34,10 +34,50 @@ class RerankerClient:
         self, 
         query: str, 
         passages: List[Dict[str, Any]], 
-        top_k: Optional[int] = None
+        top_k: Optional[int] = None,
+        rerank_type: Optional[str] = "auto"
     ) -> Dict[str, Any]:
         """
         Rerank passages based on query
+        
+        Args:
+            query: Query text
+            passages: List of passage dictionaries
+            top_k: Number of top results to return
+            rerank_type: Reranker type to use (flashrank, mrc, hybrid, auto)
+            
+        Returns:
+            Reranked search results
+        """
+        payload = {
+            "query": query,
+            "results": passages,
+            "total": len(passages),
+            "reranked": False
+        }
+        
+        params = {}
+        if top_k is not None:
+            params["top_k"] = top_k
+        if rerank_type:
+            params["type"] = rerank_type
+            
+        response = requests.post(
+            f"{self.base_url}/rerank",
+            json=payload,
+            params=params
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    def mrc_rerank(
+        self, 
+        query: str, 
+        passages: List[Dict[str, Any]], 
+        top_k: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Rerank passages based on query using MRC model
         
         Args:
             query: Query text
@@ -59,7 +99,47 @@ class RerankerClient:
             params["top_k"] = top_k
             
         response = requests.post(
-            f"{self.base_url}/rerank",
+            f"{self.base_url}/mrc-rerank",
+            json=payload,
+            params=params
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    def hybrid_rerank(
+        self, 
+        query: str, 
+        passages: List[Dict[str, Any]], 
+        top_k: Optional[int] = None,
+        mrc_weight: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Rerank passages based on query using hybrid approach (FlashRank + MRC)
+        
+        Args:
+            query: Query text
+            passages: List of passage dictionaries
+            top_k: Number of top results to return
+            mrc_weight: Weight for MRC scores (0-1), default is from config
+            
+        Returns:
+            Reranked search results
+        """
+        payload = {
+            "query": query,
+            "results": passages,
+            "total": len(passages),
+            "reranked": False
+        }
+        
+        params = {}
+        if top_k is not None:
+            params["top_k"] = top_k
+        if mrc_weight is not None:
+            params["mrc_weight"] = mrc_weight
+            
+        response = requests.post(
+            f"{self.base_url}/hybrid-rerank",
             json=payload,
             params=params
         )
@@ -127,5 +207,14 @@ if __name__ == "__main__":
         }
     ]
     
-    results = client.rerank(query, passages, top_k=5)
-    print(f"Reranked results: {json.dumps(results, indent=2, ensure_ascii=False)}") 
+    # FlashRank 기반 재랭킹
+    results = client.rerank(query, passages, top_k=5, rerank_type="flashrank")
+    print(f"FlashRank results: {json.dumps(results, indent=2, ensure_ascii=False)}")
+    
+    # MRC 기반 재랭킹
+    mrc_results = client.mrc_rerank(query, passages, top_k=5)
+    print(f"MRC results: {json.dumps(mrc_results, indent=2, ensure_ascii=False)}")
+    
+    # 하이브리드 재랭킹
+    hybrid_results = client.hybrid_rerank(query, passages, top_k=5, mrc_weight=0.7)
+    print(f"Hybrid results: {json.dumps(hybrid_results, indent=2, ensure_ascii=False)}") 

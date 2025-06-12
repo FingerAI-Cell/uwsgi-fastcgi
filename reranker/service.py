@@ -30,6 +30,15 @@ except ImportError:
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# MRC 모듈 임포트
+try:
+    from src.mrc import MRCReranker
+    MRC_AVAILABLE = True
+    logger.info("MRC 모듈 가져오기 성공")
+except ImportError:
+    MRC_AVAILABLE = False
+    logger.warning("MRC 모듈을 가져올 수 없습니다")
+
 # 메모리 캐시 - 자주 사용되는 재랭킹 요청 결과 캐싱
 _RERANK_CACHE = {}
 _CACHE_SIZE_LIMIT = 1000  # 최대 캐시 항목 수
@@ -255,6 +264,56 @@ class RerankerService:
                 
             logger.info(f"Total initialization time: {(time.time() - init_start_time)*1000:.2f}ms")
                 
+            # MRC 재랭커 초기화 (설정에서 활성화된 경우)
+            self.mrc_enabled = self.config.get("mrc", {}).get("enabled", False)
+            self.mrc_reranker = None
+            self.hybrid_weight_mrc = self.config.get("mrc", {}).get("hybrid_weight_mrc", 0.7)
+            
+            if self.mrc_enabled and MRC_AVAILABLE:
+                try:
+                    logger.info("MRC 재랭커 초기화 중...")
+                    mrc_config_path = self.config.get("mrc", {}).get("model_config_path")
+                    mrc_model_path = self.config.get("mrc", {}).get("model_ckpt_path")
+                    
+                    # MRC 모델 디렉토리 확인 및 생성
+                    if mrc_config_path and mrc_model_path:
+                        os.makedirs(os.path.dirname(mrc_config_path), exist_ok=True)
+                        os.makedirs(os.path.dirname(mrc_model_path), exist_ok=True)
+                        
+                        # MRC 모델 다운로드 설정이 있는 경우
+                        config_gdrive_id = self.config.get("mrc", {}).get("model_config_gdrive_id")
+                        model_gdrive_id = self.config.get("mrc", {}).get("model_ckpt_gdrive_id")
+                        
+                        # 설정 파일 체크 및 다운로드
+                        if config_gdrive_id and not os.path.exists(mrc_config_path):
+                            try:
+                                from src.mrc import download_checkpoints
+                                logger.info(f"MRC 설정 파일 다운로드 중: {mrc_config_path}")
+                                download_checkpoints(mrc_config_path, config_gdrive_id)
+                            except Exception as e:
+                                logger.warning(f"MRC 설정 파일 다운로드 실패: {e}")
+                                logger.info(f"설정 파일을 '{mrc_config_path}' 경로에 수동으로 추가해주세요.")
+                        
+                        # 모델 체크포인트 체크 및 다운로드
+                        if model_gdrive_id and not os.path.exists(mrc_model_path):
+                            try:
+                                from src.mrc import download_checkpoints
+                                logger.info(f"MRC 모델 파일 다운로드 중: {mrc_model_path}")
+                                download_checkpoints(mrc_model_path, model_gdrive_id)
+                            except Exception as e:
+                                logger.warning(f"MRC 모델 파일 다운로드 실패: {e}")
+                                logger.info(f"모델 파일을 '{mrc_model_path}' 경로에 수동으로 추가해주세요.")
+                    
+                    # MRC 재랭커 인스턴스 생성
+                    self.mrc_reranker = MRCReranker.get_instance(mrc_config_path, mrc_model_path)
+                    logger.info("MRC 재랭커 초기화 완료")
+                except Exception as e:
+                    logger.error(f"MRC 재랭커 초기화 실패: {str(e)}")
+                    self.mrc_enabled = False
+            elif self.mrc_enabled and not MRC_AVAILABLE:
+                logger.warning("MRC 모듈을 가져올 수 없어 MRC 재랭킹이 비활성화됩니다")
+                self.mrc_enabled = False
+                
         except Exception as e:
             logger.error(f"Failed to initialize RerankerService: {str(e)}")
             raise
@@ -424,6 +483,84 @@ class RerankerService:
                 return cached_result
             
             log_step("캐시 확인")
+            
+            # 재랭킹 메소드 결정 (환경변수로 제어 가능)
+            rerank_method = os.getenv("RERANK_METHOD", "auto").lower()
+            
+            # 'auto' 모드: MRC가 활성화되어 있으면 하이브리드, 아니면 FlashRank만 사용
+            if rerank_method == "auto":
+                rerank_method = "hybrid" if self.mrc_enabled and self.mrc_reranker else "flashrank"
+            
+            # 재랭킹 수행
+            if rerank_method == "mrc" and self.mrc_enabled and self.mrc_reranker:
+                # MRC 방식만 사용
+                logger.info("MRC 방식으로 재랭킹 수행")
+                return self.mrc_reranker.process_search_results(query, search_result, top_k)
+                
+            elif rerank_method == "hybrid" and self.mrc_enabled and self.mrc_reranker:
+                # 하이브리드 방식 (FlashRank + MRC)
+                logger.info("하이브리드 방식으로 재랭킹 수행")
+                
+                # FlashRank 재랭킹 수행
+                flashrank_result = self.perform_flashrank_reranking(query, passages, top_k)
+                flashrank_scores = [p.get("score", 0.0) for p in flashrank_result["results"]]
+                
+                # 하이브리드 재랭킹 수행
+                reranked_passages = self.mrc_reranker.hybrid_rerank(
+                    query, 
+                    flashrank_result["results"], 
+                    flashrank_scores, 
+                    weight_mrc=self.hybrid_weight_mrc,
+                    top_k=top_k
+                )
+                
+                # 결과 포맷팅
+                result = {
+                    "query": query,
+                    "results": reranked_passages,
+                    "total": len(reranked_passages),
+                    "reranked": True,
+                    "reranker_type": "hybrid",
+                    "processing_time": time.time() - start_time
+                }
+                
+                return result
+                
+            else:
+                # 기본 FlashRank 방식
+                logger.info("FlashRank 방식으로 재랭킹 수행")
+                result = self.perform_flashrank_reranking(query, passages, top_k, search_result)
+                
+                # 결과 캐싱
+                if len(_RERANK_CACHE) >= _CACHE_SIZE_LIMIT:
+                    # 캐시가 가득 찬 경우 오래된 항목 제거
+                    _RERANK_CACHE.pop(next(iter(_RERANK_CACHE)))
+                _RERANK_CACHE[cache_key] = result
+                
+                log_step("캐시 업데이트")
+                
+                # 최종 단계 로깅
+                log_step("최종 결과 준비")
+                
+                # 최종 결과 및 성능 측정 로그
+                detailed_steps = "\n".join([
+                    f"  - {step['name']}: {step['time']*1000:.2f}ms ({step['elapsed']*1000:.2f}ms elapsed)"
+                    for step in timestamps["steps"]
+                ])
+                logger.debug(f"Detailed timing:\n{detailed_steps}")
+                
+                return result
+                
+        except Exception as e:
+            logger.error(f"Reranking failed: {str(e)}")
+            # 오류 발생 시 원본 결과 반환
+            return search_result
+    
+    def perform_flashrank_reranking(self, query: str, passages: List[Dict], top_k: int = None, search_result: Dict = None):
+        """FlashRank를 사용한 재랭킹 수행"""
+        try:
+            # 시작 시간 기록
+            start_time = time.time()
             
             # 대량 패시지 처리 최적화
             total_passages = len(passages)
@@ -631,78 +768,67 @@ class RerankerService:
                 # 오류 시 GPU 메모리 확인
                 log_gpu_memory("랭킹 오류 후")
                 
-                # 오류 발생 시점까지의 진행 상황 로깅
-                logger.debug(f"Progress before error: {json.dumps(timestamps['steps'])}")
+                if search_result:
+                    return search_result
+                else:
+                    return passages
+            
+            # Convert back to original format if needed
+            if search_result:
+                processed_results = []
+                for result in reranked_results:
+                    # 기본 필드만 포함 (중요한 데이터 유지)
+                    processed_result = {
+                        "passage_id": result["id"],
+                        "doc_id": result["meta"].get("doc_id", ""),
+                        "text": result["text"],
+                        "score": float(result["score"])
+                    }
+                    
+                    # 메타데이터에서 original_score만 보존
+                    if "original_score" in result["meta"]:
+                        metadata = {"original_score": result["meta"]["original_score"]}
+                        processed_result["metadata"] = metadata
+                    
+                    processed_results.append(processed_result)
                 
-                return search_result
-            
-            log_step("재랭킹 처리")
-            
-            # Convert back to original format
-            processed_results = []
-            for result in reranked_results:
-                # 기본 필드만 포함 (중요한 데이터 유지)
-                processed_result = {
-                    "passage_id": result["id"],
-                    "doc_id": result["meta"].get("doc_id", ""),
-                    "text": result["text"],
-                    "score": float(result["score"])
+                # Apply top_k if specified
+                if top_k is not None:
+                    processed_results = processed_results[:top_k]
+                
+                # 결과 준비 - 핵심 필드만 포함
+                result = {
+                    "query": query,
+                    "results": processed_results,
+                    "total": len(processed_results),
+                    "reranked": True,
+                    "reranker_type": "flashrank",
+                    "processing_time": time.time() - start_time,
+                    "cached": False
                 }
                 
-                # 메타데이터에서 original_score만 보존
-                if "original_score" in result["meta"]:
-                    metadata = {"original_score": result["meta"]["original_score"]}
-                    processed_result["metadata"] = metadata
+                # CUDA 최종 동기화
+                sync_cuda()
                 
-                processed_results.append(processed_result)
-            
-            log_step("결과 포맷 변환")
-            
-            # Apply top_k if specified
-            if top_k is not None:
-                processed_results = processed_results[:top_k]
-            
-            # 결과 준비 - 핵심 필드만 포함
-            result = {
-                "query": query,
-                "results": processed_results,
-                "total": len(processed_results),
-                "reranked": True,
-                "processing_time": time.time() - start_time,
-                "cached": False
-            }
-            
-            # CUDA 최종 동기화
-            sync_cuda()
-            
-            # 성능 로그 기록
-            elapsed_time = time.time() - start_time
-            logger.info(f"Reranking completed in {elapsed_time:.3f} seconds for {total_passages} passages")
-            logger.info(f"CUDA synchronization overhead: {sync_time:.3f} seconds")
-            logger.info(f"Effective throughput: {total_passages / (elapsed_time - sync_time):.1f} passages/second")
-            
-            # 최종 GPU 메모리 상태 로깅
-            log_gpu_memory("재랭킹 완료")
-            
-            # 최종 단계 로깅
-            log_step("최종 결과 준비")
-            
-            # 결과 캐싱
-            if len(_RERANK_CACHE) >= _CACHE_SIZE_LIMIT:
-                # 캐시가 가득 찬 경우 오래된 항목 제거
-                _RERANK_CACHE.pop(next(iter(_RERANK_CACHE)))
-            _RERANK_CACHE[cache_key] = result
-            
-            log_step("캐시 업데이트")
-            
-            # 최종 결과 및 성능 측정 로그
-            detailed_steps = "\n".join([
-                f"  - {step['name']}: {step['time']*1000:.2f}ms ({step['elapsed']*1000:.2f}ms elapsed)"
-                for step in timestamps["steps"]
-            ])
-            logger.debug(f"Detailed timing:\n{detailed_steps}")
-            
-            return result
+                # 성능 로그 기록
+                elapsed_time = time.time() - start_time
+                logger.info(f"Reranking completed in {elapsed_time:.3f} seconds for {total_passages} passages")
+                logger.info(f"CUDA synchronization overhead: {sync_time:.3f} seconds")
+                logger.info(f"Effective throughput: {total_passages / (elapsed_time - sync_time):.1f} passages/second")
+                
+                # 최종 GPU 메모리 상태 로깅
+                log_gpu_memory("재랭킹 완료")
+                
+                return result
+            else:
+                # 단순히 재랭크된 패시지 리스트 반환
+                if top_k is not None:
+                    reranked_results = reranked_results[:top_k]
+                return reranked_results
+                
         except Exception as e:
-            logger.error(f"Error in process_search_results: {str(e)}", exc_info=True)
-            return search_result 
+            logger.error(f"Error in perform_flashrank_reranking: {str(e)}", exc_info=True)
+            if search_result:
+                return search_result
+            else:
+                return passages 

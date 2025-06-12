@@ -42,8 +42,8 @@ RUN pip install --no-cache-dir uwsgi && \
 # 응용 프로그램 코드 복사
 COPY . /reranker/
 
-# 모델 다운로드 디렉토리 생성
-RUN mkdir -p /reranker/models
+# MRC 모델 디렉토리 생성
+RUN mkdir -p /reranker/models/mrc
 
 # 컨테이너 내부 포트 노출
 EXPOSE 5000
