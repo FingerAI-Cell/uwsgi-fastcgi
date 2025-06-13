@@ -197,6 +197,12 @@ def get_reranker_service():
 
 class DummyReranker:
     """테스트용 더미 리랭커"""
+    def __init__(self):
+        """초기화 메서드"""
+        self.hybrid_weight_mrc = 0.7  # 기본값으로 설정
+        self.mrc_enabled = False
+        self.mrc_reranker = None
+        
     def process_search_results(self, query: str, search_result: Dict, top_k: int = 5) -> Dict:
         """원본 검색 결과를 그대로 반환"""
         logger.warning("Using dummy reranker - returning original search results")
