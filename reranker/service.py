@@ -702,8 +702,35 @@ class RerankerService:
                     if self.ranker is not None:
                         logger.debug("FlashRank 재랭킹 시작")
                         flashrank_result = self.perform_flashrank_reranking(query, passages, top_k)
-                        flashrank_scores = [p.get("score", 0.0) for p in flashrank_result["results"]]
-                        logger.debug(f"FlashRank 재랭킹 완료, 결과 수: {len(flashrank_scores)}")
+                        
+                        # flashrank_result가 딕셔너리인지 리스트인지 확인
+                        if isinstance(flashrank_result, dict) and "results" in flashrank_result:
+                            # 딕셔너리 형태로 반환된 경우
+                            flashrank_scores = [p.get("score", 0.0) for p in flashrank_result["results"]]
+                            logger.debug(f"FlashRank 재랭킹 완료 (딕셔너리 형태), 결과 수: {len(flashrank_scores)}")
+                        elif isinstance(flashrank_result, list):
+                            # 리스트 형태로 반환된 경우
+                            flashrank_scores = [p.get("score", 0.0) for p in flashrank_result]
+                            # 딕셔너리 형태로 변환
+                            flashrank_result = {
+                                "query": query,
+                                "results": flashrank_result,
+                                "total": len(flashrank_result),
+                                "reranked": True,
+                                "reranker_type": "flashrank"
+                            }
+                            logger.debug(f"FlashRank 재랭킹 완료 (리스트 형태), 결과 수: {len(flashrank_scores)}")
+                        else:
+                            # 예상치 못한 형태인 경우
+                            logger.error(f"예상치 못한 FlashRank 결과 형식: {type(flashrank_result)}")
+                            # 안전하게 빈 리스트로 초기화
+                            flashrank_result = {
+                                "query": query,
+                                "results": passages,
+                                "total": len(passages),
+                                "reranked": False
+                            }
+                            flashrank_scores = [p.get("meta", {}).get("original_score", 0.5) for p in passages]
                     else:
                         logger.warning("FlashRank 재랭커가 초기화되지 않아 MRC만 사용합니다")
                         # FlashRank 결과가 없으면 원본 결과를 사용
@@ -776,6 +803,9 @@ class RerankerService:
                     "mrc_time": mrc_processing_time,
                     "mrc_weight": self.hybrid_weight_mrc
                 }
+                
+                # 로그에 하이브리드 재랭킹 결과 기록
+                logger.info(f"하이브리드 재랭킹 완료: 결과 수={len(reranked_passages)}, MRC 가중치={self.hybrid_weight_mrc}")
                 
                 return result
                 

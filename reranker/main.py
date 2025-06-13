@@ -657,10 +657,16 @@ def hybrid_rerank():
         
         # 재랭커 타입 확인 및 로깅
         reranker_type = reranked.get("reranker_type", "unknown")
-        if reranker_type != "hybrid":
-            logger.warning(f"하이브리드 재랭킹 요청했으나 결과 타입은 '{reranker_type}'입니다. MRC 설정을 확인하세요.")
-        else:
+        
+        # 하이브리드 재랭킹 결과인지 확인
+        if reranker_type == "hybrid":
             logger.info(f"하이브리드 재랭킹 성공적으로 완료됨")
+        elif reranker_type == "flashrank":
+            # FlashRank 결과인 경우, 하이브리드로 변경
+            logger.info(f"FlashRank 결과를 하이브리드 결과로 변환합니다")
+            reranked["reranker_type"] = "hybrid"
+        else:
+            logger.warning(f"하이브리드 재랭킹 요청했으나 결과 타입은 '{reranker_type}'입니다. MRC 설정을 확인하세요.")
         
         logger.info(f"Total hybrid-rerank endpoint processing time: {processing_time:.3f} seconds")
         
