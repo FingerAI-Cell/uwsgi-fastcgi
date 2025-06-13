@@ -237,6 +237,7 @@ class RerankerService:
                     os.makedirs(self.cache_dir, exist_ok=True)
                 
                 # GPU 사용 가능 여부 확인
+                import torch  # 이 부분을 추가하여 torch 모듈을 명시적으로 임포트
                 self.device = "cuda" if torch.cuda.is_available() else "cpu"
                 logger.info(f"Using device: {self.device}")
                 
@@ -629,9 +630,17 @@ class RerankerService:
                 timestamps["last_time"] = now
                 logger.debug(f"Step '{name}' took {step_time*1000:.2f}ms (elapsed: {elapsed*1000:.2f}ms)")
             
-            # 모델이 초기화되지 않은 경우 원본 결과를 그대로 반환
+            # 모델이 초기화되지 않은 경우 MRC만 사용하거나 원본 결과를 반환
             if self.ranker is None:
-                logger.warning("Reranker not initialized, returning original results")
+                logger.warning("FlashRank reranker not initialized")
+                
+                # MRC가 활성화되어 있고 초기화되었다면 MRC만 사용
+                if self.mrc_enabled and self.mrc_reranker:
+                    logger.info("Using MRC reranker only since FlashRank is not available")
+                    return self.mrc_reranker.process_search_results(query, search_result, top_k)
+                
+                # 그렇지 않으면 원본 결과 반환
+                logger.warning("No rerankers available, returning original results")
                 return search_result
                 
             # 결과가 없으면 빈 결과 반환
@@ -686,11 +695,26 @@ class RerankerService:
                     return self.perform_flashrank_reranking(query, passages, top_k, search_result)
                 
                 try:
-                    # FlashRank 재랭킹 수행
-                    logger.debug("FlashRank 재랭킹 시작")
-                    flashrank_result = self.perform_flashrank_reranking(query, passages, top_k)
-                    flashrank_scores = [p.get("score", 0.0) for p in flashrank_result["results"]]
-                    logger.debug(f"FlashRank 재랭킹 완료, 결과 수: {len(flashrank_scores)}")
+                    # FlashRank 재랭킹 수행 (FlashRank가 초기화되었을 경우만)
+                    flashrank_result = None
+                    flashrank_scores = []
+                    
+                    if self.ranker is not None:
+                        logger.debug("FlashRank 재랭킹 시작")
+                        flashrank_result = self.perform_flashrank_reranking(query, passages, top_k)
+                        flashrank_scores = [p.get("score", 0.0) for p in flashrank_result["results"]]
+                        logger.debug(f"FlashRank 재랭킹 완료, 결과 수: {len(flashrank_scores)}")
+                    else:
+                        logger.warning("FlashRank 재랭커가 초기화되지 않아 MRC만 사용합니다")
+                        # FlashRank 결과가 없으면 원본 결과를 사용
+                        flashrank_result = {
+                            "query": query,
+                            "results": passages,
+                            "total": len(passages),
+                            "reranked": False
+                        }
+                        # 원본 점수 또는 기본값 사용
+                        flashrank_scores = [p.get("meta", {}).get("original_score", 0.5) for p in passages]
                     
                     # 하이브리드 재랭킹 수행
                     logger.debug("MRC 하이브리드 재랭킹 시작")
@@ -717,8 +741,15 @@ class RerankerService:
                     
                 except Exception as e:
                     logger.error(f"하이브리드 재랭킹 중 오류 발생: {str(e)}", exc_info=True)
-                    logger.error("FlashRank 방식으로 대체 수행합니다.")
-                    return self.perform_flashrank_reranking(query, passages, top_k, search_result)
+                    
+                    # FlashRank가 초기화되었으면 FlashRank로 대체
+                    if self.ranker is not None:
+                        logger.error("FlashRank 방식으로 대체 수행합니다.")
+                        return self.perform_flashrank_reranking(query, passages, top_k, search_result)
+                    else:
+                        # 둘 다 사용할 수 없으면 원본 결과 반환
+                        logger.error("모든 재랭커를 사용할 수 없어 원본 결과를 반환합니다.")
+                        return search_result
                 
                 # 결과에 세부 점수 추가
                 for i, passage in enumerate(reranked_passages):
