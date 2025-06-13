@@ -24,15 +24,16 @@
 | 9 | [/rag/data/show](#9-ragdatashow) | 컬렉션 정보 조회 |
 | 10 | [/reranker/health](#10-rerankerhealth) | Reranker 상태 |
 | 11 | [/reranker/enhanced-search](#11-rerankerenhanced-search) | 통합 검색(재랭킹) |
-| 12 | [/reranker/rerank](#12-rerankerrerank) | 단건 재랭킹 |
-| 13 | [/reranker/batch_rerank](#13-rerankerbatch_rerank) | 배치 재랭킹 |
-| 14 | [/prompt/health](#14-prompthealth) | Prompt 상태 |
-| 15 | [/prompt/enhanced_search](#15-promptenhanced_search) | RAG 검색 결과를 Reranker로 재랭킹 (LLM 요약 없음) |
-| 16 | [/prompt/summarize](#16-promptsummarize) | 문서 요약 |
-| 17 | [/prompt/chat](#17-promptchat) | 챗봇 응답 |
-| 18 | [/prompt/models](#18-promptmodels) | 모델 목록 |
-| 19 | [/vision/health](#19-visionhealth) | Vision 상태 |
-| 20 | [/vision/analyze](#20-visionanalyze) | 이미지 분석 |
+| 12 | [/reranker/rerank](#12-rerankerrerank) | 단건 재랭킹 (FlashRank/MRC/하이브리드) |
+| 13 | [/reranker/batch_rerank](#13-rerankerbatch_rerank) | 배치 재랭킹 (FlashRank/MRC/하이브리드) |
+| 14 | [/reranker/hybrid-rerank](#14-rerankerhybrid-rerank) | 하이브리드 재랭킹 전용 엔드포인트 |
+| 15 | [/prompt/health](#15-prompthealth) | Prompt 상태 |
+| 16 | [/prompt/enhanced_search](#16-promptenhanced_search) | RAG 검색 결과를 Reranker로 재랭킹 (LLM 요약 없음) |
+| 17 | [/prompt/summarize](#17-promptsummarize) | 문서 요약 |
+| 18 | [/prompt/chat](#18-promptchat) | 챗봇 응답 |
+| 19 | [/prompt/models](#19-promptmodels) | 모델 목록 |
+| 20 | [/vision/health](#20-visionhealth) | Vision 상태 |
+| 21 | [/vision/analyze](#21-visionanalyze) | 이미지 분석 |
 
 > **모든 URL** 는 `http://localhost` 기준이며, 실제 배포 시 호스트/포트를 맞춰 수정하세요.
 
@@ -858,6 +859,7 @@ curl -G http://localhost/reranker/enhanced-search \
 | 이름 | 필수 | Type | 기본값 | 설명 |
 |------|------|------|------|------|
 | top_k | N | Integer | - | 반환할 최대 결과 수 |
+| reranker_type | N | String | "default" | 재랭킹 방식 ("default", "hybrid", "mrc", "flashrank") |
 
 *Body*:
 | 필드 | 필수 | Type | 설명 |
@@ -866,6 +868,7 @@ curl -G http://localhost/reranker/enhanced-search \
 | results | Y | Array | 재랭킹할 문서 배열 |
 | total | N | Integer | 전체 결과 수 |
 | reranked | N | Boolean | 이미 재랭킹 되었는지 여부 |
+| mrc_weight | N | Float | MRC 점수 가중치 (0.0~1.0, 하이브리드 모드에서만 사용) |
 
 각 결과 객체의 구조:
 | 필드 | 필수 | Type | 설명 |
@@ -888,34 +891,29 @@ metadata 객체의 구조:
 
 ### 요청 예시
 ```bash
-curl -X POST "http://localhost/reranker/rerank?top_k=3" \
+curl -X POST "http://localhost/reranker/rerank?top_k=3&reranker_type=hybrid" \
   -H "Content-Type: application/json" \
   -d '{
-    "query": "메타버스 최신 동향",
+    "query": "인공지능이란 무엇인가?",
     "results": [
       {
-        "passage_id": 0,
-        "doc_id": "20240315-메타버스-뉴스",
-        "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
-        "score": 0.95,
-        "metadata": {
-          "title": "메타버스 뉴스",
-          "author": "삼성전자",
-          "tags": { "date": "20240315" }
+        "id": "1",
+        "text": "인공지능(AI)은 인간의 학습, 추론, 지각, 문제 해결 능력 등을 컴퓨터 프로그램으로 구현한 기술이다.",
+        "meta": {
+          "doc_id": "doc001",
+          "original_score": 0.85
         }
       },
       {
-        "passage_id": 1,
-        "doc_id": "20240310-가상현실-동향",
-        "text": "가상현실 기술은 게임뿐 아니라 교육, 의료 등 다양한 분야로 확장되고 있다...",
-        "score": 0.85,
-        "metadata": {
-          "title": "가상현실 동향",
-          "author": "LG전자",
-          "tags": { "date": "20240310" }
+        "id": "2",
+        "text": "머신러닝은 인공지능의 한 분야로, 컴퓨터가 데이터로부터 학습하여 패턴을 찾아내는 방법론이다.",
+        "meta": {
+          "doc_id": "doc002",
+          "original_score": 0.75
         }
       }
-    ]
+    ],
+    "mrc_weight": 0.7
   }'
 ```
 
@@ -924,70 +922,84 @@ curl -X POST "http://localhost/reranker/rerank?top_k=3" \
 |------|------|------|
 | query | String | 요청한 검색 쿼리 |
 | results | Array | 재랭킹된 결과 배열 |
-| total | Integer/null | 결과 총 개수 (재랭킹 실패 시 null 가능) |
-| reranked | Boolean | 재랭킹 완료 여부 (true: 재랭킹 성공, false: 재랭킹 실패/미수행) |
+| total | Integer/null | 결과 총 개수 |
+| reranked | Boolean | 재랭킹 완료 여부 (true: 재랭킹 성공) |
+| reranker_type | String | "hybrid" (고정값) |
 | processing_time | Float | 처리 소요 시간(초) |
+| flashrank_time | Float | FlashRank 처리 시간(초) |
+| mrc_time | Float | MRC 처리 시간(초) |
+| mrc_weight | Float | 사용된 MRC 가중치 |
 
 각 결과 객체의 구조:
 | 필드 | Type | 설명 |
 |------|------|------|
-| passage_id | Any | 패시지 ID |
-| doc_id | String | 문서 ID |
+| id | String | 결과 ID |
 | text | String | 패시지 텍스트 내용 |
-| score | Float | 재랭킹 점수 (높을수록 관련성 높음) |
-| rerank_score | Float | 재랭킹 점수 (score와 동일) |
-| rerank_position | Integer | 재랭킹 후 위치 |
-| metadata | Object | 원본 메타데이터 |
+| meta | Object | 메타데이터 객체 |
+| score | Float | 최종 하이브리드 점수 |
+| mrc_answer | String | MRC 모델이 추출한 답변 텍스트 |
+| mrc_char_ids | Array | 답변의 시작/끝 문자 인덱스 [start, end] |
+| mrc_score | Float | MRC 모델 점수 |
+| flashrank_score | Float | FlashRank 점수 |
+| hybrid_score | Float | 하이브리드 최종 점수 (score와 동일) |
+| metadata | Object | 추가 메타데이터 (원본 점수 포함) |
 
 ### 성공 응답 예시
 ```json
 {
-  "query": "메타버스 최신 동향",
+  "query": "인공지능이란 무엇인가?",
   "results": [
     {
-      "passage_id": 1,
-      "doc_id": "20240310-가상현실-동향",
-      "text": "가상현실 기술은 게임뿐 아니라 교육, 의료 등 다양한 분야로 확장되고 있다...",
-      "score": 0.98,
-      "rerank_score": 0.98,
-      "rerank_position": 0,
+      "id": "1",
+      "text": "인공지능(AI)은 인간의 학습, 추론, 지각, 문제 해결 능력 등을 컴퓨터 프로그램으로 구현한 기술이다.",
+      "meta": {
+        "doc_id": "doc001",
+        "original_score": 0.85
+      },
+      "score": 0.9650318562984466,
+      "mrc_answer": "인간의 학습, 추론, 지각, 문제 해결 능력 등을 컴퓨터 프로그램으로 구현한 기술",
+      "mrc_char_ids": [10, 55],
+      "mrc_score": 0.9698712229728699,
+      "flashrank_score": 0.9537400007247925,
+      "hybrid_score": 0.9650318562984466,
       "metadata": {
-        "title": "가상현실 동향",
-        "author": "LG전자",
-        "tags": { "date": "20240310" }
+        "flashrank_score": 0.9537400007247925,
+        "mrc_score": 0.9698712229728699
       }
     },
     {
-      "passage_id": 0,
-      "doc_id": "20240315-메타버스-뉴스",
-      "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
-      "score": 0.92,
-      "rerank_score": 0.92,
-      "rerank_position": 1,
+      "id": "2",
+      "text": "머신러닝은 인공지능의 한 분야로, 컴퓨터가 데이터로부터 학습하여 패턴을 찾아내는 방법론이다.",
+      "meta": {
+        "doc_id": "doc002",
+        "original_score": 0.75
+      },
+      "score": 0.3672780990600586,
+      "mrc_answer": "컴퓨터가 데이터로부터 학습하여 패턴을 찾아내는 방법론",
+      "mrc_char_ids": [19, 48],
+      "mrc_score": 0.3194928467273712,
+      "flashrank_score": 0.4787770211696625,
+      "hybrid_score": 0.3672780990600586,
       "metadata": {
-        "title": "메타버스 뉴스",
-        "author": "삼성전자",
-        "tags": { "date": "20240315" }
+        "flashrank_score": 0.4787770211696625,
+        "mrc_score": 0.3194928467273712
       }
     }
   ],
   "total": 2,
   "reranked": true,
-  "processing_time": 0.153
+  "reranker_type": "hybrid",
+  "processing_time": 1.0239102840423584,
+  "flashrank_time": 0.0,
+  "mrc_time": 0.3780794143676758,
+  "mrc_weight": 0.7
 }
 ```
 
-### 실패 응답 예시 (요청 본문 누락)
+### 실패 응답 예시
 ```json
 {
   "error": "No JSON data provided"
-}
-```
-
-### 실패 응답 예시 (잘못된 형식)
-```json
-{
-  "error": "Invalid input format: 1 validation error for SearchResultModel\nquery\n  field required (type=value_error.missing)"
 }
 ```
 
@@ -1007,6 +1019,7 @@ curl -X POST "http://localhost/reranker/rerank?top_k=3" \
 | 이름 | 필수 | Type | 기본값 | 설명 |
 |------|------|------|------|------|
 | top_k | N | Integer | - | 각 쿼리별 반환할 최대 결과 수 |
+| reranker_type | N | String | "default" | 재랭킹 방식 ("default", "hybrid", "mrc", "flashrank") |
 
 *Body*:
 요청 본문은 `SearchResultModel` 객체의 배열입니다. 각 객체는 다음 구조를 가집니다:
@@ -1017,6 +1030,7 @@ curl -X POST "http://localhost/reranker/rerank?top_k=3" \
 | results | Y | Array | 재랭킹할 문서 배열 |
 | total | N | Integer | 전체 결과 수 |
 | reranked | N | Boolean | 이미 재랭킹 되었는지 여부 |
+| mrc_weight | N | Float | MRC 점수 가중치 (0.0~1.0, 하이브리드 모드에서만 사용) |
 
 각 결과 객체의 구조:
 | 필드 | 필수 | Type | 설명 |
@@ -1039,7 +1053,7 @@ metadata 객체의 구조:
 
 ### 요청 예시
 ```bash
-curl -X POST "http://localhost/reranker/batch_rerank?top_k=5" \
+curl -X POST "http://localhost/reranker/batch_rerank?top_k=5&reranker_type=hybrid" \
   -H "Content-Type: application/json" \
   -d '[
     {
@@ -1049,25 +1063,22 @@ curl -X POST "http://localhost/reranker/batch_rerank?top_k=5" \
           "passage_id": 0,
           "doc_id": "20240315-메타버스-뉴스",
           "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
-          "score": 0.95,
-          "metadata": {
-            "title": "메타버스 뉴스",
-            "author": "삼성전자",
-            "tags": { "date": "20240315" }
+          "meta": {
+            "doc_id": "doc001",
+            "original_score": 0.95
           }
         },
         {
           "passage_id": 1,
-          "doc_id": "20240310-메타버스-기술",
-          "text": "메타버스 기술은 AR, VR 등의 발전과 함께 급속도로 성장하고 있다...",
-          "score": 0.85,
-          "metadata": {
-            "title": "메타버스 기술",
-            "author": "LG전자",
-            "tags": { "date": "20240310" }
+          "doc_id": "20240310-가상현실-동향",
+          "text": "가상현실 기술은 게임뿐 아니라 교육, 의료 등 다양한 분야로 확장되고 있다...",
+          "meta": {
+            "doc_id": "doc002",
+            "original_score": 0.85
           }
         }
-      ]
+      ],
+      "mrc_weight": 0.7
     },
     {
       "query": "가상현실 시장 전망",
@@ -1076,14 +1087,13 @@ curl -X POST "http://localhost/reranker/batch_rerank?top_k=5" \
           "passage_id": 0,
           "doc_id": "20240312-VR-뉴스",
           "text": "가상현실 시장은 2024년 급격한 성장이 예상된다...",
-          "score": 0.92,
-          "metadata": {
-            "title": "VR 시장 전망",
-            "author": "현대전자",
-            "tags": { "date": "20240312" }
+          "meta": {
+            "doc_id": "doc003",
+            "original_score": 0.92
           }
         }
-      ]
+      ],
+      "mrc_weight": 0.7
     }
   ]'
 ```
@@ -1095,9 +1105,24 @@ curl -X POST "http://localhost/reranker/batch_rerank?top_k=5" \
 |------|------|------|
 | query | String | 요청한 검색 쿼리 |
 | results | Array | 재랭킹된 결과 배열 |
-| total | Integer/null | 결과 총 개수 (재랭킹 실패 시 null 가능) |
+| total | Integer/null | 결과 총 개수 |
 | reranked | Boolean | 재랭킹 완료 여부 (true: 재랭킹 성공, false: 재랭킹 실패/미수행) |
+| reranker_type | String | 사용된 재랭킹 방식 ("default", "hybrid", "mrc", "flashrank") |
 | processing_time | Float | 처리 소요 시간(초) |
+
+각 결과 객체의 구조:
+| 필드 | Type | 설명 |
+|------|------|------|
+| id | String | 결과 ID |
+| text | String | 패시지 텍스트 내용 |
+| meta | Object | 메타데이터 객체 |
+| score | Float | 최종 재랭킹 점수 (높을수록 관련성 높음) |
+| mrc_answer | String | MRC 모델이 추출한 답변 텍스트 (MRC/하이브리드 모드에서만) |
+| mrc_char_ids | Array | 답변의 시작/끝 문자 인덱스 [start, end] (MRC/하이브리드 모드에서만) |
+| mrc_score | Float | MRC 모델 점수 (MRC/하이브리드 모드에서만) |
+| flashrank_score | Float | FlashRank 점수 (FlashRank/하이브리드 모드에서만) |
+| hybrid_score | Float | 하이브리드 최종 점수 (하이브리드 모드에서만) |
+| metadata | Object | 추가 메타데이터 (원본 점수 포함) |
 
 ### 성공 응답 예시
 ```json
@@ -1106,56 +1131,79 @@ curl -X POST "http://localhost/reranker/batch_rerank?top_k=5" \
     "query": "메타버스 최신 동향",
     "results": [
       {
-        "passage_id": 0,
-        "doc_id": "20240315-메타버스-뉴스",
+        "id": "1",
         "text": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
-        "score": 0.97,
-        "rerank_score": 0.97,
-        "rerank_position": 0,
+        "meta": {
+          "doc_id": "doc001",
+          "original_score": 0.95
+        },
+        "score": 0.9650318562984466,
+        "mrc_answer": "메타버스는 비대면 시대 뜨거운 화두로 떠올랐다...",
+        "mrc_char_ids": [10, 55],
+        "mrc_score": 0.9698712229728699,
+        "flashrank_score": 0.9537400007247925,
+        "hybrid_score": 0.9650318562984466,
         "metadata": {
-          "title": "메타버스 뉴스",
-          "author": "삼성전자",
-          "tags": { "date": "20240315" }
+          "flashrank_score": 0.9537400007247925,
+          "mrc_score": 0.9698712229728699
         }
       },
       {
-        "passage_id": 1,
-        "doc_id": "20240310-메타버스-기술",
-        "text": "메타버스 기술은 AR, VR 등의 발전과 함께 급속도로 성장하고 있다...",
-        "score": 0.89,
-        "rerank_score": 0.89,
-        "rerank_position": 1,
+        "id": "2",
+        "text": "가상현실 기술은 게임뿐 아니라 교육, 의료 등 다양한 분야로 확장되고 있다...",
+        "meta": {
+          "doc_id": "doc002",
+          "original_score": 0.85
+        },
+        "score": 0.85,
+        "mrc_answer": "가상현실 기술은 게임뿐 아니라 교육, 의료 등 다양한 분야로 확장되고 있다...",
+        "mrc_char_ids": [19, 48],
+        "mrc_score": 0.3194928467273712,
+        "flashrank_score": 0.4787770211696625,
+        "hybrid_score": 0.3672780990600586,
         "metadata": {
-          "title": "메타버스 기술",
-          "author": "LG전자",
-          "tags": { "date": "20240310" }
+          "flashrank_score": 0.4787770211696625,
+          "mrc_score": 0.3194928467273712
         }
       }
     ],
     "total": 2,
     "reranked": true,
-    "processing_time": 0.145
+    "reranker_type": "hybrid",
+    "processing_time": 1.0239102840423584,
+    "flashrank_time": 0.0,
+    "mrc_time": 0.3780794143676758,
+    "mrc_weight": 0.7
   },
   {
     "query": "가상현실 시장 전망",
     "results": [
       {
-        "passage_id": 0,
-        "doc_id": "20240312-VR-뉴스",
+        "id": "0",
         "text": "가상현실 시장은 2024년 급격한 성장이 예상된다...",
+        "meta": {
+          "doc_id": "doc003",
+          "original_score": 0.92
+        },
         "score": 0.92,
-        "rerank_score": 0.92,
-        "rerank_position": 0,
+        "mrc_answer": "가상현실 시장은 2024년 급격한 성장이 예상된다...",
+        "mrc_char_ids": [10, 55],
+        "mrc_score": 0.92,
+        "flashrank_score": 0.92,
+        "hybrid_score": 0.92,
         "metadata": {
-          "title": "VR 시장 전망",
-          "author": "현대전자",
-          "tags": { "date": "20240312" }
+          "flashrank_score": 0.92,
+          "mrc_score": 0.92
         }
       }
     ],
     "total": 1,
     "reranked": true,
-    "processing_time": 0.098
+    "reranker_type": "hybrid",
+    "processing_time": 0.098,
+    "flashrank_time": 0.0,
+    "mrc_time": 0.3780794143676758,
+    "mrc_weight": 0.7
   }
 ]
 ```
@@ -1169,7 +1217,160 @@ curl -X POST "http://localhost/reranker/batch_rerank?top_k=5" \
 
 ---
 
-## 14. /prompt/health
+## 14. /reranker/hybrid-rerank
+### 기본 정보
+| 항목 | 내용 |
+|------|------|
+| Method | **POST** |
+| URL | `/reranker/hybrid-rerank` |
+| Content‑Type | `application/json` |
+| 설명 | MRC와 FlashRank를 결합한 하이브리드 재랭킹 전용 엔드포인트 |
+
+### 요청 파라미터
+*Query*:
+| 이름 | 필수 | Type | 기본값 | 설명 |
+|------|------|------|------|------|
+| top_k | N | Integer | - | 반환할 최대 결과 수 |
+
+*Body*:
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| query | Y | String | 검색 쿼리 |
+| results | Y | Array | 재랭킹할 문서 배열 |
+| total | N | Integer | 전체 결과 수 |
+| mrc_weight | N | Float | MRC 점수 가중치 (0.0~1.0, 기본값: 0.7) |
+
+각 결과 객체의 구조:
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| id | Y | String | 결과 ID |
+| text | Y | String | 패시지 텍스트 내용 |
+| meta | N | Object | 메타데이터 객체 |
+| score | N | Float | 원본 점수 |
+
+meta 객체의 구조:
+| 필드 | 필수 | Type | 설명 |
+|------|------|------|------|
+| doc_id | N | String | 문서 ID |
+| original_score | N | Float | 원본 점수 |
+
+### 요청 예시
+```bash
+curl -X POST "http://localhost/reranker/hybrid-rerank?top_k=3" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "인공지능이란 무엇인가?",
+    "results": [
+      {
+        "id": "1",
+        "text": "인공지능(AI)은 인간의 학습, 추론, 지각, 문제 해결 능력 등을 컴퓨터 프로그램으로 구현한 기술이다.",
+        "meta": {
+          "doc_id": "doc001",
+          "original_score": 0.85
+        }
+      },
+      {
+        "id": "2",
+        "text": "머신러닝은 인공지능의 한 분야로, 컴퓨터가 데이터로부터 학습하여 패턴을 찾아내는 방법론이다.",
+        "meta": {
+          "doc_id": "doc002",
+          "original_score": 0.75
+        }
+      }
+    ],
+    "mrc_weight": 0.7
+  }'
+```
+
+### 응답 파라미터
+| 필드 | Type | 설명 |
+|------|------|------|
+| query | String | 요청한 검색 쿼리 |
+| results | Array | 재랭킹된 결과 배열 |
+| total | Integer/null | 결과 총 개수 |
+| reranked | Boolean | 재랭킹 완료 여부 (true: 재랭킹 성공) |
+| reranker_type | String | "hybrid" (고정값) |
+| processing_time | Float | 처리 소요 시간(초) |
+| flashrank_time | Float | FlashRank 처리 시간(초) |
+| mrc_time | Float | MRC 처리 시간(초) |
+| mrc_weight | Float | 사용된 MRC 가중치 |
+
+각 결과 객체의 구조:
+| 필드 | Type | 설명 |
+|------|------|------|
+| id | String | 결과 ID |
+| text | String | 패시지 텍스트 내용 |
+| meta | Object | 메타데이터 객체 |
+| score | Float | 최종 하이브리드 점수 |
+| mrc_answer | String | MRC 모델이 추출한 답변 텍스트 |
+| mrc_char_ids | Array | 답변의 시작/끝 문자 인덱스 [start, end] |
+| mrc_score | Float | MRC 모델 점수 |
+| flashrank_score | Float | FlashRank 점수 |
+| hybrid_score | Float | 하이브리드 최종 점수 (score와 동일) |
+| metadata | Object | 추가 메타데이터 (원본 점수 포함) |
+
+### 성공 응답 예시
+```json
+{
+  "query": "인공지능이란 무엇인가?",
+  "results": [
+    {
+      "id": "1",
+      "text": "인공지능(AI)은 인간의 학습, 추론, 지각, 문제 해결 능력 등을 컴퓨터 프로그램으로 구현한 기술이다.",
+      "meta": {
+        "doc_id": "doc001",
+        "original_score": 0.85
+      },
+      "score": 0.9650318562984466,
+      "mrc_answer": "인간의 학습, 추론, 지각, 문제 해결 능력 등을 컴퓨터 프로그램으로 구현한 기술",
+      "mrc_char_ids": [10, 55],
+      "mrc_score": 0.9698712229728699,
+      "flashrank_score": 0.9537400007247925,
+      "hybrid_score": 0.9650318562984466,
+      "metadata": {
+        "flashrank_score": 0.9537400007247925,
+        "mrc_score": 0.9698712229728699
+      }
+    },
+    {
+      "id": "2",
+      "text": "머신러닝은 인공지능의 한 분야로, 컴퓨터가 데이터로부터 학습하여 패턴을 찾아내는 방법론이다.",
+      "meta": {
+        "doc_id": "doc002",
+        "original_score": 0.75
+      },
+      "score": 0.3672780990600586,
+      "mrc_answer": "컴퓨터가 데이터로부터 학습하여 패턴을 찾아내는 방법론",
+      "mrc_char_ids": [19, 48],
+      "mrc_score": 0.3194928467273712,
+      "flashrank_score": 0.4787770211696625,
+      "hybrid_score": 0.3672780990600586,
+      "metadata": {
+        "flashrank_score": 0.4787770211696625,
+        "mrc_score": 0.3194928467273712
+      }
+    }
+  ],
+  "total": 2,
+  "reranked": true,
+  "reranker_type": "hybrid",
+  "processing_time": 1.0239102840423584,
+  "flashrank_time": 0.0,
+  "mrc_time": 0.3780794143676758,
+  "mrc_weight": 0.7
+}
+```
+
+### 실패 응답 예시
+```json
+{
+  "error": "No JSON data provided"
+}
+```
+
+---
+
+## 15. /prompt/health
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -1196,7 +1397,7 @@ curl -X GET http://localhost/prompt/health
 
 ---
 
-## 15. /prompt/enhanced_search
+## 16. /prompt/enhanced_search
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -1325,7 +1526,7 @@ curl -X POST http://localhost/prompt/enhanced_search \
 
 ---
 
-## 16. /prompt/summarize
+## 17. /prompt/summarize
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -1386,7 +1587,7 @@ curl -X POST http://localhost/prompt/summarize \
 
 ---
 
-## 17. /prompt/chat
+## 18. /prompt/chat
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -1439,7 +1640,7 @@ curl -X POST http://localhost/prompt/chat \
 
 ---
 
-## 18. /prompt/models
+## 19. /prompt/models
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -1471,7 +1672,7 @@ curl -X GET http://localhost/prompt/models
 
 ---
 
-## 19. /vision/health
+## 20. /vision/health
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
@@ -1505,7 +1706,7 @@ curl -X GET http://localhost/vision/health
 
 ---
 
-## 20. /vision/analyze
+## 21. /vision/analyze
 ### 기본 정보
 | 항목 | 내용 |
 |------|------|
