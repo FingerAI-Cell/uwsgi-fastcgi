@@ -444,9 +444,20 @@ def enhanced_search():
             if "mrc_score" in metadata:
                 result_item["mrc_score"] = metadata["mrc_score"]
                 
-            # MRC 답변 정보 추가 (있는 경우)
-            if "mrc_answer" in item:
-                result_item["mrc_answer"] = item["mrc_answer"]
+            # MRC 관련 필드 추가 (있는 경우)
+            for mrc_field in ["mrc_answer", "mrc_char_ids"]:
+                if mrc_field in item:
+                    result_item[mrc_field] = item[mrc_field]
+            
+            # 원본 doc_id와 passage_id 보존
+            if "doc_id" in item and item["doc_id"]:
+                result_item["doc_id"] = item["doc_id"]
+            if "passage_id" in item and item["passage_id"]:
+                result_item["passage_id"] = item["passage_id"]
+            
+            # 메타데이터 전체를 별도 필드로 보존
+            if metadata:
+                result_item["metadata"] = metadata
             
             processed_results.append(result_item)
         
