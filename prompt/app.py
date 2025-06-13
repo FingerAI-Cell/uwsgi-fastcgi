@@ -453,6 +453,12 @@ def enhanced_search():
             result_item["rerank_score"] = rerank_score
             result_item["rerank_position"] = idx
             
+            # id 필드 처리 - 원본 id만 보존하고 새 id는 생성하지 않음
+            if "id" in result_item:
+                result_item["original_id"] = result_item["id"]
+                # id 필드 제거 (rerank_position으로 대체)
+                del result_item["id"]
+            
             # 4. 메타데이터 처리 (원본 + 재랭킹 메타데이터 병합)
             metadata = {}
             
@@ -489,6 +495,25 @@ def enhanced_search():
                     result_item["flashrank_score"] = result_item["metadata"]["flashrank_score"]
                 if "mrc_score" in result_item["metadata"]:
                     result_item["mrc_score"] = result_item["metadata"]["mrc_score"]
+            
+            # 8. meta 필드가 있으면 metadata로 통합
+            if "meta" in result_item:
+                if "metadata" not in result_item:
+                    result_item["metadata"] = {}
+                # meta 필드의 내용을 metadata로 복사
+                for meta_key, meta_value in result_item["meta"].items():
+                    result_item["metadata"][meta_key] = meta_value
+                # meta 필드 삭제 (선택사항)
+                # del result_item["meta"]
+            
+            # 9. 원본 검색 결과의 주요 필드들을 최상위 레벨로 복사
+            for important_field in ["title", "author", "domain", "tags", "info", "raw_doc_id"]:
+                # 원본 결과에 필드가 있으면 복사
+                if doc_id and doc_id in original_results_by_id and important_field in original_results_by_id[doc_id]:
+                    result_item[important_field] = original_results_by_id[doc_id][important_field]
+                # metadata에 필드가 있으면 복사
+                elif "metadata" in result_item and important_field in result_item["metadata"]:
+                    result_item[important_field] = result_item["metadata"][important_field]
             
             processed_results.append(result_item)
         
