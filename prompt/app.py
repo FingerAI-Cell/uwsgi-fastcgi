@@ -438,20 +438,33 @@ def enhanced_search():
             doc_id = item.get("doc_id")
             if doc_id and doc_id in original_results_by_id:
                 original_item = original_results_by_id[doc_id]
-                # 원본 검색 결과의 모든 필드 복사
+                # 원본 검색 결과의 모든 필드 복사 (metadata와 점수 관련 필드 제외)
                 for key, value in original_item.items():
-                    if key != "metadata":  # metadata는 별도 처리
+                    if key not in ["metadata", "score", "flashrank_score", "mrc_score", "hybrid_score"]:
                         result_item[key] = value
-                logger.debug(f"원본 검색 결과에서 {len(original_item)} 필드 복사: doc_id={doc_id}")
+                logger.debug(f"원본 검색 결과에서 필드 복사: doc_id={doc_id}")
             
-            # 2. 재랭킹 결과의 필드 복사 (원본 덮어쓰기)
+            # 2. 재랭킹 결과의 필드 복사 (원본 덮어쓰기, 메타데이터와 점수 관련 필드 제외)
             for key, value in item.items():
-                if key not in ["metadata"]:  # metadata는 별도 처리
+                if key not in ["metadata", "meta", "score", "flashrank_score", "mrc_score", "hybrid_score"]:
                     result_item[key] = value
             
-            # 3. 재랭킹 점수 정보 설정
+            # 3. 점수 정보 설정 - 모든 점수를 최상위 레벨에 배치
+            # 하이브리드 점수를 기본 점수로 사용
+            result_item["score"] = item.get("score", 0)
             result_item["rerank_score"] = rerank_score
             result_item["rerank_position"] = idx
+            
+            # 원본 점수 정보 (있는 경우)
+            if doc_id and doc_id in original_results_by_id and "score" in original_results_by_id[doc_id]:
+                result_item["original_score"] = original_results_by_id[doc_id]["score"]
+            
+            # 하이브리드 재랭킹 점수 정보 (있는 경우)
+            if "metadata" in item:
+                if "flashrank_score" in item["metadata"]:
+                    result_item["flashrank_score"] = item["metadata"]["flashrank_score"]
+                if "mrc_score" in item["metadata"]:
+                    result_item["mrc_score"] = item["metadata"]["mrc_score"]
             
             # id 필드 처리 - 원본 id만 보존하고 새 id는 생성하지 않음
             if "id" in result_item:
@@ -459,61 +472,49 @@ def enhanced_search():
                 # id 필드 제거 (rerank_position으로 대체)
                 del result_item["id"]
             
-            # 4. 메타데이터 처리 (원본 + 재랭킹 메타데이터 병합)
+            # 4. 메타데이터 구성 - 원본 검색 결과의 모든 메타데이터 포함
             metadata = {}
             
-            # 원본 검색 결과의 메타데이터 복사 (있는 경우)
-            if doc_id and doc_id in original_results_by_id and "metadata" in original_results_by_id[doc_id]:
-                original_metadata = original_results_by_id[doc_id]["metadata"]
-                metadata.update(original_metadata)
+            # 원본 검색 결과의 메타데이터 필드들
+            metadata_fields = [
+                "title", "author", "domain", "raw_doc_id", "passage_id", 
+                "tags", "info", "created_at", "modified_at", "link", "og_image", "og_author"
+            ]
             
-            # 재랭킹 결과의 메타데이터 복사 (있는 경우)
-            if "metadata" in item:
-                rerank_metadata = item["metadata"]
-                metadata.update(rerank_metadata)
+            # 원본 검색 결과에서 메타데이터 수집
+            if doc_id and doc_id in original_results_by_id:
+                original_item = original_results_by_id[doc_id]
+                
+                # 기본 메타데이터 필드 복사
+                for field in metadata_fields:
+                    if field in original_item:
+                        metadata[field] = original_item[field]
+                
+                # tags와 info는 객체일 수 있으므로 별도 처리
+                for nested_field in ["tags", "info"]:
+                    if nested_field in original_item and isinstance(original_item[nested_field], dict):
+                        metadata[nested_field] = original_item[nested_field]
+                
+                # 원본 메타데이터가 있으면 병합
+                if "metadata" in original_item:
+                    for k, v in original_item["metadata"].items():
+                        if k not in ["flashrank_score", "mrc_score", "original_score"]:  # 점수 정보 제외
+                            metadata[k] = v
+            
+            # 최소한의 필수 메타데이터 보장
+            metadata["doc_id"] = doc_id
             
             # 메타데이터 설정
-            if metadata:
-                result_item["metadata"] = metadata
+            result_item["metadata"] = metadata
             
-            # 5. 주요 필드가 없는 경우 메타데이터에서 복구
-            for field in ["title", "author", "doc_id", "passage_id", "domain", "raw_doc_id"]:
-                # 필드가 없거나 None인 경우
-                if field not in result_item or result_item[field] is None:
-                    # 메타데이터에서 가져오기
-                    if "metadata" in result_item and field in result_item["metadata"]:
-                        result_item[field] = result_item["metadata"][field]
+            # 5. meta 필드 제거 (metadata로 통합)
+            if "meta" in result_item:
+                del result_item["meta"]
             
             # 6. MRC 관련 필드 추가 (있는 경우)
             for mrc_field in ["mrc_answer", "mrc_char_ids"]:
                 if mrc_field in item:
                     result_item[mrc_field] = item[mrc_field]
-            
-            # 7. 하이브리드 점수 정보 추가
-            if "metadata" in result_item:
-                if "flashrank_score" in result_item["metadata"]:
-                    result_item["flashrank_score"] = result_item["metadata"]["flashrank_score"]
-                if "mrc_score" in result_item["metadata"]:
-                    result_item["mrc_score"] = result_item["metadata"]["mrc_score"]
-            
-            # 8. meta 필드가 있으면 metadata로 통합
-            if "meta" in result_item:
-                if "metadata" not in result_item:
-                    result_item["metadata"] = {}
-                # meta 필드의 내용을 metadata로 복사
-                for meta_key, meta_value in result_item["meta"].items():
-                    result_item["metadata"][meta_key] = meta_value
-                # meta 필드 삭제 (선택사항)
-                # del result_item["meta"]
-            
-            # 9. 원본 검색 결과의 주요 필드들을 최상위 레벨로 복사
-            for important_field in ["title", "author", "domain", "tags", "info", "raw_doc_id"]:
-                # 원본 결과에 필드가 있으면 복사
-                if doc_id and doc_id in original_results_by_id and important_field in original_results_by_id[doc_id]:
-                    result_item[important_field] = original_results_by_id[doc_id][important_field]
-                # metadata에 필드가 있으면 복사
-                elif "metadata" in result_item and important_field in result_item["metadata"]:
-                    result_item[important_field] = result_item["metadata"][important_field]
             
             processed_results.append(result_item)
         
