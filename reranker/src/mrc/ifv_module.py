@@ -116,7 +116,7 @@ def get_model(config_args, model_path):
     # load model
     model = IFVModule(config_args)
     state_dict = torch.load(model_path)['state_dict']
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)  # strict=False로 설정하여 불일치 키 무시
     model.to(config_args.device)
     model.eval()
     model.to(dtype=torch.float16)  # fp16 precision
