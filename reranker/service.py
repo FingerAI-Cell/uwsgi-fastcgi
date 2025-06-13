@@ -33,10 +33,10 @@ logger = logging.getLogger(__name__)
 
 # 파일 로그 추가 (볼륨에 저장)
 try:
-    file_handler = logging.FileHandler('/reranker/reranker_detail.log')
+    file_handler = logging.FileHandler('/var/log/reranker/reranker_detail.log')
     file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     logger.addHandler(file_handler)
-    logger.info("상세 로그 파일 설정 완료: /reranker/reranker_detail.log")
+    logger.info("상세 로그 파일 설정 완료: /var/log/reranker/reranker_detail.log")
 except Exception as e:
     logger.warning(f"로그 파일 설정 실패: {str(e)}")
 
@@ -47,24 +47,29 @@ try:
         from src.mrc import MRCReranker
         MRC_AVAILABLE = True
         logger.info("MRC 모듈 가져오기 성공 (from src.mrc)")
-    except ImportError:
+    except ImportError as e:
+        logger.error(f"MRC 모듈 가져오기 실패 (from src.mrc): {str(e)}")
         try:
             import sys
             sys.path.append('/reranker')
+            logger.debug(f"Python 경로에 '/reranker' 추가: {sys.path}")
             from src.mrc import MRCReranker
             MRC_AVAILABLE = True
             logger.info("MRC 모듈 가져오기 성공 (from /reranker/src.mrc)")
-        except ImportError:
+        except ImportError as e:
+            logger.error(f"MRC 모듈 가져오기 실패 (from /reranker/src.mrc): {str(e)}")
             try:
                 from reranker.src.mrc import MRCReranker
                 MRC_AVAILABLE = True
                 logger.info("MRC 모듈 가져오기 성공 (from reranker.src.mrc)")
-            except ImportError:
+            except ImportError as e:
+                logger.error(f"MRC 모듈 가져오기 실패 (from reranker.src.mrc): {str(e)}")
                 try:
                     from .src.mrc import MRCReranker
                     MRC_AVAILABLE = True
                     logger.info("MRC 모듈 가져오기 성공 (from .src.mrc)")
-                except ImportError:
+                except ImportError as e:
+                    logger.error(f"MRC 모듈 가져오기 실패 (from .src.mrc): {str(e)}")
                     MRC_AVAILABLE = False
                     logger.warning("MRC 모듈을 가져올 수 없습니다")
 except Exception as e:
@@ -330,6 +335,15 @@ class RerankerService:
                     logger.debug(f"MRC 설정 파일 경로: {mrc_config_path}, 존재 여부: {os.path.exists(mrc_config_path)}")
                     logger.debug(f"MRC 모델 파일 경로: {mrc_model_path}, 존재 여부: {os.path.exists(mrc_model_path)}")
                     
+                    # 파일 내용 로깅 (디버깅용)
+                    try:
+                        if os.path.exists(mrc_config_path):
+                            with open(mrc_config_path, 'r') as f:
+                                config_content = f.read()
+                            logger.debug(f"MRC 설정 파일 내용: {config_content[:500]}...")
+                    except Exception as e:
+                        logger.warning(f"MRC 설정 파일 읽기 실패: {str(e)}")
+                    
                     # MRC 모델 디렉토리 확인 및 생성
                     if mrc_config_path and mrc_model_path:
                         os.makedirs(os.path.dirname(mrc_config_path), exist_ok=True)
@@ -399,6 +413,42 @@ class RerankerService:
                     try:
                         logger.debug(f"최종 MRC 설정 파일 경로: {mrc_config_path}")
                         logger.debug(f"최종 MRC 모델 파일 경로: {mrc_model_path}")
+                        
+                        # NumPy 버전 체크 (디버깅용)
+                        try:
+                            import numpy
+                            logger.info(f"NumPy 버전: {numpy.__version__}")
+                        except Exception as e:
+                            logger.warning(f"NumPy 버전 확인 실패: {str(e)}")
+                            
+                        # PyTorch 버전 체크 (디버깅용)
+                        try:
+                            import torch
+                            logger.info(f"PyTorch 버전: {torch.__version__}")
+                        except Exception as e:
+                            logger.warning(f"PyTorch 버전 확인 실패: {str(e)}")
+                            
+                        # TorchText 버전 체크 (디버깅용)
+                        try:
+                            import torchtext
+                            logger.info(f"TorchText 버전: {torchtext.__version__}")
+                        except Exception as e:
+                            logger.warning(f"TorchText 버전 확인 실패: {str(e)}")
+                            
+                        # PyTorch Lightning 버전 체크 (디버깅용)
+                        try:
+                            import pytorch_lightning
+                            logger.info(f"PyTorch Lightning 버전: {pytorch_lightning.__version__}")
+                        except Exception as e:
+                            logger.warning(f"PyTorch Lightning 버전 확인 실패: {str(e)}")
+                            
+                        # Munch 버전 체크 (디버깅용)
+                        try:
+                            import munch
+                            logger.info(f"Munch 버전: {munch.__version__ if hasattr(munch, '__version__') else '알 수 없음'}")
+                        except Exception as e:
+                            logger.warning(f"Munch 버전 확인 실패: {str(e)}")
+                        
                         self.mrc_reranker = MRCReranker.get_instance(mrc_config_path, mrc_model_path)
                         logger.info("MRC 재랭커 초기화 완료")
                         logger.debug(f"MRC 재랭커 객체: {self.mrc_reranker}")
