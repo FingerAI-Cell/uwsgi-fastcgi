@@ -77,11 +77,33 @@ def test_pytorch_import():
         import torch
         logger.info(f"PyTorch 버전: {torch.__version__}")
         
-        import torchtext
-        logger.info(f"TorchText 버전: {torchtext.__version__}")
+        try:
+            import torchtext
+            logger.info(f"TorchText 버전: {torchtext.__version__}")
+        except ImportError as e:
+            logger.error(f"TorchText 임포트 실패: {e}")
+            logger.info("TorchText 설치 시도...")
+            try:
+                import subprocess
+                subprocess.check_call(["pip", "install", "torchtext==0.15.1"])
+                import torchtext
+                logger.info(f"TorchText 설치 및 임포트 성공: {torchtext.__version__}")
+            except Exception as install_e:
+                logger.error(f"TorchText 설치 실패: {install_e}")
         
-        import pytorch_lightning
-        logger.info(f"PyTorch Lightning 버전: {pytorch_lightning.__version__}")
+        try:
+            import pytorch_lightning
+            logger.info(f"PyTorch Lightning 버전: {pytorch_lightning.__version__}")
+        except ImportError as e:
+            logger.error(f"PyTorch Lightning 임포트 실패: {e}")
+            logger.info("PyTorch Lightning 설치 시도...")
+            try:
+                import subprocess
+                subprocess.check_call(["pip", "install", "pytorch-lightning==1.9.5"])
+                import pytorch_lightning
+                logger.info(f"PyTorch Lightning 설치 및 임포트 성공: {pytorch_lightning.__version__}")
+            except Exception as install_e:
+                logger.error(f"PyTorch Lightning 설치 실패: {install_e}")
         
         return True
     except ImportError as e:

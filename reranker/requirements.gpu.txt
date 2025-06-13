@@ -41,7 +41,8 @@ python-dotenv==0.19.0
 uwsgi==2.0.20
 
 # MRC 모듈 의존성은 Dockerfile에서 직접 설치
-# pytorch-lightning==2.1.0
-# torchtext==0.16.0
+# NVIDIA 이미지(PyTorch 2.1.0a0)와 호환되는 버전:
+# pytorch-lightning==1.9.5
+# torchtext==0.15.1
 # munch>=2.5.0
 # gdown>=4.4.0

@@ -31,8 +31,8 @@ RUN python -c "import torch; print(f'현재 PyTorch 버전: {torch.__version__}'
 
 # 호환성 문제 해결을 위해 호환되는 버전의 torchtext와 pytorch-lightning 설치
 # 이미 설치된 PyTorch를 사용하도록 --no-deps 옵션 추가
-RUN pip install --no-cache-dir --no-deps torchtext==0.16.0
-RUN pip install --no-cache-dir pytorch-lightning==2.1.0 --no-deps
+RUN pip install --no-cache-dir --no-deps torchtext==0.15.1
+RUN pip install --no-cache-dir pytorch-lightning==1.9.5 --no-deps
 
 # 필수 의존성 명시적 설치
 RUN pip install --no-cache-dir munch>=2.5.0 gdown>=4.4.0
