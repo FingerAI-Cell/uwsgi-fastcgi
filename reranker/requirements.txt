@@ -16,9 +16,9 @@ huggingface_hub==0.22.2     # 업데이트
 flask-compress==1.13       # 응답 압축
 ujson==5.8.0              # 빠른 JSON 파싱
 
-# PyTorch (CPU version)
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.2.2                # 업데이트
+# PyTorch는 베이스 이미지에서 제공되므로 제외
+# --extra-index-url https://download.pytorch.org/whl/cpu
+# torch==2.2.2                # 업데이트
 
 # Additional dependencies
 python-multipart==0.0.6
@@ -40,7 +40,7 @@ sentence-transformers==2.7.0  # 업데이트
 python-dotenv==0.19.0
 uwsgi==2.0.20
 
-# MRC 모듈 의존성
-pytorch-lightning==1.7.2
-munch>=2.5.0
-gdown>=4.4.0
+# MRC 모듈 의존성은 Dockerfile에서 직접 설치하므로 제외
+# pytorch-lightning==1.7.2
+# munch>=2.5.0
+# gdown>=4.4.0

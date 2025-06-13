@@ -37,9 +37,9 @@ RUN pip install --no-cache-dir pytorch-lightning==2.1.0 --no-deps
 # 필수 의존성 명시적 설치
 RUN pip install --no-cache-dir munch>=2.5.0 gdown>=4.4.0
 
-# 나머지 요구사항 설치
+# 나머지 요구사항 설치 (의존성 충돌 방지를 위해 --no-deps 옵션 사용)
 COPY requirements.txt /reranker/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --no-deps -r requirements.txt
 
 # flashrank 기본 패키지 설치
 RUN pip install flashrank
