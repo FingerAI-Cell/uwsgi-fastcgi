@@ -11,6 +11,7 @@ tokenizers==0.15.2          # 업데이트
 numpy==1.26.4               # 업데이트
 huggingface_hub==0.22.2     # 업데이트
 #flashrank==0.2.10           # 기존 유지
+torchtext==0.14.0           # torchtext 추가
 
 # 성능 최적화 패키지
 flask-compress==1.13       # 응답 압축
@@ -40,7 +41,7 @@ sentence-transformers==2.7.0  # 업데이트
 python-dotenv==0.19.0
 uwsgi==2.0.20
 
-# MRC 모듈 의존성은 Dockerfile에서 직접 설치하므로 제외
-# pytorch-lightning==1.7.2
-# munch>=2.5.0
-# gdown>=4.4.0
+# MRC 모듈 의존성
+pytorch-lightning==1.7.2
+munch>=2.5.0
+gdown>=4.4.0

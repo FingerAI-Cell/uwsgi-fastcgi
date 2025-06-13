@@ -29,19 +29,6 @@ RUN mkdir -p /var/log/reranker
 # 현재 PyTorch 버전 확인
 RUN python -c "import torch; print(f'현재 PyTorch 버전: {torch.__version__}')"
 
-# 기존 torchtext 제거 (있는 경우)
-RUN pip uninstall -y torchtext || true
-RUN find /usr/local -name "*torchtext*" -exec rm -rf {} \; 2>/dev/null || true
-
-# 호환되는 버전의 torchtext 소스에서 직접 빌드 설치
-RUN git clone https://github.com/pytorch/text.git && \
-    cd text && \
-    git checkout v0.14.0 && \
-    pip install -e .
-
-# MRC 모듈에 필요한 의존성 설치
-RUN pip install --no-cache-dir munch>=2.5.0 gdown>=4.4.0 pytorch-lightning==1.7.2
-
 # 나머지 요구사항 설치 (의존성 충돌 방지를 위해 --no-deps 옵션 사용)
 COPY requirements.txt /reranker/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
