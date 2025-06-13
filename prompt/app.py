@@ -290,13 +290,14 @@ def enhanced_search():
         top_m = data.get("top_m", summaryAgent.search_top)  # RAG 검색 결과 수
         top_n = data.get("top_n", summaryAgent.rerank_top)  # Reranker 결과 수
         threshold = data.get("threshold", summaryAgent.rerank_threshold)  # Reranker 점수 임계치
+        mrc_weight = data.get("mrc_weight", 0.7)  # MRC 가중치 (기본값 0.7)
         
         # 파라미터 유효성 검사
         if top_m < top_n:
             logger.warning(f"파라미터 오류: top_m({top_m}) < top_n({top_n}), top_m으로 조정합니다")
             top_n = top_m
             
-        logger.info(f"검색 파라미터: query='{query}', top_m={top_m}, top_n={top_n}, threshold={threshold}")
+        logger.info(f"검색 파라미터: query='{query}', top_m={top_m}, top_n={top_n}, threshold={threshold}, mrc_weight={mrc_weight}")
             
         # 1. RAG 서비스 호출하여 문서 검색
         logger.info(f"RAG 서비스 호출 준비: endpoint={RAG_ENDPOINT}/search")
@@ -347,17 +348,45 @@ def enhanced_search():
                 "results": []
             })
         
-        # 2. Reranker 서비스 호출
-        logger.info(f"Reranker 서비스 호출 준비: endpoint={RERANKER_ENDPOINT}/rerank")
+        # 검색 결과에 메타데이터 보존 확인 및 처리
+        for idx, item in enumerate(search_results.get("search_result", [])):
+            # 메타데이터 필드 생성 (없는 경우)
+            if "metadata" not in item:
+                item["metadata"] = {}
+                
+            # 메타데이터에 주요 필드 복사
+            for field in ["title", "author", "tags", "info", "domain", "doc_id"]:
+                if field in item and item[field] is not None:
+                    item["metadata"][field] = item[field]
+            
+            # 원본 점수 저장
+            if "score" in item:
+                item["metadata"]["original_score"] = item["score"]
+                
+            # 인덱스 저장
+            item["position"] = idx
+            
+            # 간단한 로깅
+            if idx < 3:  # 처음 3개 항목만 로깅
+                logger.info(f"검색 결과 {idx}번 메타데이터: {json.dumps(item.get('metadata', {}), ensure_ascii=False)}")
+        
+        # 2. Reranker 서비스 호출 - 하이브리드 재랭킹 사용
+        logger.info(f"Reranker 서비스 호출 준비: endpoint={RERANKER_ENDPOINT}/hybrid-rerank")
         rerank_data = {
             "query": query,
             "results": search_results.get("search_result", [])
         }
         
-        logger.info(f"Reranker 요청: top_k={top_n}")
+        # 하이브리드 재랭킹 파라미터 설정
+        rerank_params = {
+            "top_k": top_n,
+            "mrc_weight": mrc_weight
+        }
+        
+        logger.info(f"Reranker 요청: params={json.dumps(rerank_params, ensure_ascii=False)}")
         rerank_response = requests.post(
-            f"{RERANKER_ENDPOINT}/rerank",
-            params={"top_k": top_n},
+            f"{RERANKER_ENDPOINT}/hybrid-rerank",
+            params=rerank_params,
             json=rerank_data
         )
         
@@ -373,127 +402,71 @@ def enhanced_search():
         # Reranker 결과 샘플 확인
         if reranked_results.get("results") and len(reranked_results.get("results")) > 0:
             sample_result = reranked_results.get("results")[0]
-            logger.info(f"Reranker 결과 샘플: {json.dumps({k: v for k, v in sample_result.items()}, ensure_ascii=False)}")
+            logger.info(f"Reranker 결과 샘플: {json.dumps({k: v for k, v in sample_result.items() if k != 'text'}, ensure_ascii=False)}")
             if "metadata" in sample_result:
                 logger.info(f"metadata 구조: {json.dumps(sample_result['metadata'], ensure_ascii=False)}")
             else:
                 logger.warning("metadata 필드가 Reranker 결과에 없습니다")
         
-        # 결과 형식 변환 - metadata를 최상위로 이동 및 domain 추가
+        # 3. 결과 처리 및 응답 포맷팅
         processed_results = []
-        search_result_by_id = {}
-        
-        # RAG 결과에서 domain 정보 추출
-        if "domain_results" in search_results:
-            for domain, domain_data in search_results.get("domain_results", {}).items():
-                for item in domain_data.get("results", []):
-                    doc_id = item.get("doc_id")
-                    logger.info(f"ID 매핑: doc_id={doc_id}, domain={domain}")
-                    search_result_by_id[doc_id] = {
-                        "domain": domain,
-                        **item
-                    }
-        # 도메인 결과가 없는 경우 search_result에서 도메인 정보 추출 시도
-        else:
-            logger.warning("domain_results가 없어 search_result에서 직접 추출을 시도합니다")
-            for item in search_results.get("search_result", []):
-                doc_id = item.get("doc_id")
-                # item에 domain 필드가 있는지 확인
-                if "domain" in item:
-                    search_result_by_id[doc_id] = item
-                else:
-                    # 기본 도메인 "unknown"으로 설정
-                    search_result_by_id[doc_id] = {
-                        "domain": "unknown",
-                        **item
-                    }
-                    logger.info(f"도메인 정보 없음, unknown으로 설정: doc_id={doc_id}")
-        
-        logger.info(f"ID 매핑 생성 완료: {len(search_result_by_id)} 항목")
         
         # Reranker 결과 처리
         for idx, item in enumerate(reranked_results.get("results", [])):
-            doc_id = item.get("doc_id", "")
+            # 점수 확인
             rerank_score = item.get("score", 0)
             
             # 임계치 필터링
             if rerank_score < threshold:
-                logger.info(f"임계치({threshold}) 미만 결과 필터링: doc_id={doc_id}, score={rerank_score}")
+                logger.info(f"임계치({threshold}) 미만 결과 필터링: doc_id={item.get('doc_id', 'unknown')}, score={rerank_score}")
                 continue
-                
-            logger.info(f"결과 처리 중: doc_id={doc_id}, idx={idx}, score={rerank_score}")
             
-            # 원래 RAG 점수와 메타데이터 추출
-            original_score = None
-            original_doc = None
-            if doc_id in search_result_by_id:
-                original_doc = search_result_by_id[doc_id]
-                original_score = original_doc.get("score")
-                logger.info(f"원본 RAG 점수: {original_score}, Reranker 점수: {rerank_score}")
-            
-            # 기본 필드 유지
+            # 기본 필드 설정
             result_item = {
                 "passage_id": item.get("passage_id"),
-                "doc_id": doc_id,
-                "text": item.get("text"),
-                "score": original_score or rerank_score,  # 원본 RAG 점수 사용
-                "rerank_score": rerank_score,  # Reranker 점수 사용
+                "doc_id": item.get("doc_id", ""),
+                "text": item.get("text", ""),
+                "score": rerank_score,  # 하이브리드 점수를 기본 점수로 사용
                 "rerank_position": idx  # 배열 인덱스를 rerank_position으로 사용
             }
             
-            # RAG 결과의 메타데이터를 우선적으로 사용
-            if original_doc:
-                # RAG 결과에서 직접 가져온 메타데이터 사용
-                result_item["title"] = original_doc.get("title")
-                result_item["author"] = original_doc.get("author")
-                result_item["tags"] = original_doc.get("tags")
-                result_item["info"] = original_doc.get("info")
+            # 메타데이터 처리
+            metadata = item.get("metadata", {})
+            
+            # 메타데이터에서 주요 필드 추출
+            for field in ["title", "author", "tags", "info", "domain"]:
+                if field in metadata:
+                    result_item[field] = metadata[field]
+            
+            # 하이브리드 재랭킹 점수 정보 추가
+            if "flashrank_score" in metadata:
+                result_item["flashrank_score"] = metadata["flashrank_score"]
+            if "mrc_score" in metadata:
+                result_item["mrc_score"] = metadata["mrc_score"]
                 
-                # RAG 결과에 도메인 정보가 있으면 사용
-                if "domain" in original_doc:
-                    result_item["domain"] = original_doc["domain"]
-                    logger.info(f"RAG 결과에서 도메인 정보 추가: {result_item['domain']}")
-                else:
-                    result_item["domain"] = "unknown"
-                    logger.warning(f"RAG 결과에 도메인 정보 없음: doc_id={doc_id}")
-                
-                # 메타데이터 로깅
-                logger.info(f"RAG 메타데이터 사용: title={result_item.get('title')}, author={result_item.get('author')}")
-            else:
-                # RAG 결과가 없는 경우 Reranker의 metadata 사용
-                logger.warning(f"RAG 결과에서 doc_id={doc_id}를 찾을 수 없음. Reranker metadata 사용 시도")
-                
-                # Reranker의 metadata 필드 사용
-                metadata = item.get("metadata", {})
-                if metadata:
-                    result_item["title"] = metadata.get("title")
-                    result_item["author"] = metadata.get("author")
-                    result_item["tags"] = metadata.get("tags")
-                    result_item["info"] = metadata.get("info")
-                    logger.info(f"Reranker 메타데이터 사용: title={result_item.get('title')}, author={result_item.get('author')}")
-                else:
-                    logger.warning(f"Reranker에도 metadata 없음: doc_id={doc_id}")
-                
-                # 기본 도메인 unknown 설정
-                result_item["domain"] = "unknown"
+            # MRC 답변 정보 추가 (있는 경우)
+            if "mrc_answer" in item:
+                result_item["mrc_answer"] = item["mrc_answer"]
             
             processed_results.append(result_item)
         
-        # 3. 최종 결과 반환
+        # 4. 최종 결과 반환
         response = {
             "query": query,
             "top_m": top_m,
             "top_n": top_n,
             "threshold": threshold,
+            "mrc_weight": reranked_results.get("mrc_weight", mrc_weight),  # 실제 사용된 MRC 가중치
             "search_count": len(search_results.get("search_result", [])),
             "reranked_count": len(reranked_results.get("results", [])),
             "filtered_count": len(processed_results),
             "results": processed_results,
-            "processing_time": reranked_results.get("processing_time", 0)
+            "processing_time": reranked_results.get("processing_time", 0),
+            "reranker_type": reranked_results.get("reranker_type", "hybrid")
         }
         
         logger.info(f"향상된 검색 완료: 검색={response['search_count']}, 재랭킹={response['reranked_count']}, 필터링 후={response['filtered_count']}")
-        logger.info(f"결과 첫 항목 샘플: {json.dumps(processed_results[0] if processed_results else {}, ensure_ascii=False)}")
+        logger.info(f"결과 첫 항목 샘플: {json.dumps({k: v for k, v in processed_results[0].items() if k != 'text'} if processed_results else {}, ensure_ascii=False)}")
         return jsonify(response)
         
     except Exception as e:
