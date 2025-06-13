@@ -42,42 +42,34 @@ except Exception as e:
 
 # MRC 모듈 임포트
 try:
-    from src.mrc import MRCReranker
-    MRC_AVAILABLE = True
-    logger.info("MRC 모듈 가져오기 성공")
-except ImportError as e:
-    MRC_AVAILABLE = False
-    logger.error(f"MRC 모듈을 가져올 수 없습니다: {str(e)}", exc_info=True)
-    
-    # 의존성 확인
+    # 여러 경로 시도
     try:
-        import torch
-        logger.info(f"PyTorch 버전: {torch.__version__}")
-        
-        import torchtext
-        logger.info(f"TorchText 버전: {torchtext.__version__}")
-        
-        import pytorch_lightning
-        logger.info(f"PyTorch Lightning 버전: {pytorch_lightning.__version__}")
-        
-        import munch
-        logger.info(f"Munch 버전: {munch.__version__ if hasattr(munch, '__version__') else '확인 불가'}")
-        
-        # MRC 모듈 파일 존재 여부 확인
-        mrc_path = os.path.join(os.path.dirname(__file__), 'src', 'mrc', '__init__.py')
-        if os.path.exists(mrc_path):
-            logger.info(f"MRC 모듈 파일 존재함: {mrc_path}")
-            
-            # 파일 내용 확인
+        from src.mrc import MRCReranker
+        MRC_AVAILABLE = True
+        logger.info("MRC 모듈 가져오기 성공 (from src.mrc)")
+    except ImportError:
+        try:
+            import sys
+            sys.path.append('/reranker')
+            from src.mrc import MRCReranker
+            MRC_AVAILABLE = True
+            logger.info("MRC 모듈 가져오기 성공 (from /reranker/src.mrc)")
+        except ImportError:
             try:
-                with open(mrc_path, 'r') as f:
-                    logger.info(f"MRC __init__.py 내용: {f.read()}")
-            except Exception as read_e:
-                logger.error(f"파일 읽기 실패: {str(read_e)}")
-        else:
-            logger.error(f"MRC 모듈 파일이 존재하지 않음: {mrc_path}")
-    except Exception as check_e:
-        logger.error(f"의존성 확인 중 오류 발생: {str(check_e)}", exc_info=True)
+                from reranker.src.mrc import MRCReranker
+                MRC_AVAILABLE = True
+                logger.info("MRC 모듈 가져오기 성공 (from reranker.src.mrc)")
+            except ImportError:
+                try:
+                    from .src.mrc import MRCReranker
+                    MRC_AVAILABLE = True
+                    logger.info("MRC 모듈 가져오기 성공 (from .src.mrc)")
+                except ImportError:
+                    MRC_AVAILABLE = False
+                    logger.warning("MRC 모듈을 가져올 수 없습니다")
+except Exception as e:
+    MRC_AVAILABLE = False
+    logger.error(f"MRC 모듈 임포트 중 오류 발생: {str(e)}", exc_info=True)
 
 # 메모리 캐시 - 자주 사용되는 재랭킹 요청 결과 캐싱
 _RERANK_CACHE = {}
